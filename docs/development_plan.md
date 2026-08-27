@@ -7,6 +7,7 @@
 - [x] Token Bucket 全局/出口级限速基础和受控 Worker Pool 基础。
 - [x] 授权出口池登记与最多一次备用出口切换基础。
 - [x] 本地只读 Collection API（快照、任务状态、最近证据）。
+- [x] PostgreSQL 初版 schema（生产迁移目标，不影响当前 SQLite POC）。
 - [x] 清单缺失时使用开发样例，真实清单保持本地忽略。
 - [x] 回归测试 29 项通过。
 

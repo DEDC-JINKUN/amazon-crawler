@@ -19,6 +19,7 @@ amazon-scraping/
 ├── tests/                # 单元、回归和页面 fixture
 ├── config/               # Windows 与示例配置
 ├── docs/                 # 需求、技术设计、数据契约、流水线和验收说明
+├── schema/               # PostgreSQL 生产库结构
 ├── *.bat                 # Windows 启动和安装脚本
 ├── data/                 # 本地导出（不提交真实数据）
 └── state/                # SQLite 状态（不提交真实数据）
