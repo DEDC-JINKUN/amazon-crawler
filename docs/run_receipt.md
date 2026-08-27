@@ -13,3 +13,5 @@
 ```
 
 如果已有代理商后台前后用量和实际费用，可追加 `--proxy-usage-before-bytes`、`--proxy-usage-after-bytes`、`--proxy-charge-cny` 和 `--allocated-fixed-cost-cny`。回执中的 `verification.ok` 只表示结构验收通过；成本是否达标要看 `cost`，不能用 `ok=true` 代替。
+
+`run_scheduled_windows.bat` 会在每次定时任务后自动写入 `data/amazon_us/run_receipt.json`。回执生成失败不会覆盖已有验收文件；脚本仍会先返回 worker 或验收的原始错误码。
