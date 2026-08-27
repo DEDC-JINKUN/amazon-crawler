@@ -6,6 +6,8 @@
 
 默认命令只做离线初始化或 CSV 物化，不访问 Amazon。live 模式必须显式指定 `--live`，先使用 HTTP 获取公开 HTML；只有页面字段不足时才懒加载 Selenium Firefox 的独立临时 profile、默认 headless、可配置 `geckodriver_path`。不会读取 Chrome Profile、自动登录、Cookie、Token 或其他凭据。当前 POC 不启用代理池；媒体只保存公开 URL 和 DOM 元数据，不下载媒体文件。
 
+生产采集配置应填写 `[context]` 的 `expected_country=US`、`expected_currency=USD` 和业务 ZIP。页面出现明显非美国币种或配送地区时，质量门禁会拒绝写入快照并记录 `context_mismatch`。
+
 HTTP 请求支持全局和出口级 Token Bucket 限速：`global_requests_per_second`、`egress_requests_per_second` 和 `rate_burst` 默认为 0/0/1，保持 POC 不主动等待；生产接入授权出口后再设置。限速模块不负责代理轮换，出口切换仍需经过批准、隔离和人工审计。
 
 遇到 HTTP `403`、或页面标题/正文包含明确阻断短语 `robot check`、`enter the characters`、`captcha`、`sorry we just need to make sure you're not a robot`、`automated access`、`access denied`、`too many requests`，立即写入 `blocked` 和 `block_reason`，停止本次流水线，不重试、不切换 IP、不代理规避、不伪装身份。HTTP `429` 是可恢复的限流：保留当前 product/review 游标，写 evidence 和 `http_429`，本次 run 停止；下一小时使用同一会话类型/透明身份重试同一 action，不代理、不换 IP。普通文本如 `robot vacuum` 不会阻断。

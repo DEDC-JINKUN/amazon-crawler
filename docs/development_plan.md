@@ -13,6 +13,7 @@
 - [x] 本机 PostgreSQL schema 执行和 SQLite→PostgreSQL 回放。
 - [x] 记录真实探针的区域上下文限制（HKD/香港配送）；美国 ZIP 固定仍是正式上线前门禁。
 - [x] PostgreSQL 后端 Collection API 端到端只读验证。
+- [x] 美国上下文质量门禁（国家/币种不匹配不写入快照）。
 - [x] 本机 PostgreSQL 交互式 schema 初始化脚本（实际执行待输入密码）。
 - [x] 清单缺失时使用开发样例，真实清单保持本地忽略。
 - [x] 回归测试 43 项通过。

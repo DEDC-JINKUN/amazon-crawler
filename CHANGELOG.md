@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.8 - 2026-08-27
+
+- 增加美国国家/币种上下文质量门禁，避免 HKD/非美国配送结果写入美国快照。
+- 增加 `context_mismatch` evidence 和任务失败记录及回归测试。
+
 ## 0.1.7 - 2026-08-27
 
 - 修复 PostgreSQL `datetime/date` 返回值导致 Collection API JSON 序列化失败的问题。

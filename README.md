@@ -2,7 +2,7 @@
 
 面向 Amazon.com 自有 ASIN 和竞品 ASIN 的统一网页采集 MVP。
 
-当前版本：`0.1.7`（单机 MVP，完成 PostgreSQL 回放和 Collection API 端到端验证）。
+当前版本：`0.1.8`（单机 MVP，增加美国区域/币种上下文质量门禁）。
 
 ## 当前开发边界
 

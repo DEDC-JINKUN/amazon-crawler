@@ -27,3 +27,8 @@ output_dir = "data/amazon_us"
 marketplace = "US"
 stop_on_block = true
 save_media = "url_and_metadata_only"
+
+[context]
+expected_country = "US"
+expected_currency = "USD"
+postal_code = ""

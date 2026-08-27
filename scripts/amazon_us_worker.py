@@ -26,6 +26,13 @@ from typing import Any, Iterable
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 ROOT = Path(__file__).resolve().parents[1]
+
+try:
+    from context_guard import validate_context
+except ModuleNotFoundError:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from context_guard import validate_context
+
 DEFAULT_CONFIG = ROOT / "config" / "amazon_us.example.toml"
 DEFAULT_MANIFEST = ROOT / "amazon_us_asin_manifest.csv"
 DEFAULT_DB = ROOT / "state" / "amazon_us.sqlite3"
@@ -69,6 +76,7 @@ DEFAULTS: dict[str, Any] = {
     "egress_requests_per_second": 0.0,
     "rate_burst": 1,
     "egress_id": "direct",
+    "context": {},
 }
 PRODUCT_HEADERS = [
     "asin", "marketplace", "canonical_url", "availability", "title", "brand", "rating",
@@ -780,6 +788,7 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     config.update({key: value for key, value in worker.items() if key in config})
     config.update({key: value for key, value in collection.items() if key in config})
     config["paths"] = raw.get("paths", {})
+    config["context"] = raw.get("context", {})
     agent_name = str(config["agent_name"]).strip()
     user_agent = str(config.get("user_agent") or "").strip()
     if user_agent and f"Agent/{agent_name}" not in user_agent:
@@ -895,6 +904,9 @@ def _write_product_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.R
                 _set_rate_limited(conn, "US", asin, "product")
             else:
                 _set_status(conn, "US", asin, "blocked", reason=block_reason, block_reason=block_reason, last_error=block_reason)
+            return
+        if error_code and error_code.startswith("context_mismatch"):
+            _record_failure(conn, "US", asin, "context_mismatch", error_code)
             return
         parsed_asin = (data.get("asin") or "").upper()
         canonical = data.get("canonical_url") or ""
@@ -1293,8 +1305,13 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                 browser_reason = classify_block(browser_status, browser_body)
                 if not browser_reason:
                     body, response_status, data, reason = browser_body, browser_status, parse_product_html(browser_body, row["url"]), browser_reason
+        context_errors = validate_context(data, config.get("context")) if not reason else []
+        if context_errors:
+            error_code = "context_mismatch:" + ",".join(context_errors)
+        else:
+            error_code = None
         source_type = getattr(adapter, "source_type", "selenium_dom")
-        _write_product_action(conn, run_id, row, data, body, response_status, reason, source_type=source_type, raw_html_dir=raw_html_dir)
+        _write_product_action(conn, run_id, row, data, body, response_status, reason, error_code=error_code, source_type=source_type, raw_html_dir=raw_html_dir)
         if refresh_job_id and row["asin"] == refresh_asin:
             _finish_refresh_request(conn, refresh_job_id, "queued" if reason == "http_429" else "failed" if reason else "completed")
         blocked = blocked or bool(reason)
