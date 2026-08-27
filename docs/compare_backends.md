@@ -22,6 +22,6 @@ try {
 
 - `item_state` 的状态汇总；
 - `refresh_request` 的状态汇总；
-- 按 ASIN 排序抽取的最多 100 个样本：任务状态、来源、商品是否存在、媒体数和 A+ 内容模块数。
+- 按 ASIN 排序抽取的最多 100 个样本：任务状态、来源、商品是否存在、媒体数、A+ 内容模块数和最新 evidence 的 `transfer_bytes`。
 
 输出中的 `ok: true` 才表示对账通过；`sample_mismatches` 会列出需要排查的 ASIN。它不比较实时采集时间，也不覆盖任何业务数据。

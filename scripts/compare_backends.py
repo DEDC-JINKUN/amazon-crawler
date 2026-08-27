@@ -45,12 +45,14 @@ def _product_signature(value: dict[str, Any] | None) -> dict[str, Any]:
     if value is None:
         return {"present": False}
     task = value.get("task") or {}
+    evidence = value.get("evidence") or {}
     return {
         "present": True,
         "task_status": task.get("status"),
         "source": value.get("source"),
         "media": (value.get("counts") or {}).get("media", 0),
         "content_modules": (value.get("counts") or {}).get("content_modules", 0),
+        "transfer_bytes": evidence.get("transfer_bytes"),
     }
 
 

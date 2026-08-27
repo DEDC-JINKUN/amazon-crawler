@@ -43,3 +43,15 @@ def test_compare_repositories_reports_mismatch_without_writing():
     assert result["ok"] is False
     assert result["task_status_match"] is False
     assert result["sample_mismatches"][0]["asin"] == "A1"
+
+
+def test_compare_repositories_detects_transfer_evidence_loss():
+    left = {"A1": {"task": {"status": "succeeded"}, "source": "http_html", "evidence": {"transfer_bytes": 1200}, "counts": {}}}
+    right = {"A1": {"task": {"status": "succeeded"}, "source": "http_html", "evidence": {"transfer_bytes": None}, "counts": {}}}
+    result = compare_backends.compare_repositories(
+        FakeRepository({"succeeded": 1}, left),
+        FakeRepository({"succeeded": 1}, right),
+        ["A1"],
+    )
+    assert result["ok"] is False
+    assert result["sample_mismatches"][0]["sqlite"]["transfer_bytes"] == 1200
