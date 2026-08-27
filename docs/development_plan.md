@@ -12,10 +12,11 @@
 - [x] PostgreSQL repository 和可选驱动入口（未连接真实数据库）。
 - [ ] 本机 PostgreSQL 容器建库、schema 执行和 SQLite→PostgreSQL 回放。
 - [x] 清单缺失时使用开发样例，真实清单保持本地忽略。
-- [x] 回归测试 36 项通过。
+- [x] 回归测试 43 项通过。
 - [x] 采集覆盖率、来源和阻断原因报告。
 - [x] SQLite→PostgreSQL 回放工具（真实数据库连接待环境就绪）。
 - [x] 按需刷新队列消费：采集批处理优先处理 queued 请求，完成后更新结果。
+- [x] Collection API 批量查询（单次最多 100 个 ASIN）。
 
 ## MVP 顺序
 

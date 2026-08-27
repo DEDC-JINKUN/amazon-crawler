@@ -90,6 +90,39 @@ class CollectionHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
         path = urlsplit(self.path).path
+        if path == "/v1/asin/batch":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length > 65536:
+                    raise ValueError("request body too large")
+                raw = self.rfile.read(length) if length else b"{}"
+                body = json.loads(raw.decode("utf-8"))
+                if not isinstance(body, dict) or not isinstance(body.get("asins"), list):
+                    raise ValueError("asins must be a JSON array")
+                marketplace = str(body.get("marketplace") or "US").upper()
+                if marketplace != "US":
+                    raise ValueError("only US marketplace is supported")
+                asins = []
+                for value in body["asins"]:
+                    asin = str(value).upper()
+                    if not re.fullmatch(r"[A-Z0-9]{10}", asin):
+                        raise ValueError(f"invalid ASIN: {asin}")
+                    if asin not in asins:
+                        asins.append(asin)
+                if not asins or len(asins) > 100:
+                    raise ValueError("asins must contain 1 to 100 unique values")
+                items = []
+                for asin in asins:
+                    item = self.server.repository.load_product(marketplace, asin)
+                    items.append(item if item is not None else {"asin": asin, "marketplace": marketplace, "found": False})
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request", "detail": str(exc)})
+                return
+            except (OSError, RuntimeError, sqlite3.Error) as exc:
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable", "detail": str(exc)})
+                return
+            self._send_json(HTTPStatus.OK, {"schema_version": API_SCHEMA_VERSION, "marketplace": marketplace, "items": items})
+            return
         match = re.fullmatch(r"/v1/asin/([A-Za-z]{2})/([A-Za-z0-9]{10})/refresh", path)
         if not match:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "route_not_found"})

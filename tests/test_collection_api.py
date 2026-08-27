@@ -176,6 +176,42 @@ class CollectionApiTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=2)
 
+    def test_batch_endpoint_deduplicates_and_marks_missing_asins(self):
+        api = load("collection_api")
+
+        class Repository:
+            def load_product(self, marketplace, asin):
+                return {"asin": asin, "marketplace": marketplace, "found": True} if asin == "B00RCPDCQU" else None
+
+            def load_job_status(self):
+                return {"counts": {}}
+
+            def load_evidence(self, marketplace, asin, limit=20):
+                return []
+
+            def request_refresh(self, marketplace, asin, requested_by, reason):
+                return {"job_id": "test", "status": "queued"}
+
+        server = api.CollectionServer(("127.0.0.1", 0), repository=Repository())
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/v1/asin/batch",
+                data=b'{"marketplace":"US","asins":["B00RCPDCQU","B00RCPDCQU","B000000001"]}',
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=2) as response:
+                payload = json.loads(response.read())
+                self.assertEqual(response.status, 200)
+            self.assertEqual([item["asin"] for item in payload["items"]], ["B00RCPDCQU", "B000000001"])
+            self.assertFalse(payload["items"][1]["found"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -54,6 +54,17 @@ Content-Type: application/json
 
 接口只登记 `refresh_request` 队列并返回 `202 Accepted`，不会在 HTTP 请求线程中直接运行爬虫；后续由统一调度器领取。当前 API 仅绑定本机，真实内网部署前还需增加认证。
 
+### 批量查询
+
+```http
+POST /v1/asin/batch
+Content-Type: application/json
+
+{"marketplace":"US","asins":["B00RCPDCQU","B000000001"]}
+```
+
+每次最多查询 100 个去重后的 ASIN，只读取已有快照，不会因为批量查询而触发采集；不存在的 ASIN 会以 `found=false` 返回。
+
 ## 当前不支持
 
 - 直接在 API 请求线程中运行爬虫；
