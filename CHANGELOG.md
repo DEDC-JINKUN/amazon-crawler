@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.11 - 2026-08-27
+
+- SQLite 新增商品历史快照保存，Collection API 增加 `/history` 查询。
+- PostgreSQL 历史快照回放映射和测试完成。
+
 ## 0.1.10 - 2026-08-27
 
 - 美国 live preflight 只接受 5 位 ZIP 或 ZIP+4 格式。

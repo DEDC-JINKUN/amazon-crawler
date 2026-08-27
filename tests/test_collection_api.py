@@ -54,6 +54,7 @@ class CollectionApiTests(unittest.TestCase):
                 self.assertEqual(payload["source"], "selenium_dom")
                 self.assertIsNotNone(payload["freshness"]["age_seconds"])
                 self.assertTrue(payload["evidence"]["raw_html_path"])
+                self.assertEqual(len(api.load_history(db, "US", "B00RCPDCQU")), 1)
                 self.assertEqual(len(api.load_evidence(db, "US", "B00RCPDCQU")), 1)
                 self.assertEqual(api.load_job_status(db)["counts"]["reviews_pending"], 1)
                 self.assertEqual(api.load_job_status(db)["refresh_requests"], {})
@@ -94,6 +95,9 @@ class CollectionApiTests(unittest.TestCase):
 
             def load_evidence(self, marketplace, asin, limit=20):
                 return []
+
+            def load_history(self, marketplace, asin, limit=20):
+                return [{"snapshot_id": 1, "captured_at": "2026-01-01T00:00:00+00:00"}] if asin == "B00RCPDCQU" else []
 
             def request_refresh(self, marketplace, asin, requested_by, reason):
                 return {"job_id": "test", "status": "queued"}
@@ -233,6 +237,9 @@ class CollectionApiTests(unittest.TestCase):
             def load_evidence(self, marketplace, asin, limit=20):
                 return []
 
+            def load_history(self, marketplace, asin, limit=20):
+                return [{"snapshot_id": 1, "captured_at": "2026-01-01T00:00:00+00:00"}] if asin == "B00RCPDCQU" else []
+
             def request_refresh(self, marketplace, asin, requested_by, reason):
                 return {"job_id": "test", "status": "queued"}
 
@@ -255,6 +262,8 @@ class CollectionApiTests(unittest.TestCase):
                 freshness = json.loads(response.read())["freshness"]
             self.assertTrue(freshness["stale"])
             self.assertEqual(freshness["stale_groups"], ["price", "content"])
+            with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/v1/asin/US/B00RCPDCQU/history", timeout=2) as response:
+                self.assertEqual(len(json.loads(response.read())["items"]), 1)
         finally:
             server.shutdown()
             server.server_close()

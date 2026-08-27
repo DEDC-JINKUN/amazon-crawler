@@ -732,6 +732,10 @@ def init_db(path: Path = DEFAULT_DB, max_attempts: int = 3) -> sqlite3.Connectio
           review_link TEXT, review_section_anchor TEXT, aplus_present INTEGER, collected_at TEXT, status TEXT,
           PRIMARY KEY(marketplace, asin)
         );
+        CREATE TABLE IF NOT EXISTS product_snapshot_history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, marketplace TEXT NOT NULL, asin TEXT NOT NULL,
+          captured_at TEXT NOT NULL, source_type TEXT, raw_html_path TEXT, value_json TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS media_asset (
           marketplace TEXT NOT NULL, asin TEXT NOT NULL, placement TEXT NOT NULL, entry_type TEXT,
           thumbnail_url TEXT, display_url TEXT, asset_url TEXT, poster_url TEXT, ordinal INTEGER,
@@ -925,6 +929,10 @@ def _write_product_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.R
             return
         now = utc_now()
         product = {"asin": asin, "marketplace": "US", "canonical_url": canonical, "availability": data.get("availability", ""), "title": data.get("title", ""), "brand": data.get("brand", ""), "rating": data.get("rating", ""), "reported_rating_count": data.get("reported_rating_count") or None, "reported_review_count": data.get("reported_review_count") or None, "review_count": data.get("review_count", ""), "review_count_source": data.get("review_count_source", ""), "price": data.get("price", ""), "bullets_json": _json(data.get("bullets", [])), "product_description": data.get("product_description", ""), "specs_json": _json(data.get("specs", {})), "buy_box_json": _json(data.get("buy_box", {})), "top_reviews_json": _json(data.get("top_reviews", [])), "review_link": data.get("review_link", ""), "review_section_anchor": data.get("review_section_anchor", ""), "aplus_present": int(bool(data.get("aplus_present"))), "collected_at": now, "status": "product_done"}
+        conn.execute(
+            "INSERT INTO product_snapshot_history(marketplace,asin,captured_at,source_type,raw_html_path,value_json) VALUES(?,?,?,?,?,?)",
+            ("US", asin, now, source_type, raw_html_path, _json(data)),
+        )
         columns = PRODUCT_HEADERS
         conn.execute(f"INSERT INTO product_snapshot({','.join(columns)}) VALUES({','.join('?' for _ in columns)}) ON CONFLICT(marketplace,asin) DO UPDATE SET " + ",".join(f"{c}=excluded.{c}" for c in columns if c not in {"asin", "marketplace"}), [product.get(c, "") for c in columns])
         conn.execute("DELETE FROM media_asset WHERE marketplace='US' AND asin=?", (asin,))

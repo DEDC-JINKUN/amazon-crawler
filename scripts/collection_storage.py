@@ -6,6 +6,7 @@ be added later without changing API routes or response fields.
 from __future__ import annotations
 
 import sqlite3
+import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +15,8 @@ from typing import Any, Protocol
 
 class CollectionRepository(Protocol):
     def load_product(self, marketplace: str, asin: str) -> dict[str, Any] | None: ...
+
+    def load_history(self, marketplace: str, asin: str, limit: int = 20) -> list[dict[str, Any]]: ...
 
     def load_evidence(self, marketplace: str, asin: str, limit: int = 20) -> list[dict[str, Any]]: ...
 
@@ -118,6 +121,27 @@ class SQLiteCollectionRepository:
                 (marketplace, asin, limit),
             ).fetchall()
             return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def load_history(self, marketplace: str, asin: str, limit: int = 20) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 100))
+        conn = self._connection()
+        try:
+            rows = conn.execute(
+                "SELECT id AS snapshot_id, captured_at, source_type, raw_html_path, value_json "
+                "FROM product_snapshot_history WHERE marketplace=? AND asin=? ORDER BY id DESC LIMIT ?",
+                (marketplace, asin, limit),
+            ).fetchall()
+            items = []
+            for row in rows:
+                item = {"snapshot_id": row["snapshot_id"], "captured_at": row["captured_at"], "source": row["source_type"], "raw_html_path": row["raw_html_path"]}
+                try:
+                    item["data"] = json.loads(row["value_json"])
+                except (TypeError, ValueError):
+                    item["data"] = None
+                items.append(item)
+            return items
         finally:
             conn.close()
 
@@ -252,6 +276,17 @@ class PostgresCollectionRepository:
                 cursor.execute(
                     "SELECT run_id, url, http_status, retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code "
                     "FROM amazon_us.collection_evidence WHERE marketplace=%s AND asin=%s ORDER BY id DESC LIMIT %s",
+                    (marketplace, asin, limit),
+                )
+                return [dict(row) for row in cursor.fetchall()]
+
+    def load_history(self, marketplace: str, asin: str, limit: int = 20) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 100))
+        with self._connect_factory() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT snapshot_id, collected_at AS captured_at, subject_type, price, availability, rating, review_count, status "
+                    "FROM amazon_us.product_snapshot WHERE marketplace=%s AND asin=%s ORDER BY collected_at DESC, snapshot_id DESC LIMIT %s",
                     (marketplace, asin, limit),
                 )
                 return [dict(row) for row in cursor.fetchall()]

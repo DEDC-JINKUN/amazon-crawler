@@ -34,6 +34,10 @@ def load_product(db_path: Path, marketplace: str, asin: str) -> dict[str, Any] |
     return SQLiteCollectionRepository(db_path).load_product(marketplace, asin)
 
 
+def load_history(db_path: Path, marketplace: str, asin: str, limit: int = 20) -> list[dict[str, Any]]:
+    return SQLiteCollectionRepository(db_path).load_history(marketplace, asin, limit)
+
+
 def load_job_status(db_path: Path) -> dict[str, Any]:
     return SQLiteCollectionRepository(db_path).load_job_status()
 
@@ -111,6 +115,19 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "evidence_not_found", "asin": asin, "marketplace": marketplace})
                 return
             self._send_json(HTTPStatus.OK, {"schema_version": API_SCHEMA_VERSION, "marketplace": marketplace, "asin": asin, "items": evidence})
+            return
+        history_match = re.fullmatch(r"/v1/asin/([A-Za-z]{2})/([A-Za-z0-9]{10})/history", path)
+        if history_match:
+            marketplace, asin = history_match.group(1).upper(), history_match.group(2).upper()
+            try:
+                history = self.server.repository.load_history(marketplace, asin)
+            except (OSError, RuntimeError, sqlite3.Error) as exc:
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable", "detail": str(exc)})
+                return
+            if not history:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "history_not_found", "asin": asin, "marketplace": marketplace})
+                return
+            self._send_json(HTTPStatus.OK, {"schema_version": API_SCHEMA_VERSION, "marketplace": marketplace, "asin": asin, "items": history})
             return
         match = ASIN_PATH.fullmatch(path)
         if match:

@@ -51,6 +51,23 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(payload["media_asset"][0]["marketplace"], "US")
             self.assertEqual(payload["media_asset"][0]["asin"], "B00RCPDCQU")
 
+    def test_product_history_is_mapped_to_postgres_snapshots(self):
+        worker = load("amazon_us_worker")
+        migration = load("migrate_sqlite_to_postgres")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = root / "state.sqlite3"
+            conn = worker.init_db(db)
+            manifest = root / "manifest.csv"
+            manifest.write_text("asin,url,marketplace,source_site_label,source_workbook\nB00RCPDCQU,https://www.amazon.com/dp/B00RCPDCQU,US,test,fixture.csv\n", encoding="utf-8")
+            worker.initialize_manifest(conn, manifest, worker.DEFAULTS)
+            conn.execute("INSERT INTO product_snapshot_history(marketplace,asin,captured_at,source_type,raw_html_path,value_json) VALUES('US','B00RCPDCQU','2026-01-01T00:00:00+00:00','http_html','x.html',?)", ('{"price":"$1.00","bullets":[]}',))
+            conn.commit()
+            conn.close()
+            payload = migration.build_payload(db, "tenant-a", "candidate")
+            history_snapshots = [item for item in payload["product_snapshot"] if item["collected_at"] == "2026-01-01T00:00:00+00:00"]
+            self.assertEqual(history_snapshots[0]["price"], "$1.00")
+
     def test_dry_run_does_not_require_postgres_dsn(self):
         migration = load("migrate_sqlite_to_postgres")
         with tempfile.TemporaryDirectory() as directory:

@@ -48,6 +48,14 @@ GET /v1/asin/US/{asin}
 
 返回商品当前快照、任务状态、最近一次采集证据、媒体数量和内容模块数量。响应带有 `schema_version`、`retrieved_at`、`freshness`、`quality_status` 和 `source`；`freshness.age_seconds` 表示数据距当前的秒数，Agent 根据业务策略判断是否过期。
 
+### 查询商品历史
+
+```http
+GET /v1/asin/US/{asin}/history
+```
+
+返回商品历史快照。SQLite 返回历史采集记录，PostgreSQL 返回 `product_snapshot` 历史记录；两者均按最新时间倒序，最多返回 20 条。
+
 可按字段组判断过期：
 
 ```http

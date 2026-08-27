@@ -8,7 +8,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-TABLES = ("item_state", "state_history", "collection_evidence", "product_snapshot", "media_asset", "content_module", "review_summary", "review_record", "refresh_request")
+TABLES = ("item_state", "state_history", "collection_evidence", "product_snapshot", "product_snapshot_history", "media_asset", "content_module", "review_summary", "review_record", "refresh_request")
 
 
 def _json_value(value: Any, fallback: Any) -> Any:
@@ -53,6 +53,17 @@ def build_payload(sqlite_path: Path, tenant_id: str = "default", subject_type: s
             "reported_rating_count": row["reported_rating_count"], "reported_review_count": row["reported_review_count"], "review_count": row["review_count"], "review_count_source": row["review_count_source"], "price": row["price"],
             "bullets": _json_value(row["bullets_json"], []), "product_description": row["product_description"], "specs": _json_value(row["specs_json"], {}), "buy_box": _json_value(row["buy_box_json"], {}), "top_reviews": _json_value(row["top_reviews_json"], []),
             "review_link": row["review_link"], "review_section_anchor": row["review_section_anchor"], "aplus_present": bool(row["aplus_present"]), "collected_at": row["collected_at"], "status": row["status"],
+        })
+    for row in source["product_snapshot_history"]:
+        data = _json_value(row.get("value_json"), {})
+        if not isinstance(data, dict):
+            continue
+        payload["product_snapshot"].append({
+            "tenant_id": tenant_id, "marketplace": row["marketplace"], "asin": row["asin"], "subject_type": subject_type,
+            "canonical_url": data.get("canonical_url", ""), "availability": data.get("availability", ""), "title": data.get("title", ""), "brand": data.get("brand", ""), "rating": data.get("rating", ""),
+            "reported_rating_count": data.get("reported_rating_count"), "reported_review_count": data.get("reported_review_count"), "review_count": data.get("review_count", ""), "review_count_source": data.get("review_count_source", ""), "price": data.get("price", ""),
+            "bullets": data.get("bullets", []), "product_description": data.get("product_description", ""), "specs": data.get("specs", {}), "buy_box": data.get("buy_box", {}), "top_reviews": data.get("top_reviews", []),
+            "review_link": data.get("review_link", ""), "review_section_anchor": data.get("review_section_anchor", ""), "aplus_present": bool(data.get("aplus_present")), "collected_at": row["captured_at"], "status": "product_done",
         })
     for table in ("media_asset", "content_module", "review_summary", "review_record"):
         for row in source[table]:
