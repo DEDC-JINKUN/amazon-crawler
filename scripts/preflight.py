@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -47,7 +48,9 @@ def run_preflight(manifest: Path, config: Path, db: Path, *, require_live: bool 
             checks.append(_check("user_agent", f"Agent/{loaded['agent_name']}" in loaded["user_agent"], "transparent"))
             context = loaded.get("context", {})
             postal_code = str(context.get("postal_code") or "").strip()
-            checks.append(_check("us_postal_code", bool(postal_code) or not (require_live and str(context.get("expected_country") or "").upper() == "US"), "configured" if postal_code else "required for live US collection"))
+            is_us = str(context.get("expected_country") or "").upper() == "US"
+            postal_valid = bool(re.fullmatch(r"\d{5}(?:-\d{4})?", postal_code))
+            checks.append(_check("us_postal_code", postal_valid or not (require_live and is_us), "configured" if postal_valid else "must be a 5-digit US ZIP (or ZIP+4) for live US collection"))
         except (OSError, ValueError, KeyError) as exc:
             checks.append(_check("config_parse", False, str(exc)))
     selenium_available = importlib.util.find_spec("selenium") is not None

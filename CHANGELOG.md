@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.10 - 2026-08-27
+
+- 美国 live preflight 只接受 5 位 ZIP 或 ZIP+4 格式。
+- 增加空 ZIP、非法 ZIP 的回归测试。
+
 ## 0.1.9 - 2026-08-27
 
 - `preflight --require-live` 现在要求美国上下文配置 `postal_code`。
