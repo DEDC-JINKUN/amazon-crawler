@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.52 - 2026-08-27
+
+- 增加 Collection API evidence 的 `context_json` 回归断言，确认 Agent 可读取 ZIP/国家/币种上下文。
+
 ## 0.1.51 - 2026-08-27
 
 - 抽出 `RawHtmlStore` 接口和本地原子写入实现，为后续 S3 兼容对象存储替换保留稳定边界。
