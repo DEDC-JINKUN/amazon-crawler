@@ -20,6 +20,12 @@ def load(name: str):
 
 
 class ParserFixtureTests(unittest.TestCase):
+    def test_description_does_not_absorb_following_modules_when_container_empty(self):
+        worker = load("amazon_us_worker")
+        html = '<div id="productDescription"><!-- empty --></div><div id="buybox">Buy Box text must not be description</div>'
+        result = worker.parse_product_html(html, "https://www.amazon.com/dp/B00RCPDCQU")
+        self.assertEqual(result["product_description"], "")
+
     def test_product_fields_media_and_aplus(self):
         worker = load("amazon_us_worker")
         html = (FIXTURES / "product_unavailable_video_aplus.html").read_text(encoding="utf-8")

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.24 - 2026-08-27
+
+- 修复 malformed/重复容器页面下 `productDescription` 吸收后续模块文本的问题。
+- 增加空 description 容器回归测试；覆盖率报告和解析结果现在可区分页面未提供与解析错误。
+
 ## 0.1.23 - 2026-08-27
 
 - 覆盖率报告支持 `--raw-html-dir`，区分 bullets/description 在原始 HTML 中为 `present`、`empty` 或 `uninspectable`。

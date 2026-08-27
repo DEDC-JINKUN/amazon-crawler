@@ -253,6 +253,27 @@ def _first_text(parser: _DOMParser, queries: list[dict[str, Any]]) -> str:
     return ""
 
 
+def _raw_container_text(source_html: str, ids: tuple[str, ...]) -> str:
+    """Extract text from a named HTML container without trusting malformed DOM nesting."""
+    for identifier in ids:
+        match = re.search(
+            rf"<(?:div|section|span)[^>]+id=[\"']{re.escape(identifier)}[\"'][^>]*>",
+            source_html,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            continue
+        closing = re.search(r"</(?:div|section|span)\s*>", source_html[match.end() :], flags=re.IGNORECASE)
+        fragment = source_html[match.end() : match.end() + (closing.start() if closing else 12000)]
+        fragment = re.sub(r"<!--.*?-->|<script\b[^>]*>.*?</script>|<style\b[^>]*>.*?</style>", " ", fragment, flags=re.IGNORECASE | re.DOTALL)
+        text = re.sub(r"<[^>]+>", " ", fragment)
+        text = _clean(text)
+        if text:
+            return text
+        return ""
+    return ""
+
+
 def _first_attr(parser: _DOMParser, queries: list[dict[str, Any]], attribute: str) -> str:
     for query in queries:
         for index in _find(parser, **query):
@@ -623,7 +644,7 @@ def parse_product_html(source_html: str, page_url: str = "") -> dict[str, Any]:
     for bullet in _parse_bullets(parser):
         content_modules.append({"module_type": "bullet", "position": position, "order_index": position, "text": bullet, "image_url": "", "link_url": "", "status": "available"})
         position += 1
-    description = _first_text(parser, [{"id_value": "productDescription"}, {"id_value": "bookDescription_feature_div"}])
+    description = _raw_container_text(source_html, ("productDescription", "bookDescription_feature_div"))
     if description:
         content_modules.append({"module_type": "product_description", "position": position, "order_index": position, "text": description, "image_url": "", "link_url": "", "status": "available"})
         position += 1
