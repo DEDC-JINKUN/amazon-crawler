@@ -50,7 +50,7 @@ HEADERS = {
     ],
     "collection_evidence.csv": [
         "run_id", "asin", "marketplace", "url", "http_status", "retrieved_at", "source_type",
-        "content_hash", "raw_html_path", "block_reason", "parser_version", "error_code",
+        "content_hash", "raw_html_path", "block_reason", "parser_version", "error_code", "context_json",
     ],
 }
 

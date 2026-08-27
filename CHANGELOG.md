@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.49 - 2026-08-27
+
+- evidence 增加 `context_json`，记录采集时 ZIP、国家和币种上下文，并同步 SQLite/CSV/PostgreSQL 回放。
+- 增加区域上下文审计回归测试，避免价格和配送结果无法追溯来源区域。
+
 ## 0.1.48 - 2026-08-27
 
 - 对齐运营字段落点：页面显示的 BSR/类目保留在 `specs_json`，卖家/Coupon/配送保留在 Buy Box JSON；页面未显示时不推断。

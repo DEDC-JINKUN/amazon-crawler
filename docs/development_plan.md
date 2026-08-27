@@ -51,6 +51,7 @@
 - [x] Buy Box 原文及可选 seller/coupon/delivery 结构化字段。
 - [x] 竞品候选发现支持 `data-asin` 搜索卡片属性。
 - [x] 审计并明确 BSR/类目与卖家/Coupon/配送字段落点。
+- [x] evidence 保存 ZIP/国家/币种上下文并同步迁移链路。
 - [x] 美国上下文质量门禁（国家/币种不匹配不写入快照）。
 - [x] 美国 ZIP 格式门禁（5 位或 ZIP+4，live 模式必填）。
 - [x] 商品历史快照保存和 `/history` 查询。

@@ -94,8 +94,11 @@ CREATE TABLE IF NOT EXISTS collection_evidence (
     raw_html_path text,
     block_reason text,
     parser_version text,
-    error_code text
+    error_code text,
+    context_json jsonb NOT NULL DEFAULT '{}'::jsonb
 );
+
+ALTER TABLE collection_evidence ADD COLUMN IF NOT EXISTS context_json jsonb NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE TABLE IF NOT EXISTS product_snapshot (
     snapshot_id bigserial PRIMARY KEY,

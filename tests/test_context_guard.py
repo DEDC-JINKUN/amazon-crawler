@@ -37,10 +37,11 @@ class ContextGuardTests(unittest.TestCase):
             row = conn.execute("SELECT * FROM item_state").fetchone()
             worker._set_status(conn, "US", row["asin"], "running", reason="test")
             data = {"asin": "B00RCPDCQU", "canonical_url": "https://www.amazon.com/dp/B00RCPDCQU", "price": "HKD235.11"}
-            worker._write_product_action(conn, "context-test", conn.execute("SELECT * FROM item_state").fetchone(), data, "page", 200, None, error_code="context_mismatch:currency_mismatch")
+            worker._write_product_action(conn, "context-test", conn.execute("SELECT * FROM item_state").fetchone(), data, "page", 200, None, error_code="context_mismatch:currency_mismatch", context={"postal_code": "90001", "expected_country": "US", "expected_currency": "USD"})
             self.assertIsNone(conn.execute("SELECT 1 FROM product_snapshot").fetchone())
             self.assertEqual(conn.execute("SELECT status FROM item_state").fetchone()[0], "failed")
             self.assertEqual(conn.execute("SELECT error_code FROM collection_evidence ORDER BY id DESC LIMIT 1").fetchone()[0], "context_mismatch:currency_mismatch")
+            self.assertIn("90001", conn.execute("SELECT context_json FROM collection_evidence ORDER BY id DESC LIMIT 1").fetchone()[0])
             conn.close()
 
 

@@ -48,7 +48,7 @@
 
 ### collection_evidence.csv
 
-每次 page action 一条历史 evidence，保留 `run_id`、URL、可获取的 response status、抓取时间、内容哈希、阻断原因、解析器版本和错误码。Selenium 在导航后读取 `performance.getEntriesByType('navigation')[-1].responseStatus`；Firefox 不支持时保留空值，但仍执行页面阻断结构检测，不发第二次请求。
+每次 page action 一条历史 evidence，保留 `run_id`、URL、可获取的 response status、抓取时间、内容哈希、阻断原因、解析器版本、错误码和 `context_json`。`context_json` 至少记录 `postal_code`、`expected_country`、`expected_currency`；Selenium 在导航后读取 `performance.getEntriesByType('navigation')[-1].responseStatus`；Firefox 不支持时保留空值，但仍执行页面阻断结构检测，不发第二次请求。
 
 ## 合规边界
 

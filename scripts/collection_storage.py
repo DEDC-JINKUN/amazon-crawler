@@ -73,7 +73,7 @@ class SQLiteCollectionRepository:
             if product is None and state is None:
                 return None
             evidence = conn.execute(
-                "SELECT run_id, url, http_status, retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code "
+                "SELECT run_id, url, http_status, retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code, context_json "
                 "FROM collection_evidence WHERE marketplace=? AND asin=? ORDER BY id DESC LIMIT 1",
                 (marketplace, asin),
             ).fetchone()
@@ -116,7 +116,7 @@ class SQLiteCollectionRepository:
         conn = self._connection()
         try:
             rows = conn.execute(
-                "SELECT run_id, url, http_status, retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code "
+                "SELECT run_id, url, http_status, retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code, context_json "
                 "FROM collection_evidence WHERE marketplace=? AND asin=? ORDER BY id DESC LIMIT ?",
                 (marketplace, asin, limit),
             ).fetchall()
@@ -223,7 +223,7 @@ class PostgresCollectionRepository:
                     return None
                 subject_type = (product or state).get("subject_type", "own")
                 cursor.execute(
-                    "SELECT run_id, url, http_status, retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code "
+                    "SELECT run_id, url, http_status, retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code, context_json "
                     "FROM amazon_us.collection_evidence WHERE marketplace=%s AND asin=%s AND subject_type=%s "
                     "ORDER BY id DESC LIMIT 1",
                     (marketplace, asin, subject_type),
@@ -274,7 +274,7 @@ class PostgresCollectionRepository:
         with self._connect_factory() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(
-                    "SELECT run_id, url, http_status, retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code "
+                    "SELECT run_id, url, http_status, retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code, context_json "
                     "FROM amazon_us.collection_evidence WHERE marketplace=%s AND asin=%s ORDER BY id DESC LIMIT %s",
                     (marketplace, asin, limit),
                 )
