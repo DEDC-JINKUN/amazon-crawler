@@ -1,0 +1,22 @@
+# Windows Selenium Manager configuration. Leave geckodriver_path empty.
+[worker]
+request_timeout_seconds = 30
+headless = true
+max_actions_per_run = 10
+max_attempts = 3
+review_page_limit = 0
+agent_name = "amazon-us-worker"
+user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0 Agent/amazon-us-worker"
+geckodriver_path = ""
+# Production-only approved egress; keep empty for this POC.
+proxy_url = ""
+
+[paths]
+manifest = "amazon_us_asin_manifest.csv"
+state = "state/amazon_us.sqlite3"
+output_dir = "data/amazon_us"
+
+[collection]
+marketplace = "US"
+stop_on_block = true
+save_media = "url_and_metadata_only"

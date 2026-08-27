@@ -1,0 +1,23 @@
+# Adjustable settings only. No credentials, cookies, tokens, or browser profiles.
+[worker]
+request_timeout_seconds = 30
+headless = true
+max_actions_per_run = 10
+max_attempts = 3
+review_page_limit = 0
+agent_name = "amazon-us-worker"
+# If set, this must contain Agent/<agent_name> for transparency.
+user_agent = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0 Agent/amazon-us-worker"
+geckodriver_path = "/snap/bin/geckodriver"
+# Optional production-only approved egress. Leave empty for the Windows POC.
+proxy_url = ""
+
+[paths]
+manifest = "amazon_us_asin_manifest.csv"
+state = "state/amazon_us.sqlite3"
+output_dir = "data/amazon_us"
+
+[collection]
+marketplace = "US"
+stop_on_block = true
+save_media = "url_and_metadata_only"
