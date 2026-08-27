@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.54 - 2026-08-27
+
+- 在本机 PostgreSQL 17 执行幂等 schema 升级并确认 `collection_evidence.context_json` 为 jsonb。
+- 明确 schema 变更不会重建已有表；公司数据库仍待正式迁移窗口。
+
 ## 0.1.53 - 2026-08-27
 
 - SQLite CollectionRepository 兼容旧 evidence schema：缺少 `context_json` 时返回 null，不阻断 API。

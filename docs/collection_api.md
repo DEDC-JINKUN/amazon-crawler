@@ -78,6 +78,8 @@ GET /v1/jobs/status
 
 旧 SQLite 库若尚未执行 `context_json` schema 变更，API 会兼容读取并返回 `context_json: null`；新采集证据会写入实际上下文。升级不要求 API 先写库。
 
+本机 PostgreSQL 已执行幂等 schema 升级，`collection_evidence.context_json` 为 `jsonb`；公司数据库需在正式迁移窗口执行同一 schema，不能直接假设已完成。
+
 ### 查询刷新任务
 
 ```http

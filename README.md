@@ -2,7 +2,7 @@
 
 面向 Amazon.com 自有 ASIN 和竞品 ASIN 的统一网页采集 MVP。
 
-当前版本：`0.1.53`（兼容旧 SQLite evidence schema）。
+当前版本：`0.1.54`（本机 PostgreSQL context_json schema 升级验证）。
 
 ## 当前开发边界
 
