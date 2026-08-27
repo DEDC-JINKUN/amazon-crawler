@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.50 - 2026-08-27
+
+- 增加区域上下文迁移回归，验证 `context_json` 从 SQLite evidence 保留到 PostgreSQL payload。
+
 ## 0.1.49 - 2026-08-27
 
 - evidence 增加 `context_json`，记录采集时 ZIP、国家和币种上下文，并同步 SQLite/CSV/PostgreSQL 回放。

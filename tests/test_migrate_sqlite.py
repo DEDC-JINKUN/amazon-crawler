@@ -51,6 +51,21 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(payload["media_asset"][0]["marketplace"], "US")
             self.assertEqual(payload["media_asset"][0]["asin"], "B00RCPDCQU")
 
+    def test_evidence_mapping_keeps_collection_context(self):
+        worker = load("amazon_us_worker")
+        migration = load("migrate_sqlite_to_postgres")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = root / "state.sqlite3"
+            conn = worker.init_db(db)
+            manifest = root / "manifest.csv"
+            manifest.write_text("asin,url,marketplace,source_site_label,source_workbook\nB00RCPDCQU,https://www.amazon.com/dp/B00RCPDCQU,US,test,fixture.csv\n", encoding="utf-8")
+            worker.initialize_manifest(conn, manifest, worker.DEFAULTS)
+            worker._insert_evidence(conn, "run-1", "B00RCPDCQU", "https://www.amazon.com/dp/B00RCPDCQU", 200, "<html></html>", None, source_type="http_html", context={"postal_code": "90001", "expected_country": "US", "expected_currency": "USD"})
+            conn.commit(); conn.close()
+            payload = migration.build_payload(db, "tenant-a", "candidate")
+            self.assertIn("90001", payload["collection_evidence"][0]["context_json"])
+
     def test_product_history_is_mapped_to_postgres_snapshots(self):
         worker = load("amazon_us_worker")
         migration = load("migrate_sqlite_to_postgres")
