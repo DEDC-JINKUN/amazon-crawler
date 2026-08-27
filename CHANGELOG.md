@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.8 - 2026-08-28
+
+- 实际对账当前 SQLite 与 `amazon_us_qa` 租户：状态和刷新队列一致，20 个 ASIN 样本无差异。
+- 将 QA 租户对账命令和 `ok=true` 结果写入对账模板。
+
 ## 0.2.7 - 2026-08-28
 
 - Collection API 业务路由的数据库异常统一返回 `database_unavailable`，不回显回驱动、DSN 或凭证详情。

@@ -36,3 +36,5 @@ PostgreSQL 查询必须指定正确的 `--tenant-id`；例如 QA 回放使用 `q
 如果两套后端的状态数量或样本证据不一致，不要直接判定爬虫失败。先确认是否使用了同一清单、租户、回放时间和解析器版本；旧租户的历史回放不应与当前 SQLite 直接作生产对账。
 
 本机 QA 回放模板：先新建独立数据库（例如 `amazon_us_qa`），再执行 schema、SQLite 回放和 `verify_postgres.py --tenant-id qa_latest_20260827 --asin <ASIN>`。本次回放结果为 `pending=1891`、`reviews_pending=1`，单 ASIN 来源为 `http_html`，`transfer_bytes` 可正常返回；旧默认数据库的历史数据不应覆盖或直接当作当前基线。
+
+在该 QA 租户上执行 `compare_backends.py --tenant-id qa_latest_20260827 --sample-limit 20`，实际结果为状态计数一致、刷新队列一致、`sample_mismatches=[]` 和 `ok=true`。
