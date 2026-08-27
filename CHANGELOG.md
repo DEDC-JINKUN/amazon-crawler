@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.33 - 2026-08-27
+
+- 增加人工复核重入队工具 `requeue_tasks.py`：默认只处理 failed，blocked 必须显式确认。
+- 重入队会清零连续失败次数、恢复商品/评论阶段并写入 state_history，不删除原始 evidence。
+
 ## 0.1.32 - 2026-08-27
 
 - 增加 CAPTCHA 阻断批次回归测试：停止当前批次，未领取任务保持 pending。
