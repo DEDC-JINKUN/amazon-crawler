@@ -5,6 +5,7 @@
 - [x] HTTP 优先适配器和 Firefox 懒加载兜底。
 - [x] HTTP/Firefox 来源证据区分。
 - [x] Token Bucket 全局/出口级限速基础和受控 Worker Pool 基础。
+- [x] 授权出口池登记与最多一次备用出口切换基础。
 - [x] 清单缺失时使用开发样例，真实清单保持本地忽略。
 - [x] 回归测试 29 项通过。
 
@@ -17,6 +18,8 @@
 5. Firefox 兜底：仅处理 HTTP 缺字段或必须 JavaScript 渲染的页面。
 6. 生产化：接入 PostgreSQL、Collection API、Weknora 发布和监控。
 7. 扩容：最后再接入授权 IP 代理池和受控 Worker Pool。
+
+当前的出口池模块只接受人工提供的明确出口，不扫描公网代理、不自动无限轮换，也不把代理凭证写入配置。
 
 ## 一周 MVP 验收
 
