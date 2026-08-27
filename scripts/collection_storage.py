@@ -193,10 +193,13 @@ class PostgresCollectionRepository:
     POC remains dependency-free. Tests may inject a DB-API connection factory.
     """
 
-    def __init__(self, dsn: str, connect=None):
+    def __init__(self, dsn: str, connect=None, tenant_id: str = "default"):
         if not dsn.strip():
             raise ValueError("PostgreSQL DSN must not be empty")
+        if not tenant_id.strip():
+            raise ValueError("tenant_id must not be empty")
         self.dsn = dsn
+        self.tenant_id = tenant_id.strip()
         self._connect_factory = connect or self._connect
 
     def _connect(self):
@@ -236,15 +239,15 @@ class PostgresCollectionRepository:
         with self._connect_factory() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(
-                    "SELECT * FROM amazon_us.product_latest WHERE marketplace=%s AND asin=%s "
+                    "SELECT * FROM amazon_us.product_latest WHERE tenant_id=%s AND marketplace=%s AND asin=%s "
                     "ORDER BY CASE subject_type WHEN 'own' THEN 0 WHEN 'competitor' THEN 1 ELSE 2 END LIMIT 1",
-                    (marketplace, asin),
+                    (self.tenant_id, marketplace, asin),
                 )
                 product = self._first(cursor)
                 cursor.execute(
-                    "SELECT * FROM amazon_us.item_state WHERE marketplace=%s AND asin=%s "
+                    "SELECT * FROM amazon_us.item_state WHERE tenant_id=%s AND marketplace=%s AND asin=%s "
                     "ORDER BY CASE subject_type WHEN 'own' THEN 0 WHEN 'competitor' THEN 1 ELSE 2 END LIMIT 1",
-                    (marketplace, asin),
+                    (self.tenant_id, marketplace, asin),
                 )
                 state = self._first(cursor)
                 if product is None and state is None:
@@ -252,19 +255,19 @@ class PostgresCollectionRepository:
                 subject_type = (product or state).get("subject_type", "own")
                 cursor.execute(
                     "SELECT run_id, url, http_status, transfer_bytes, retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code, context_json "
-                    "FROM amazon_us.collection_evidence WHERE marketplace=%s AND asin=%s AND subject_type=%s "
+                    "FROM amazon_us.collection_evidence WHERE tenant_id=%s AND marketplace=%s AND asin=%s AND subject_type=%s "
                     "ORDER BY id DESC LIMIT 1",
-                    (marketplace, asin, subject_type),
+                    (self.tenant_id, marketplace, asin, subject_type),
                 )
                 evidence = self._first(cursor)
                 cursor.execute(
-                    "SELECT COUNT(*) AS count FROM amazon_us.media_asset WHERE marketplace=%s AND asin=%s AND subject_type=%s",
-                    (marketplace, asin, subject_type),
+                    "SELECT COUNT(*) AS count FROM amazon_us.media_asset WHERE tenant_id=%s AND marketplace=%s AND asin=%s AND subject_type=%s",
+                    (self.tenant_id, marketplace, asin, subject_type),
                 )
                 media_count = cursor.fetchone()["count"]
                 cursor.execute(
-                    "SELECT COUNT(*) AS count FROM amazon_us.content_module WHERE marketplace=%s AND asin=%s AND subject_type=%s",
-                    (marketplace, asin, subject_type),
+                    "SELECT COUNT(*) AS count FROM amazon_us.content_module WHERE tenant_id=%s AND marketplace=%s AND asin=%s AND subject_type=%s",
+                    (self.tenant_id, marketplace, asin, subject_type),
                 )
                 content_count = cursor.fetchone()["count"]
                 status = state.get("status") if state is not None else "unknown"
@@ -286,9 +289,9 @@ class PostgresCollectionRepository:
     def load_job_status(self) -> dict[str, Any]:
         with self._connect_factory() as conn:
             with conn.cursor() as cursor:
-                cursor.execute("SELECT status, COUNT(*) AS count FROM amazon_us.item_state GROUP BY status ORDER BY status")
+                cursor.execute("SELECT status, COUNT(*) AS count FROM amazon_us.item_state WHERE tenant_id=%s GROUP BY status ORDER BY status", (self.tenant_id,))
                 rows = cursor.fetchall()
-                cursor.execute("SELECT status, COUNT(*) AS count FROM amazon_us.refresh_request GROUP BY status ORDER BY status")
+                cursor.execute("SELECT status, COUNT(*) AS count FROM amazon_us.refresh_request WHERE tenant_id=%s GROUP BY status ORDER BY status", (self.tenant_id,))
                 refresh_rows = cursor.fetchall()
                 return {
                     "schema_version": "amazon-us-collection-v1",
@@ -303,8 +306,8 @@ class PostgresCollectionRepository:
             with conn.cursor() as cursor:
                 cursor.execute(
                     "SELECT run_id, url, http_status, transfer_bytes, retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code, context_json "
-                    "FROM amazon_us.collection_evidence WHERE marketplace=%s AND asin=%s ORDER BY id DESC LIMIT %s",
-                    (marketplace, asin, limit),
+                    "FROM amazon_us.collection_evidence WHERE tenant_id=%s AND marketplace=%s AND asin=%s ORDER BY id DESC LIMIT %s",
+                    (self.tenant_id, marketplace, asin, limit),
                 )
                 return [dict(row) for row in cursor.fetchall()]
 
@@ -314,8 +317,8 @@ class PostgresCollectionRepository:
             with conn.cursor() as cursor:
                 cursor.execute(
                     "SELECT snapshot_id, collected_at AS captured_at, subject_type, price, availability, rating, review_count, status "
-                    "FROM amazon_us.product_snapshot WHERE marketplace=%s AND asin=%s ORDER BY collected_at DESC, snapshot_id DESC LIMIT %s",
-                    (marketplace, asin, limit),
+                    "FROM amazon_us.product_snapshot WHERE tenant_id=%s AND marketplace=%s AND asin=%s ORDER BY collected_at DESC, snapshot_id DESC LIMIT %s",
+                    (self.tenant_id, marketplace, asin, limit),
                 )
                 return [dict(row) for row in cursor.fetchall()]
 
@@ -331,14 +334,14 @@ class PostgresCollectionRepository:
         with self._connect_factory() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(
-                    "SELECT 1 FROM amazon_us.item_state WHERE marketplace=%s AND asin=%s LIMIT 1",
-                    (marketplace, asin),
+                    "SELECT 1 FROM amazon_us.item_state WHERE tenant_id=%s AND marketplace=%s AND asin=%s LIMIT 1",
+                    (self.tenant_id, marketplace, asin),
                 )
                 if cursor.fetchone() is None:
                     raise KeyError(f"ASIN not found: {marketplace}/{asin}")
                 cursor.execute(
-                    "INSERT INTO amazon_us.refresh_request(job_id,marketplace,asin,requested_by,reason,status) VALUES(%s,%s,%s,%s,%s,%s)",
-                    (request["job_id"], marketplace, asin, request["requested_by"], request["reason"], request["status"]),
+                    "INSERT INTO amazon_us.refresh_request(job_id,tenant_id,marketplace,asin,requested_by,reason,status) VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                    (request["job_id"], self.tenant_id, marketplace, asin, request["requested_by"], request["reason"], request["status"]),
                 )
             conn.commit()
         request["requested_at"] = _now()
@@ -347,6 +350,6 @@ class PostgresCollectionRepository:
     def load_refresh_request(self, job_id: str) -> dict[str, Any] | None:
         with self._connect_factory() as conn:
             with conn.cursor() as cursor:
-                cursor.execute("SELECT * FROM amazon_us.refresh_request WHERE job_id=%s", (job_id,))
+                cursor.execute("SELECT * FROM amazon_us.refresh_request WHERE tenant_id=%s AND job_id=%s", (self.tenant_id, job_id))
                 row = cursor.fetchone()
                 return dict(row) if row is not None else None

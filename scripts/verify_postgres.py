@@ -22,12 +22,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dsn", required=True)
     parser.add_argument("--asin")
+    parser.add_argument("--tenant-id", default="default")
     args = parser.parse_args(argv)
     try:
-        repository = PostgresCollectionRepository(args.dsn)
+        repository = PostgresCollectionRepository(args.dsn, tenant_id=args.tenant_id)
         contract = repository.load_schema_contract()
         contract_ok = schema_ok(contract)
-        result = {"schema_version": "amazon-us-postgres-verification-v1", "schema_ok": contract_ok, "schema_contract": contract}
+        result = {"schema_version": "amazon-us-postgres-verification-v1", "tenant_id": args.tenant_id, "schema_ok": contract_ok, "schema_contract": contract}
         if contract_ok:
             result["job_status"] = repository.load_job_status()
         else:

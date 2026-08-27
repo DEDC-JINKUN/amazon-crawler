@@ -27,7 +27,7 @@ def test_main_redacts_unexpected_database_errors(capsys):
     module = load_module()
 
     class BrokenRepository:
-        def __init__(self, dsn):
+        def __init__(self, dsn, tenant_id="default"):
             pass
 
         def load_schema_contract(self):

@@ -87,12 +87,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dsn", required=True, help="libpq DSN; keep credentials in PGPASSWORD or a password file")
     parser.add_argument("--marketplace", default="US")
     parser.add_argument("--sample-limit", type=int, default=20)
+    parser.add_argument("--tenant-id", default="default")
     args = parser.parse_args(argv)
     limit = max(1, min(args.sample_limit, 100))
     asins = sample_asins(args.sqlite, args.marketplace, limit)
     result = compare_repositories(
         SQLiteCollectionRepository(args.sqlite),
-        PostgresCollectionRepository(args.dsn),
+        PostgresCollectionRepository(args.dsn, tenant_id=args.tenant_id),
         asins,
         args.marketplace,
     )

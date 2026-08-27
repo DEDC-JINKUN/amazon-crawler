@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.99 - 2026-08-27
+
+- PostgreSQL repository 和对账工具新增显式 `tenant_id`，所有快照、任务、证据、历史和刷新请求按租户过滤，防止多 Agent 之间串数据。
+- `verify_postgres.py` 支持 `--tenant-id`，QA 回放与历史默认租户可分开验收。
+
 ## 0.1.98 - 2026-08-27
 
 - `verify_postgres.py` 对未知数据库异常统一脱敏输出类型和错误码，不打印 DSN、密码或未处理堆栈。
