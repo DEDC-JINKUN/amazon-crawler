@@ -15,3 +15,5 @@ state/*
 .env
 !.env.example
 !amazon_us_asin_manifest.example.csv
+tools/*.zip
+tools/geckodriver-v*/

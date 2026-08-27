@@ -48,9 +48,22 @@ def run_preflight(manifest: Path, config: Path, db: Path, *, require_live: bool 
         except (OSError, ValueError, KeyError) as exc:
             checks.append(_check("config_parse", False, str(exc)))
     selenium_available = importlib.util.find_spec("selenium") is not None
-    firefox_path = shutil.which("firefox") or shutil.which("firefox.exe")
+    configured_firefox = ""
+    try:
+        configured_firefox = str(loaded.get("firefox_binary") or "") if config.exists() else ""
+    except UnboundLocalError:
+        configured_firefox = ""
+    firefox_candidates = [configured_firefox, "C:/Program Files/Mozilla Firefox/firefox.exe", "C:/Program Files (x86)/Mozilla Firefox/firefox.exe"]
+    firefox_path = next((candidate for candidate in firefox_candidates if candidate and Path(candidate).exists()), None) or shutil.which("firefox") or shutil.which("firefox.exe")
     checks.append(_check("selenium", selenium_available or not require_live, "available" if selenium_available else "not installed (optional until live mode)"))
+    configured_driver = ""
+    try:
+        configured_driver = str(loaded.get("geckodriver_path") or "") if config.exists() else ""
+    except UnboundLocalError:
+        configured_driver = ""
+    driver_path = Path(configured_driver) if configured_driver else ROOT / "tools" / "geckodriver-v0.37.1" / "geckodriver.exe"
     checks.append(_check("firefox", bool(firefox_path) or not require_live, firefox_path or "not found (optional until live mode)"))
+    checks.append(_check("geckodriver", driver_path.exists() or not require_live, str(driver_path) if driver_path.exists() else "not found (run install_geckodriver.ps1)"))
     parent_ready = db.parent.exists() or db.parent.parent.exists()
     checks.append(_check("database_parent", parent_ready, f"{db.parent} (will be created if missing)" if parent_ready and not db.parent.exists() else str(db.parent)))
     result = {"schema_version": "amazon-us-preflight-v1", "require_live": require_live, "ok": all(item["ok"] for item in checks), "checks": checks}

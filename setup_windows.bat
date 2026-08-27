@@ -1,9 +1,18 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-py -3 -c "import sys; assert sys.version_info >= (3,11), 'Python 3.11 or newer is required'" || exit /b 1
+set "PYTHON_CMD="
+where py >nul 2>nul && set "PYTHON_CMD=py -3"
+if not defined PYTHON_CMD (
+  where python >nul 2>nul && set "PYTHON_CMD=python"
+)
+if not defined PYTHON_CMD (
+  echo Python 3.11 or newer is required.
+  exit /b 1
+)
+%PYTHON_CMD% -c "import sys; assert sys.version_info >= (3,11), 'Python 3.11 or newer is required'" || exit /b 1
 if not exist ".venv\Scripts\python.exe" (
-  py -3 -m venv .venv
+  %PYTHON_CMD% -m venv .venv
 )
 call .venv\Scripts\activate.bat
 python -m pip install -r requirements.txt || exit /b 1

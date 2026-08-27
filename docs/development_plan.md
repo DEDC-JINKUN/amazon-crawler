@@ -20,6 +20,7 @@
 - [x] 字段级 freshness 策略（价格/可售/Offer/评论/内容分级 TTL）。
 - [x] 按字段 freshness 自动生成刷新请求队列。
 - [x] 运行前 preflight 检查（清单、配置、Python、Firefox/Selenium 和状态目录）。
+- [x] 单 ASIN 真实页面探针（HTTP 成功、原始 HTML 和字段输出可追溯）。
 
 ## MVP 顺序
 

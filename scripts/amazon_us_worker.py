@@ -62,6 +62,7 @@ DEFAULTS: dict[str, Any] = {
     "user_agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0 Agent/amazon-us-worker",
     "stop_on_block": True,
     "geckodriver_path": "/snap/bin/geckodriver",
+    "firefox_binary": "",
     "marketplace": "US",
     "proxy_url": "",
     "global_requests_per_second": 0.0,
@@ -1047,7 +1048,14 @@ class SeleniumFirefoxAdapter:
         if user_agent:
             options.set_preference("general.useragent.override", user_agent)
         geckodriver_path = str(config.get("geckodriver_path") or "").strip()
+        if geckodriver_path and not Path(geckodriver_path).is_absolute():
+            geckodriver_path = str(ROOT / geckodriver_path)
         service = Service(executable_path=geckodriver_path) if geckodriver_path else Service()
+        firefox_binary = str(config.get("firefox_binary") or "").strip()
+        if firefox_binary and not Path(firefox_binary).is_absolute():
+            firefox_binary = str(ROOT / firefox_binary)
+        if firefox_binary:
+            options.binary_location = firefox_binary
         self.driver = webdriver.Firefox(options=options, service=service)
         self.driver.set_page_load_timeout(timeout or int(config.get("request_timeout_seconds", 30)))
 

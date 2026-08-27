@@ -2,6 +2,8 @@
 
 面向 Amazon.com 自有 ASIN 和竞品 ASIN 的统一网页采集 MVP。
 
+当前版本：`0.1.0`（单机 MVP，已完成单 ASIN 真实页面探针）。
+
 ## 当前开发边界
 
 - HTTP 优先获取公开 HTML；页面字段不足时再使用 Firefox 渲染。
@@ -36,9 +38,10 @@ python -m pytest tests -q
 ## 下一步
 
 1. 准备 Windows Python、Firefox 和 Selenium 运行环境。
-2. 用少量已授权 ASIN 做真实页面采集。
-3. 根据成功率、字段完整率、阻断率和耗时配置 Token Bucket 限速。
-4. 再决定是否接入授权代理池和多 Worker 扩容。
+2. 安装固定版本 geckodriver：`powershell -ExecutionPolicy Bypass -File scripts\install_geckodriver.ps1`。
+3. 用少量已授权 ASIN 做真实页面采集。
+4. 根据成功率、字段完整率、阻断率和耗时配置 Token Bucket 限速。
+5. 再决定是否接入授权代理池和多 Worker 扩容。
 
 本机 PostgreSQL 开发环境：
 

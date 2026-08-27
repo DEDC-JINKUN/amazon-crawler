@@ -1,4 +1,4 @@
-# Windows Selenium Manager configuration. Leave geckodriver_path empty.
+# Windows Selenium configuration. Run scripts\install_geckodriver.ps1 first.
 [worker]
 request_timeout_seconds = 30
 headless = true
@@ -7,7 +7,8 @@ max_attempts = 3
 review_page_limit = 0
 agent_name = "amazon-us-worker"
 user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0 Agent/amazon-us-worker"
-geckodriver_path = ""
+geckodriver_path = "tools/geckodriver-v0.37.1/geckodriver.exe"
+firefox_binary = "C:/Program Files/Mozilla Firefox/firefox.exe"
 # Production-only approved egress; keep empty for this POC.
 proxy_url = ""
 # Set these only after an approved live-collection budget is agreed.
