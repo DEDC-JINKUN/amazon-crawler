@@ -1098,10 +1098,44 @@ class SeleniumFirefoxAdapter:
             options.binary_location = firefox_binary
         self.driver = webdriver.Firefox(options=options, service=service)
         self.driver.set_page_load_timeout(timeout or int(config.get("request_timeout_seconds", 30)))
+        self._context_initialized = False
+
+    def _ensure_delivery_context(self) -> bool:
+        """Set the configured ZIP in this isolated browser session once."""
+        postal_code = str((self.config.get("context") or {}).get("postal_code") or "").strip()
+        if not postal_code or self._context_initialized:
+            return False
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        try:
+            current = self.driver.find_element(By.ID, "glow-ingress-line2").text or ""
+        except Exception:
+            current = ""
+        if postal_code in current:
+            self._context_initialized = True
+            return False
+        self.driver.find_element(By.ID, "nav-global-location-popover-link").click()
+        field = WebDriverWait(self.driver, 10).until(EC.presence_of_element_located((By.ID, "GLUXZipUpdateInput")))
+        field.clear()
+        field.send_keys(postal_code)
+        self.driver.find_element(By.CSS_SELECTOR, "#GLUXZipUpdate input[type='submit']").click()
+        WebDriverWait(self.driver, 10).until(
+            lambda driver: postal_code in (driver.find_element(By.ID, "glow-ingress-line2").text or "")
+        )
+        try:
+            self.driver.find_element(By.ID, "GLUXConfirmClose").click()
+        except Exception:
+            pass
+        self._context_initialized = True
+        return True
 
     def fetch(self, url: str) -> tuple[str, int | None]:
         try:
             self.driver.get(url)
+            if self._ensure_delivery_context():
+                self.driver.get(url)
         except Exception as exc:
             raise AdapterFetchError(str(exc)) from exc
         return self.driver.page_source, extract_response_status(self.driver)
@@ -1348,6 +1382,17 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                 if not browser_reason:
                     body, response_status, data, reason = browser_body, browser_status, parse_product_html(browser_body, row["url"]), browser_reason
         context_errors = validate_context(data, config.get("context")) if not reason else []
+        if context_errors and hasattr(adapter, "fetch_browser"):
+            try:
+                browser_body, browser_status = adapter.fetch_browser(row["url"])
+            except AdapterFetchError:
+                pass
+            else:
+                browser_reason = classify_block(browser_status, browser_body)
+                browser_data = parse_product_html(browser_body, row["url"]) if not browser_reason else data
+                browser_context_errors = validate_context(browser_data, config.get("context")) if not browser_reason else context_errors
+                if not browser_reason and not browser_context_errors:
+                    body, response_status, data, reason, context_errors = browser_body, browser_status, browser_data, browser_reason, []
         if context_errors:
             error_code = "context_mismatch:" + ",".join(context_errors)
         else:
