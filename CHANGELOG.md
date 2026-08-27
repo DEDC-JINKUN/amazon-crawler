@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.6 - 2026-08-28
+
+- PostgreSQL Collection API 的 `/readyz` 成功响应返回 `tenant_id`，便于多 Agent 监控核对；`/healthz` 保持不暴露租户。
+- 增加 readyz 租户标识回归。
+
 ## 0.2.5 - 2026-08-28
 
 - 实际访问 QA PostgreSQL tenant-scoped Collection API 的 `/readyz`，返回 HTTP 200 `ok=true`。

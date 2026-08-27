@@ -98,7 +98,11 @@ class CollectionHandler(BaseHTTPRequestHandler):
             except Exception:
                 self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "database_unavailable"})
                 return
-            self._send_json(HTTPStatus.OK, {"ok": True, "schema_version": API_SCHEMA_VERSION})
+            payload = {"ok": True, "schema_version": API_SCHEMA_VERSION}
+            tenant_id = getattr(self.server.repository, "tenant_id", None)
+            if tenant_id:
+                payload["tenant_id"] = tenant_id
+            self._send_json(HTTPStatus.OK, payload)
             return
         if not self._authorized():
             return

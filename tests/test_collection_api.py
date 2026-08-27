@@ -160,6 +160,30 @@ class CollectionApiTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
+    def test_readyz_reports_postgres_tenant_scope(self):
+        api = load("collection_api")
+
+        class ReadyRepository:
+            tenant_id = "tenant-a"
+
+            def load_schema_contract(self):
+                return {"item_state": ["next_retry_at"], "collection_evidence": ["context_json", "transfer_bytes"]}
+
+            def load_job_status(self):
+                return {"counts": {}}
+
+        server = api.CollectionServer(("127.0.0.1", 0), repository=ReadyRepository())
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/readyz", timeout=2) as response:
+                payload = json.loads(response.read())
+            self.assertEqual(payload["tenant_id"], "tenant-a")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def test_postgres_repository_uses_same_response_contract(self):
         storage = load("collection_storage")
 

@@ -47,7 +47,7 @@ PowerShell 回放支持 `-TenantId qa_latest_20260827`，并会同时将该租�
 GET /readyz
 ```
 
-`/healthz` 只证明进程存活；`/readyz` 会读取当前租户数据库并检查 PostgreSQL 关键 schema。数据库不可用或 schema 不完整时返回 HTTP 503 `database_unavailable` 或 `schema_not_ready`。
+`/healthz` 只证明进程存活；`/readyz` 会读取当前租户数据库并检查 PostgreSQL 关键 schema。数据库不可用或 schema 不完整时返回 HTTP 503 `database_unavailable` 或 `schema_not_ready`。PostgreSQL 后端正常时额外返回 `tenant_id`，SQLite 不返回该字段。
 
 ### 健康检查
 
