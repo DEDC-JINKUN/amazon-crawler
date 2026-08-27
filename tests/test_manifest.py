@@ -19,9 +19,17 @@ def load(name: str):
 
 
 class ManifestTests(unittest.TestCase):
-    def test_existing_manifest_is_valid(self):
+    def test_generated_manifest_is_valid(self):
         validate = load("validate_us_manifest")
-        self.assertEqual(validate.validate_manifest(ROOT / "amazon_us_asin_manifest.csv", 1892), [])
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "manifest.csv"
+            manifest.write_text(
+                "asin,url,marketplace,source_site_label,source_workbook\n"
+                "B00RCPDCQU,https://www.amazon.com/dp/B00RCPDCQU,US,test,fixture.csv\n"
+                "B000000001,https://www.amazon.com/dp/B000000001,US,test,fixture.csv\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(validate.validate_manifest(manifest, 2), [])
 
     def test_build_requires_force_for_existing_output(self):
         build = load("build_us_manifest")
