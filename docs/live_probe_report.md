@@ -24,6 +24,8 @@
 
 探针页面返回了 HKD 价格和“Deliver to Hong Kong”配送提示，说明当前网络或会话的区域上下文不是美国配送环境。该快照不能直接作为美国价格、可售或配送结论；正式采集前必须固定美国 ZIP/配送上下文，并把上下文写入任务维度。
 
+本机 PostgreSQL 回放后，Collection API 已完成端到端只读验证：健康检查通过，任务汇总返回 1,891 个 pending 和 1 个 reviews_pending，指定 ASIN 查询成功，PostgreSQL 的时间字段可正常转换为 JSON。
+
 ## 环境结论
 
 Firefox/Selenium 运行依赖已经具备；此前失败的原因是 Selenium Manager 无法在线下载 geckodriver，以及受限目录无法写 SQLite。固定驱动路径和临时状态库后，单页 HTTP 采集已成功。

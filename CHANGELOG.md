@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.7 - 2026-08-27
+
+- 修复 PostgreSQL `datetime/date` 返回值导致 Collection API JSON 序列化失败的问题。
+- 完成本机 PostgreSQL 后端 Collection API 健康、任务汇总和 ASIN 查询验证。
+
 ## 0.1.6 - 2026-08-27
 
 - 记录真实探针返回 HKD/香港配送上下文的业务限制。

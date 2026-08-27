@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sqlite3
+from datetime import date, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -41,11 +42,17 @@ def load_evidence(db_path: Path, marketplace: str, asin: str, limit: int = 20) -
     return SQLiteCollectionRepository(db_path).load_evidence(marketplace, asin, limit)
 
 
+def _json_default(value: Any) -> str:
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return str(value)
+
+
 class CollectionHandler(BaseHTTPRequestHandler):
     server: "CollectionServer"
 
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
-        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=_json_default).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))

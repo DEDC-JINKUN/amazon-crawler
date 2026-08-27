@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from datetime import datetime, timezone
 import tempfile
 import threading
 import urllib.error
@@ -23,6 +24,10 @@ def load(name: str):
 
 
 class CollectionApiTests(unittest.TestCase):
+    def test_json_default_serializes_postgres_datetime(self):
+        api = load("collection_api")
+        self.assertEqual(api._json_default(datetime(2026, 1, 1, tzinfo=timezone.utc)), "2026-01-01T00:00:00+00:00")
+
     def test_local_api_returns_snapshot_and_status(self):
         worker = load("amazon_us_worker")
         api = load("collection_api")
