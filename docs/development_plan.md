@@ -46,6 +46,7 @@
 - [x] 本机测试库 Collection API 健康、状态、单 ASIN 和批量查询验证。
 - [x] 重入队 dry-run 预览和 selected/updated 审计输出。
 - [x] 离线竞品 ASIN 候选发现、去重和运营审核标记。
+- [x] 运营批准竞品 ASIN 后安全转换为正式 manifest。
 - [x] 美国上下文质量门禁（国家/币种不匹配不写入快照）。
 - [x] 美国 ZIP 格式门禁（5 位或 ZIP+4，live 模式必填）。
 - [x] 商品历史快照保存和 `/history` 查询。
