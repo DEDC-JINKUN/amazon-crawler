@@ -40,6 +40,15 @@ python -m pytest tests -q
 3. 根据成功率、字段完整率、阻断率和耗时配置 Token Bucket 限速。
 4. 再决定是否接入授权代理池和多 Worker 扩容。
 
+本机 PostgreSQL 开发环境：
+
+```powershell
+docker compose up -d postgres
+docker compose ps
+```
+
+数据库只绑定本机 `127.0.0.1:5433`，schema 会在首次创建数据卷时自动执行。`.env` 仅用于本机开发并被 Git 忽略；切换公司数据库时只替换 DSN 和凭据，不提交 `.env`。
+
 本地只读 Collection API：
 
 ```powershell
