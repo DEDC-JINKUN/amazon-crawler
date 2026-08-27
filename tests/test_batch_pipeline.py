@@ -86,6 +86,26 @@ class BatchCheckpointTests(unittest.TestCase):
             self.assertEqual([kind for kind, _ in adapter.calls], ["http", "browser"])
             conn.close()
 
+    def test_http_transport_error_uses_browser_when_zip_is_configured(self):
+        worker_html = (FIXTURES / "product_unavailable_video_aplus.html").read_text()
+
+        class Adapter:
+            source_type = "http_html"
+
+            def fetch(self, url):
+                raise worker.AdapterFetchError("truncated response")
+
+            def fetch_browser(self, url):
+                self.source_type = "selenium_dom"
+                return worker_html, 200
+
+        with tempfile.TemporaryDirectory() as directory:
+            worker, conn, config = self._setup(Path(directory))
+            config["context"] = {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"}
+            self.assertEqual(worker.run_actions(conn, Adapter(), config, limit=1), 1)
+            self.assertEqual(conn.execute("SELECT status FROM item_state").fetchone()[0], "reviews_pending")
+            conn.close()
+
         worker_html = (FIXTURES / "product_unavailable_video_aplus.html").read_text()
         page1 = (FIXTURES / "reviews_page_1.html").read_text()
         page2 = (FIXTURES / "reviews_page_2.html").read_text()

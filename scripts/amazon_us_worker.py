@@ -18,6 +18,7 @@ import re
 import sqlite3
 import sys
 import tempfile
+import time
 import tomllib
 import urllib.error
 import urllib.request
@@ -1135,9 +1136,20 @@ class SeleniumFirefoxAdapter:
                 self.driver.find_element(By.ID, "GLUXConfirmClose").click()
             except Exception:
                 pass
-        WebDriverWait(self.driver, 10).until(
-            lambda driver: postal_code in (driver.find_element(By.ID, "glow-ingress-line2").text or "")
-        )
+        def context_ready(driver: Any) -> bool:
+            header = driver.find_element(By.ID, "glow-ingress-line2").text or ""
+            if postal_code not in header:
+                return False
+            try:
+                currency = driver.find_element(By.ID, "currencyOfPreference").get_attribute("value") or ""
+            except Exception:
+                currency = ""
+            return not currency or currency.upper() == "USD"
+
+        WebDriverWait(self.driver, 15).until(context_ready)
+        # Let Amazon finish repainting price/availability modules after the
+        # location modal closes before taking page_source.
+        time.sleep(0.8)
         self._context_initialized = True
         return True
 
@@ -1374,11 +1386,24 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
         try:
             body, response_status = adapter.fetch(row["url"])
         except AdapterFetchError as exc:
-            _record_failure(conn, "US", row["asin"], "fetch_error", str(exc))
-            if refresh_job_id and row["asin"] == refresh_asin:
-                _finish_refresh_request(conn, refresh_job_id, "failed")
-            actions += 1
-            continue
+            # A truncated/timeout HTTP response can still be recoverable by
+            # the browser layer when a delivery context is configured. Keep
+            # the normal HTTP-first route, but do not discard the fallback.
+            postal_code = str((config.get("context") or {}).get("postal_code") or "").strip()
+            if not postal_code or not hasattr(adapter, "fetch_browser"):
+                _record_failure(conn, "US", row["asin"], "fetch_error", str(exc))
+                if refresh_job_id and row["asin"] == refresh_asin:
+                    _finish_refresh_request(conn, refresh_job_id, "failed")
+                actions += 1
+                continue
+            try:
+                body, response_status = adapter.fetch_browser(row["url"])
+            except AdapterFetchError:
+                _record_failure(conn, "US", row["asin"], "fetch_error", str(exc))
+                if refresh_job_id and row["asin"] == refresh_asin:
+                    _finish_refresh_request(conn, refresh_job_id, "failed")
+                actions += 1
+                continue
         reason = classify_block(response_status, body)
         data = parse_product_html(body, row["url"]) if not reason else {"asin": "", "canonical_url": ""}
         if not reason and hasattr(adapter, "needs_browser_fallback") and adapter.needs_browser_fallback(data):

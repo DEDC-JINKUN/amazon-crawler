@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.20 - 2026-08-27
+
+- 美国 VPN 下在全新空状态库完成 1 条美西 live 采集：HTTP 200、美国上下文通过并写入商品快照。
+- HTTP 传输断片在配置 ZIP 时自动尝试 Firefox 兜底，失败仍保留断点和错误证据。
+
 ## 0.1.19 - 2026-08-27
 
 - HTTP chunked 响应断片统一归类为可重试的 `AdapterFetchError`，不会再使 worker 进程崩溃。
