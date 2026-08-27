@@ -17,6 +17,16 @@ def load():
 
 
 class PreflightTests(unittest.TestCase):
+    def test_proxy_validation_rejects_embedded_credentials(self):
+        preflight = load()
+        ok, detail = preflight._validate_proxy_url("http://user:secret@127.0.0.1:8080")
+        self.assertFalse(ok)
+        self.assertNotIn("secret", detail)
+
+    def test_proxy_validation_accepts_explicit_http_proxy(self):
+        preflight = load()
+        self.assertEqual(preflight._validate_proxy_url("http://127.0.0.1:8080"), (True, "configured http proxy"))
+
     def test_non_live_preflight_allows_missing_browser(self):
         preflight = load()
         with tempfile.TemporaryDirectory() as directory:

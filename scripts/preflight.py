@@ -8,6 +8,7 @@ import json
 import re
 import shutil
 import sys
+from urllib.parse import urlsplit
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,22 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _check(name: str, ok: bool, detail: str) -> dict[str, Any]:
     return {"name": name, "ok": bool(ok), "detail": detail}
+
+
+def _validate_proxy_url(value: str) -> tuple[bool, str]:
+    """Validate an explicit proxy without exposing credentials in diagnostics."""
+    value = value.strip()
+    if not value:
+        return True, "direct"
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return False, "invalid proxy URL"
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        return False, "proxy must be an explicit http(s) URL"
+    if parts.username or parts.password:
+        return False, "embedded proxy credentials are not allowed; use approved credential configuration"
+    return True, f"configured {parts.scheme} proxy"
 
 
 def _load_validator():
@@ -46,6 +63,8 @@ def run_preflight(manifest: Path, config: Path, db: Path, *, require_live: bool 
             worker_spec.loader.exec_module(worker)
             loaded = worker.load_config(config)
             checks.append(_check("user_agent", f"Agent/{loaded['agent_name']}" in loaded["user_agent"], "transparent"))
+            proxy_ok, proxy_detail = _validate_proxy_url(str(loaded.get("proxy_url") or ""))
+            checks.append(_check("proxy_url", proxy_ok, proxy_detail))
             context = loaded.get("context", {})
             postal_code = str(context.get("postal_code") or "").strip()
             is_us = str(context.get("expected_country") or "").upper() == "US"
