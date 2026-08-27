@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.78 - 2026-08-27
+
+- 新增只读 `run_receipt.py`，一次合并结构验收、采集指标、传输字节和可选代理成本。
+- 回执明确分开 `verification.ok` 与成本结果，旧 CSV 头不匹配时返回非零。
+- 实际 1,892 清单测试发现旧输出缺少 `transfer_bytes`，已按门禁处理，不自动兼容为通过。
+
 ## 0.1.77 - 2026-08-27
 
 - Collection API 单 ASIN 和 evidence 查询现在返回新证据的 `transfer_bytes`，与传输流量指标口径一致。

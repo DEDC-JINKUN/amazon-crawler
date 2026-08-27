@@ -2,11 +2,12 @@
 
 面向 Amazon.com 自有 ASIN 和竞品 ASIN 的统一网页采集 MVP。
 
-当前版本：`0.1.77`（Collection API 传输字节证据）。
+当前版本：`0.1.78`（一次运行回执和流量成本统一汇总）。
 
 本地测试结果可用 `scripts/evidence_health.py` 检查源 HTML 存在性和哈希；用 `scripts/collection_metrics.py` 按 `run_id` 查看请求数、流量和有效吞吐。
 代理流量和成本实测见 [`docs/traffic_cost_validation.md`](docs/traffic_cost_validation.md)，并用 `scripts/traffic_cost_report.py` 结合代理商后台的用量差值出具报告。
 付费出口批量前探针见 [`docs/egress_probe.md`](docs/egress_probe.md)。
+一次运行的结构、流量和成本回执见 [`docs/run_receipt.md`](docs/run_receipt.md)。
 
 ## 当前开发边界
 
