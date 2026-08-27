@@ -14,6 +14,10 @@ except ModuleNotFoundError:
     from collection_storage import PostgresCollectionRepository
 
 
+def schema_ok(contract: dict[str, list[str]]) -> bool:
+    return contract.get("item_state") == ["next_retry_at"] and contract.get("collection_evidence") == ["context_json", "transfer_bytes"]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dsn", required=True)
@@ -21,14 +25,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         repository = PostgresCollectionRepository(args.dsn)
-        result = {"schema_version": "amazon-us-postgres-verification-v1", "job_status": repository.load_job_status()}
+        contract = repository.load_schema_contract()
+        result = {"schema_version": "amazon-us-postgres-verification-v1", "schema_ok": schema_ok(contract), "schema_contract": contract, "job_status": repository.load_job_status()}
         if args.asin:
             result["product"] = repository.load_product("US", args.asin.upper())
     except (RuntimeError, ValueError, OSError) as exc:
         print(f"error: {exc}")
         return 1
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
-    return 0
+    return 0 if result["schema_ok"] else 2
 
 
 if __name__ == "__main__":

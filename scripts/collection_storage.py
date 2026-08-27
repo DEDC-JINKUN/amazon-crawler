@@ -212,6 +212,26 @@ class PostgresCollectionRepository:
         row = cursor.fetchone()
         return dict(row) if row is not None else None
 
+    def load_schema_contract(self) -> dict[str, list[str]]:
+        """Return required schema columns present in the PostgreSQL backend."""
+        required = {
+            "item_state": {"next_retry_at"},
+            "collection_evidence": {"context_json", "transfer_bytes"},
+        }
+        with self._connect_factory() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT table_name, column_name FROM information_schema.columns "
+                    "WHERE table_schema=%s AND table_name IN (%s,%s)",
+                    ("amazon_us", "item_state", "collection_evidence"),
+                )
+                present: dict[str, set[str]] = {table: set() for table in required}
+                for row in cursor.fetchall():
+                    table = row["table_name"] if isinstance(row, dict) else row[0]
+                    column = row["column_name"] if isinstance(row, dict) else row[1]
+                    present.setdefault(table, set()).add(column)
+        return {table: sorted(required_columns & present.get(table, set())) for table, required_columns in required.items()}
+
     def load_product(self, marketplace: str, asin: str) -> dict[str, Any] | None:
         with self._connect_factory() as conn:
             with conn.cursor() as cursor:

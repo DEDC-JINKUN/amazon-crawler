@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.96 - 2026-08-27
+
+- `verify_postgres.py` 新增 schema 契约检查，在业务查询前确认 `next_retry_at`、`context_json` 和 `transfer_bytes`。
+- 本机默认库和独立 QA 库均通过 schema 检查，数据状态对账仍单独处理。
+
 ## 0.1.95 - 2026-08-27
 
 - 补充本机独立 `amazon_us_qa` 回放模板和成功结果，明确不覆盖旧默认租户。
