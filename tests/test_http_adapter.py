@@ -199,6 +199,7 @@ class HttpAdapterTests(unittest.TestCase):
             body, status = adapter.fetch("https://www.amazon.com/dp/B00RCPDCQU")
         self.assertEqual((body, status), ("<html>complete</html>", 200))
         self.assertEqual(opener.calls, 2)
+        self.assertEqual(adapter.last_transfer_bytes, len(b"partial") + len(b"<html>complete</html>"))
         adapter.close()
 
     def test_http_error_with_truncated_body_returns_status_without_crashing(self):

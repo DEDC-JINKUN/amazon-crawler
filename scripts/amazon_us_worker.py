@@ -1347,7 +1347,7 @@ class HttpFirstAdapter:
 
     def fetch(self, url: str) -> tuple[str, int | None]:
         self.last_retry_after_seconds = None
-        self.last_transfer_bytes = None
+        self.last_transfer_bytes = 0
         max_attempts = max(1, min(int(self.config.get("http_max_attempts", 2)), 3))
         backoff = max(0.0, min(float(self.config.get("http_retry_backoff_seconds", 0.5)), 5.0))
         last_error: Exception | None = None
@@ -1366,7 +1366,7 @@ class HttpFirstAdapter:
             try:
                 with self.opener.open(request, timeout=self.timeout) as response:
                     encoded_body = response.read()
-                    self.last_transfer_bytes = len(encoded_body)
+                    self.last_transfer_bytes += len(encoded_body)
                     body = self._decode_content(response, encoded_body)
                     self.source_type = "http_html"
                     return self._decode(response, body), int(response.getcode() or 200)
@@ -1377,11 +1377,16 @@ class HttpFirstAdapter:
                     encoded_body = exc.read()
                 except http.client.IncompleteRead as partial:
                     encoded_body = partial.partial or b""
-                self.last_transfer_bytes = len(encoded_body)
+                self.last_transfer_bytes += len(encoded_body)
                 body = self._decode_content(exc, encoded_body)
                 self.source_type = "http_html"
                 return self._decode(exc, body), int(exc.code)
-            except (urllib.error.URLError, http.client.IncompleteRead, ConnectionResetError, TimeoutError, OSError) as exc:
+            except http.client.IncompleteRead as exc:
+                self.last_transfer_bytes += len(exc.partial or b"")
+                last_error = exc
+                if attempt < max_attempts and backoff:
+                    time.sleep(backoff * attempt)
+            except (urllib.error.URLError, ConnectionResetError, TimeoutError, OSError) as exc:
                 last_error = exc
                 if attempt < max_attempts and backoff:
                     time.sleep(backoff * attempt)
