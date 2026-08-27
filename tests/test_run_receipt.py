@@ -28,6 +28,7 @@ def test_compose_receipt_keeps_verification_and_metrics_separate():
             "state": {"count": 10, "status_counts": {"succeeded": 9, "pending": 1}},
             "coverage": {"missing_state": 0, "extra_state": 0},
             "blocked": [],
+            "failed": [],
             "exhausted_failed": [],
         },
         [],
@@ -38,6 +39,18 @@ def test_compose_receipt_keeps_verification_and_metrics_separate():
     assert receipt["verification"]["collection_phase"] == "collecting"
     assert receipt["collection_metrics"]["transfer_bytes_total"] == 1000
     assert receipt["cost"]["proxy_bill_measurement"] is None
+
+
+def test_compose_receipt_lists_actionable_asins():
+    receipt = load_module().compose_receipt(
+        {"ok": True, "blocked": [{"asin": "B000000001", "reason": "captcha"}], "failed": [{"asin": "B000000002", "status": "failed"}], "exhausted_failed": ["B000000003"]},
+        [], {}, None,
+    )
+    assert receipt["action_items"] == {
+        "blocked_asins": ["B000000001"],
+        "failed_asins": ["B000000002"],
+        "exhausted_failed_asins": ["B000000003"],
+    }
 
 
 def test_compose_receipt_marks_verification_errors():

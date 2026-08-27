@@ -230,6 +230,10 @@ def verify(manifest: Path = DEFAULT_MANIFEST, state: Path = DEFAULT_STATE, outpu
                     errors.append(f"succeeded 非末页终态: {row['asin']}")
         conn.close()
     exhausted_failed = [row["asin"] for row in item_rows if row["status"] == "failed" and row["attempts"] >= row["max_attempts"]]
+    failed_items = [
+        {"asin": row["asin"], "status": row["status"], "attempts": row["attempts"], "last_error": row["last_error"], "block_reason": row["block_reason"]}
+        for row in item_rows if row["status"] in {"failed", "blocked"}
+    ]
     collected_count = sum(state_counts.get(status, 0) for status in ("product_done", "reviews_pending", "succeeded", "blocked", "failed"))
     initialized = bool(item_rows) and state_counts.get("pending", 0) == len(item_rows) and not evidence_rows and not product_by_key
     terminal_count = sum(state_counts.get(status, 0) for status in ("succeeded", "blocked"))
@@ -246,6 +250,7 @@ def verify(manifest: Path = DEFAULT_MANIFEST, state: Path = DEFAULT_STATE, outpu
         "duplicate_counts": duplicates,
         "coverage": {"missing_state": len(missing), "extra_state": len(extra)},
         "blocked": [{"asin": row["asin"], "reason": row["block_reason"]} for row in item_rows if row["status"] == "blocked"],
+        "failed": failed_items,
         "exhausted_failed": exhausted_failed,
         "errors": errors,
         "ok": not errors,

@@ -56,6 +56,11 @@ def compose_receipt(
             "error_count": len(verification_errors),
             "errors": verification_errors,
         },
+        "action_items": {
+            "blocked_asins": [item.get("asin") for item in verification.get("blocked", []) if item.get("asin")],
+            "failed_asins": [item.get("asin") for item in verification.get("failed", []) if item.get("status") == "failed" and item.get("asin")],
+            "exhausted_failed_asins": list(verification.get("exhausted_failed", [])),
+        },
         "collection_metrics": collection,
         "cost": cost,
     }
