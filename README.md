@@ -30,6 +30,8 @@ amazon-scraping/
 python -m pytest tests -q
 ```
 
+首次运行 `setup_windows.bat` 时，如果根目录没有业务清单，会自动复制两条记录的 `amazon_us_asin_manifest.example.csv` 作为离线开发样例。接入真实采集前，必须用经过确认的业务清单替换 `amazon_us_asin_manifest.csv`；真实清单不会提交到 Git。
+
 ## 下一步
 
 1. 准备 Windows Python、Firefox 和 Selenium 运行环境。

@@ -14,3 +14,4 @@ state/*
 *.log
 .env
 !.env.example
+!amazon_us_asin_manifest.example.csv
