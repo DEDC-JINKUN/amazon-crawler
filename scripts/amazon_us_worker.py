@@ -970,16 +970,12 @@ def recover_running(conn: sqlite3.Connection) -> int:
 def _persist_raw_html(raw_html_dir: Path | None, run_id: str, asin: str, body: str) -> str | None:
     if raw_html_dir is None:
         return None
-    digest = hashlib.sha256(body.encode()).hexdigest()
-    safe_run_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", run_id)[:80] or "run"
-    safe_asin = re.sub(r"[^A-Za-z0-9_.-]+", "_", asin)[:20] or "asin"
-    relative = Path("US") / safe_asin / f"{safe_run_id}-{digest[:16]}.html"
-    path = raw_html_dir / relative
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(body, encoding="utf-8")
-    temporary.replace(path)
-    return relative.as_posix()
+    try:
+        from raw_html_store import LocalRawHtmlStore
+    except ModuleNotFoundError:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from raw_html_store import LocalRawHtmlStore
+    return LocalRawHtmlStore(raw_html_dir).put(run_id, asin, body)
 
 
 def _insert_evidence(conn: sqlite3.Connection, run_id: str, asin: str, url: str, status: int | None, body: str, block_reason: str | None, error_code: str | None = None, source_type: str = "selenium_dom", raw_html_dir: Path | None = None, raw_html_path: str | None = None, context: dict[str, Any] | None = None) -> str | None:

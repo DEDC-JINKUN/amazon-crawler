@@ -189,6 +189,8 @@ active → paused → retired
 
 原始 HTML 的当前 POC 实现是本机文件系统：`data/amazon_us/<run>/raw_html/US/<asin>/<run_id>.html`，数据库/CSV 保存相对路径、哈希、采集时间、来源和解析器版本。对象存储尚未接入；生产环境再将该目录替换为公司批准的 S3 兼容对象存储，保留同一引用字段和生命周期策略。
 
+worker 通过 `RawHtmlStore` 接口写入；当前实现为 `LocalRawHtmlStore`，采用临时文件替换。未来接入对象存储时不改变 evidence 的 key、哈希和审计字段。
+
 Weknora 写入应由独立的 `knowledge_publisher` 任务完成，而不是由每个采集 Worker 直接写入。发布条件至少包括：核心字段质量门禁通过、来源和时间完整、内容脱敏/版权边界明确、已有档案的变化可追溯。Agent 查询时优先读取 PostgreSQL 的最新事实；需要语义检索时读取 Weknora 的档案和摘要，并同时返回事实时间和质量状态。
 
 ## 6. 自建网页爬虫技术方案

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.51 - 2026-08-27
+
+- 抽出 `RawHtmlStore` 接口和本地原子写入实现，为后续 S3 兼容对象存储替换保留稳定边界。
+- 增加本地 raw HTML 存储回归测试，不改变当前目录和 evidence key。
+
 ## 0.1.50 - 2026-08-27
 
 - 增加区域上下文迁移回归，验证 `context_json` 从 SQLite evidence 保留到 PostgreSQL payload。
