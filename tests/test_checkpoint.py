@@ -34,6 +34,10 @@ class CheckpointTests(unittest.TestCase):
             paginator.record_page(1, "https://www.amazon.com/reviews?page=1", "https://www.amazon.com/reviews?page=2", records)
             paginator.record_page(1, "https://www.amazon.com/reviews?page=1", "https://www.amazon.com/reviews?page=2", records)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM review_record").fetchone()[0], 1)
+            edited = {**records[0], "body": "edited body", "page": 1}
+            paginator.record_page(1, "https://www.amazon.com/reviews?page=1", "https://www.amazon.com/reviews?page=2", [edited])
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM review_record").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT body FROM review_record WHERE review_id='R1'").fetchone()[0], "edited body")
             self.assertEqual(paginator.resume(), (2, "https://www.amazon.com/reviews?page=2"))
             conn.close()
 

@@ -98,6 +98,8 @@ HTTP 传输层默认 `http_max_attempts=2`、`http_retry_backoff_seconds=0.5`，
 
 评论页若使用 `/portal/customer-reviews/` 且返回空记录，worker 会在标记 `empty_review_page` 前尝试 `/product-reviews/<ASIN>`；备用入口仍为空时才按空页失败，并保留两个入口的 evidence。
 
+评论记录以 `marketplace + asin + review_id` 为主键：重复抓取不会新增重复记录，Amazon 编辑同一评论时会更新已有记录；分页游标仍按 `next_review_url/next_review_page` 续跑。
+
 `--once` 是一批 action，不是一条商品或一页评论。遇 403/CAPTCHA 阻断返回非零并保留 checkpoint，不再选择；遇 429 返回非零但保留 pending/reviews_pending 游标，下一小时使用同一会话类型重试；非阻断 failed 在达到 `max_attempts` 前继续。
 
 若配置 `user_agent`，必须包含透明标识 `Agent/<agent_name>`；默认配置已使用带 `Agent/amazon-us-worker` 的 Firefox UA，不覆盖为隐藏身份。不存在 Selenium 时 live 模式仅报告清晰依赖错误，不会发出网络请求。
