@@ -10,14 +10,16 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 try:
     from collection_storage import CollectionRepository, PostgresCollectionRepository, SQLiteCollectionRepository
+    from freshness_policy import FreshnessPolicy
 except ModuleNotFoundError:
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from collection_storage import CollectionRepository, PostgresCollectionRepository, SQLiteCollectionRepository
+    from freshness_policy import FreshnessPolicy
 
 API_SCHEMA_VERSION = "amazon-us-collection-v1"
 ASIN_PATH = re.compile(r"^/v1/asin/([A-Za-z]{2})/([A-Za-z0-9]{10})$")
@@ -84,6 +86,12 @@ class CollectionHandler(BaseHTTPRequestHandler):
             if payload is None:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "asin_not_found", "asin": asin, "marketplace": marketplace})
                 return
+            requested = [item.strip() for item in parse_qs(urlsplit(self.path).query).get("fields", [""])[0].split(",") if item.strip()]
+            if requested:
+                if len(requested) > 10 or any(len(item) > 40 for item in requested):
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_fields"})
+                    return
+                payload["freshness"] = FreshnessPolicy().evaluate(payload.get("retrieved_at"), requested)
             self._send_json(HTTPStatus.OK, payload)
             return
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "route_not_found"})

@@ -207,6 +207,10 @@ class CollectionApiTests(unittest.TestCase):
                 self.assertEqual(response.status, 200)
             self.assertEqual([item["asin"] for item in payload["items"]], ["B00RCPDCQU", "B000000001"])
             self.assertFalse(payload["items"][1]["found"])
+            with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/v1/asin/US/B00RCPDCQU?fields=price,content", timeout=2) as response:
+                freshness = json.loads(response.read())["freshness"]
+            self.assertTrue(freshness["stale"])
+            self.assertEqual(freshness["stale_groups"], ["price", "content"])
         finally:
             server.shutdown()
             server.server_close()
