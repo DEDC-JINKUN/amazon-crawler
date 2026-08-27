@@ -8,6 +8,8 @@
 
 生产采集配置应填写 `[context]` 的 `expected_country=US`、`expected_currency=USD` 和业务 ZIP。页面出现明显非美国币种或配送地区时，质量门禁会拒绝写入快照并记录 `context_mismatch`。
 
+拿到批准付费出口后，先用 [`check_egress.py`](egress_probe.md) 进行单线路探针：2xx 且响应非空才允许小批量；403/429 或连接/认证失败则暂停出口，不直接启动批量任务。探针不代替批量采集中的阻断检测和冷却。
+
 HTTP 请求支持全局和出口级 Token Bucket 限速：`global_requests_per_second`、`egress_requests_per_second` 和 `rate_burst` 默认为 0/0/1，保持 POC 不主动等待；生产接入授权出口后再设置。限速模块不负责代理轮换，出口切换仍需经过批准、隔离和人工审计。
 
 遇到 HTTP `403`、或页面标题/正文包含明确阻断短语 `robot check`、`enter the characters`、`captcha`、`sorry we just need to make sure you're not a robot`、`automated access`、`access denied`、`too many requests`，立即写入 `blocked` 和 `block_reason`，停止本次流水线，不重试、不切换 IP、不代理规避、不伪装身份。HTTP `429` 是可恢复的限流：保留当前 product/review 游标，写 evidence 和 `http_429`，本次 run 停止；优先按数字秒数或 HTTP-date `Retry-After` 冷却（最多 24 小时），无效或缺失时默认等待 1 小时，然后使用同一会话类型/透明身份重试同一 action，不代理、不换 IP。普通文本如 `robot vacuum` 不会阻断。
