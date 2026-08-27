@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.3 - 2026-08-28
+
+- 实际验证 Collection API 错误租户访问同一 ASIN 返回 404，确认不会跨租户泄露。
+- 补充 tenant isolation 的 HTTP 路由验收记录。
+
 ## 0.2.2 - 2026-08-28
 
 - `replay_postgres.ps1` 新增 `-TenantId`，并将租户同时传给 SQLite 回放和 PostgreSQL 验收。
