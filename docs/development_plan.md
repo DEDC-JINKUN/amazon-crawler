@@ -13,6 +13,7 @@
 - [x] 本机 PostgreSQL schema 执行和 SQLite→PostgreSQL 回放。
 - [x] 记录真实探针的区域上下文限制（HKD/香港配送）；美国 ZIP 固定仍是正式上线前门禁。
 - [x] PostgreSQL 后端 Collection API 端到端只读验证。
+- [x] SQLite/PostgreSQL 后端状态和 ASIN 样本只读对账。
 - [x] 美国上下文质量门禁（国家/币种不匹配不写入快照）。
 - [x] 美国 ZIP 格式门禁（5 位或 ZIP+4，live 模式必填）。
 - [x] 商品历史快照保存和 `/history` 查询。

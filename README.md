@@ -2,7 +2,7 @@
 
 面向 Amazon.com 自有 ASIN 和竞品 ASIN 的统一网页采集 MVP。
 
-当前版本：`0.1.11`（单机 MVP，增加商品历史快照查询）。
+当前版本：`0.1.12`（增加 SQLite/PostgreSQL 后端只读对账）。
 
 ## 当前开发边界
 
@@ -91,6 +91,14 @@ python scripts/preflight.py --require-live
 
 ```powershell
 python scripts/schedule_refresh.py --db state/amazon_us.sqlite3 --fields price,availability
+```
+
+后端回放后，用只读对账工具确认 SQLite 与 PostgreSQL 的 API 视图一致（命令和安全的密码传递方式见 [`docs/compare_backends.md`](docs/compare_backends.md)）：
+
+```powershell
+$env:PGPASSWORD = '本机密码'
+try { .venv\Scripts\python.exe scripts\compare_backends.py --sqlite state\amazon_us.sqlite3 --dsn 'host=127.0.0.1 port=5432 dbname=postgres user=postgres' --sample-limit 20 }
+finally { Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue }
 ```
 
 SQLite 回放到 PostgreSQL（拿到公司 DSN 后执行）：
