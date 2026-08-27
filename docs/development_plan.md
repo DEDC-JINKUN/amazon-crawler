@@ -15,6 +15,7 @@
 - [x] PostgreSQL 后端 Collection API 端到端只读验证。
 - [x] SQLite/PostgreSQL 后端状态和 ASIN 样本只读对账。
 - [x] 代理 URL preflight 校验（禁止 URL 内嵌凭证）。
+- [x] HTTP 代理认证从成对环境变量读取，不持久化凭证。
 - [x] 美国上下文质量门禁（国家/币种不匹配不写入快照）。
 - [x] 美国 ZIP 格式门禁（5 位或 ZIP+4，live 模式必填）。
 - [x] 商品历史快照保存和 `/history` 查询。

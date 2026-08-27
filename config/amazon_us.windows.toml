@@ -11,6 +11,9 @@ geckodriver_path = "tools/geckodriver-v0.37.1/geckodriver.exe"
 firefox_binary = "C:/Program Files/Mozilla Firefox/firefox.exe"
 # Production-only approved egress; keep empty for this POC.
 proxy_url = ""
+# Optional: names of environment variables containing proxy credentials.
+proxy_username_env = ""
+proxy_password_env = ""
 # Set these only after an approved live-collection budget is agreed.
 global_requests_per_second = 0
 egress_requests_per_second = 0

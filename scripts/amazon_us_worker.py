@@ -12,6 +12,7 @@ import csv
 import hashlib
 import html as html_module
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -72,6 +73,8 @@ DEFAULTS: dict[str, Any] = {
     "firefox_binary": "",
     "marketplace": "US",
     "proxy_url": "",
+    "proxy_username_env": "",
+    "proxy_password_env": "",
     "global_requests_per_second": 0.0,
     "egress_requests_per_second": 0.0,
     "rate_burst": 1,
@@ -1110,7 +1113,21 @@ class HttpFirstAdapter:
         proxy_url = str(self.config.get("proxy_url") or "").strip()
         if proxy_url:
             proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
-            self.opener = urllib.request.build_opener(proxy_handler)
+            username_env = str(self.config.get("proxy_username_env") or "").strip()
+            password_env = str(self.config.get("proxy_password_env") or "").strip()
+            if bool(username_env) != bool(password_env):
+                raise ValueError("proxy_username_env and proxy_password_env must be configured together")
+            if username_env:
+                username = os.environ.get(username_env, "")
+                password = os.environ.get(password_env, "")
+                if not username or not password:
+                    raise ValueError("proxy credential environment variables are not both populated")
+                password_manager = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+                password_manager.add_password(None, proxy_url, username, password)
+                auth_handler = urllib.request.ProxyBasicAuthHandler(password_manager)
+                self.opener = urllib.request.build_opener(proxy_handler, auth_handler)
+            else:
+                self.opener = urllib.request.build_opener(proxy_handler)
         else:
             self.opener = urllib.request.build_opener()
         self.egress_id = str(self.config.get("egress_id") or "direct")

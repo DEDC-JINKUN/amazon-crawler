@@ -70,7 +70,7 @@ env -u APPIMAGE -u __PYVENV_LAUNCHER__ .venv/bin/python scripts/amazon_us_worker
 
 Windows 运行前先执行 `powershell -ExecutionPolicy Bypass -File scripts\install_geckodriver.ps1` 和 `python scripts\preflight.py --require-live`。固定驱动版本后再执行 live；真实探针记录见 `docs/live_probe_report.md`。
 
-如果配置付费代理，`preflight` 会校验 `proxy_url` 必须是明确的 HTTP(S) 出口，并拒绝把用户名/密码写进 URL；凭证应由批准的密钥配置注入。当前 POC 的 `proxy_url` 为空，表示直连。
+如果配置付费代理，`preflight` 会校验 `proxy_url` 必须是明确的 HTTP(S) 出口，并拒绝把用户名/密码写进 URL；需要认证时只填写 `proxy_username_env` / `proxy_password_env` 两个环境变量名，worker 在运行时读取其值。当前 POC 的 `proxy_url` 为空，表示直连。
 
 Windows 每小时任务应调用 `run_scheduled_windows.bat`：它会先运行 `preflight --require-live`（包括美国 ZIP 检查），再按字段新鲜度生成刷新队列，随后执行 worker、物化 CSV 和验收。`install_hourly_task_windows.bat` 已指向该脚本；`run_once_windows.bat` 仍用于人工单批运行。
 

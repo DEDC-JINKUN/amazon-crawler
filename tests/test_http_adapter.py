@@ -77,6 +77,22 @@ class HttpAdapterTests(unittest.TestCase):
         proxy_handler.assert_called_once_with({"http": "http://127.0.0.1:8080", "https": "http://127.0.0.1:8080"})
         build_opener.assert_called_once_with(proxy_handler.return_value)
 
+    def test_proxy_credentials_are_read_from_named_environment_variables(self):
+        worker = load_worker()
+        with patch.dict(worker.os.environ, {"PROXY_USER": "alice", "PROXY_PASS": "pw"}, clear=False), \
+             patch.object(worker.urllib.request, "ProxyHandler") as proxy_handler, \
+             patch.object(worker.urllib.request, "HTTPPasswordMgrWithDefaultRealm") as manager, \
+             patch.object(worker.urllib.request, "ProxyBasicAuthHandler") as auth_handler, \
+             patch.object(worker.urllib.request, "build_opener"):
+            worker.HttpFirstAdapter({**worker.DEFAULTS, "proxy_url": "http://127.0.0.1:8080", "proxy_username_env": "PROXY_USER", "proxy_password_env": "PROXY_PASS"})
+        manager.return_value.add_password.assert_called_once_with(None, "http://127.0.0.1:8080", "alice", "pw")
+        auth_handler.assert_called_once_with(manager.return_value)
+
+    def test_proxy_credentials_require_both_environment_names(self):
+        worker = load_worker()
+        with self.assertRaises(ValueError):
+            worker.HttpFirstAdapter({**worker.DEFAULTS, "proxy_url": "http://127.0.0.1:8080", "proxy_username_env": "PROXY_USER"})
+
 
 if __name__ == "__main__":
     unittest.main()

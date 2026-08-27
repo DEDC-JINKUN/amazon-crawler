@@ -65,6 +65,9 @@ def run_preflight(manifest: Path, config: Path, db: Path, *, require_live: bool 
             checks.append(_check("user_agent", f"Agent/{loaded['agent_name']}" in loaded["user_agent"], "transparent"))
             proxy_ok, proxy_detail = _validate_proxy_url(str(loaded.get("proxy_url") or ""))
             checks.append(_check("proxy_url", proxy_ok, proxy_detail))
+            username_env = str(loaded.get("proxy_username_env") or "").strip()
+            password_env = str(loaded.get("proxy_password_env") or "").strip()
+            checks.append(_check("proxy_credential_env", bool(username_env) == bool(password_env), "paired" if username_env and password_env else "not configured" if not username_env else "username/password environment names must be paired"))
             context = loaded.get("context", {})
             postal_code = str(context.get("postal_code") or "").strip()
             is_us = str(context.get("expected_country") or "").upper() == "US"
