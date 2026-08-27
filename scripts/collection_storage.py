@@ -36,7 +36,8 @@ class SQLiteCollectionRepository:
     def _connection(self) -> sqlite3.Connection:
         if not self.db_path.exists():
             raise FileNotFoundError(f"SQLite database not found: {self.db_path}")
-        conn = sqlite3.connect(str(self.db_path), timeout=2)
+        uri = f"file:{self.db_path.resolve().as_posix()}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=2)
         conn.row_factory = sqlite3.Row
         return conn
 

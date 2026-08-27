@@ -56,3 +56,9 @@ python scripts/collection_api.py --db state/amazon_us.sqlite3
 ```
 
 默认只监听 `127.0.0.1`，不提供写入和刷新接口；Agent 后续通过它读取快照、任务状态和最近证据。
+
+采集覆盖率报告：
+
+```powershell
+python scripts/coverage_report.py --db state/amazon_us.sqlite3 --output data/amazon_us/coverage_report.json
+```
