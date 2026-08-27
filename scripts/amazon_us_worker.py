@@ -91,7 +91,7 @@ REVIEW_HEADERS = [
 ]
 EVIDENCE_HEADERS = [
     "run_id", "asin", "marketplace", "url", "http_status", "retrieved_at", "source_type",
-    "content_hash", "block_reason", "parser_version", "error_code",
+    "content_hash", "raw_html_path", "block_reason", "parser_version", "error_code",
 ]
 OUTPUTS = {
     "product_snapshot": ("product_snapshot.csv", PRODUCT_HEADERS),
@@ -745,13 +745,16 @@ def init_db(path: Path = DEFAULT_DB, max_attempts: int = 3) -> sqlite3.Connectio
         CREATE TABLE IF NOT EXISTS collection_evidence (
           id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, marketplace TEXT NOT NULL,
           asin TEXT NOT NULL, url TEXT NOT NULL, http_status INTEGER, retrieved_at TEXT NOT NULL,
-          source_type TEXT, content_hash TEXT, block_reason TEXT, parser_version TEXT, error_code TEXT
+          source_type TEXT, content_hash TEXT, raw_html_path TEXT, block_reason TEXT, parser_version TEXT, error_code TEXT
         );
         """
     )
     product_columns = {row[1] for row in conn.execute("PRAGMA table_info(product_snapshot)")}
     if "review_section_anchor" not in product_columns:
         conn.execute("ALTER TABLE product_snapshot ADD COLUMN review_section_anchor TEXT")
+    evidence_columns = {row[1] for row in conn.execute("PRAGMA table_info(collection_evidence)")}
+    if "raw_html_path" not in evidence_columns:
+        conn.execute("ALTER TABLE collection_evidence ADD COLUMN raw_html_path TEXT")
     recover_running(conn)
     conn.commit()
     return conn
@@ -855,14 +858,32 @@ def recover_running(conn: sqlite3.Connection) -> int:
     return len(rows)
 
 
-def _insert_evidence(conn: sqlite3.Connection, run_id: str, asin: str, url: str, status: int | None, body: str, block_reason: str | None, error_code: str | None = None, source_type: str = "selenium_dom") -> None:
-    conn.execute("INSERT INTO collection_evidence(run_id,marketplace,asin,url,http_status,retrieved_at,source_type,content_hash,block_reason,parser_version,error_code) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (run_id, "US", asin, url, status, utc_now(), source_type, hashlib.sha256(body.encode()).hexdigest(), block_reason, PARSER_VERSION, error_code))
+def _persist_raw_html(raw_html_dir: Path | None, run_id: str, asin: str, body: str) -> str | None:
+    if raw_html_dir is None:
+        return None
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    safe_run_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", run_id)[:80] or "run"
+    safe_asin = re.sub(r"[^A-Za-z0-9_.-]+", "_", asin)[:20] or "asin"
+    relative = Path("US") / safe_asin / f"{safe_run_id}-{digest[:16]}.html"
+    path = raw_html_dir / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(body, encoding="utf-8")
+    temporary.replace(path)
+    return relative.as_posix()
 
 
-def _write_product_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.Row, data: dict[str, Any], body: str, status: int | None, block_reason: str | None, error_code: str | None = None, source_type: str = "selenium_dom") -> None:
+def _insert_evidence(conn: sqlite3.Connection, run_id: str, asin: str, url: str, status: int | None, body: str, block_reason: str | None, error_code: str | None = None, source_type: str = "selenium_dom", raw_html_dir: Path | None = None, raw_html_path: str | None = None) -> str | None:
+    if raw_html_path is None:
+        raw_html_path = _persist_raw_html(raw_html_dir, run_id, asin, body)
+    conn.execute("INSERT INTO collection_evidence(run_id,marketplace,asin,url,http_status,retrieved_at,source_type,content_hash,raw_html_path,block_reason,parser_version,error_code) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (run_id, "US", asin, url, status, utc_now(), source_type, hashlib.sha256(body.encode()).hexdigest(), raw_html_path, block_reason, PARSER_VERSION, error_code))
+    return raw_html_path
+
+
+def _write_product_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.Row, data: dict[str, Any], body: str, status: int | None, block_reason: str | None, error_code: str | None = None, source_type: str = "selenium_dom", raw_html_dir: Path | None = None) -> None:
     asin = task["asin"]
     with conn:
-        _insert_evidence(conn, run_id, asin, task["url"], status, body, block_reason, error_code, source_type)
+        raw_html_path = _insert_evidence(conn, run_id, asin, task["url"], status, body, block_reason, error_code, source_type, raw_html_dir)
         if block_reason:
             if status == 429 or block_reason == "too_many_requests":
                 _set_rate_limited(conn, "US", asin, "product")
@@ -881,7 +902,7 @@ def _write_product_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.R
             or not path_match
             or path_match.group(1).upper() != asin
         ):
-            _insert_evidence(conn, run_id, asin, task["url"], status, body, None, "asin_mismatch", source_type)
+            _insert_evidence(conn, run_id, asin, task["url"], status, body, None, "asin_mismatch", source_type, raw_html_dir, raw_html_path)
             _record_failure(conn, "US", asin, "asin_mismatch", "asin_mismatch")
             return
         now = utc_now()
@@ -922,10 +943,10 @@ def _write_product_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.R
             _set_status(conn, "US", asin, "succeeded", reason="no_paginated_review_link", resume_status=None)
 
 
-def _write_review_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.Row, page: int, url: str, records: list[dict[str, Any]], next_url: str | None, body: str, status: int | None, block_reason: str | None, page_limit: int, source_type: str = "selenium_dom") -> None:
+def _write_review_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.Row, page: int, url: str, records: list[dict[str, Any]], next_url: str | None, body: str, status: int | None, block_reason: str | None, page_limit: int, source_type: str = "selenium_dom", raw_html_dir: Path | None = None) -> None:
     asin = task["asin"]
     with conn:
-        _insert_evidence(conn, run_id, asin, url, status, body, block_reason, source_type=source_type)
+        raw_html_path = _insert_evidence(conn, run_id, asin, url, status, body, block_reason, source_type=source_type, raw_html_dir=raw_html_dir)
         if block_reason:
             if status == 429 or block_reason == "too_many_requests":
                 conn.execute("INSERT OR REPLACE INTO review_page_state VALUES(?,?,?,?,?,?,?)", ("US", asin, page, url, "deferred", url, utc_now()))
@@ -942,7 +963,7 @@ def _write_review_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.Ro
             cols = REVIEW_HEADERS
             conn.execute(f"INSERT OR REPLACE INTO review_record({','.join(cols)}) VALUES({','.join('?' for _ in cols)})", [values.get(c, "") for c in cols])
         if not records and int(task["reported_review_count"] or 0) > 0:
-            _insert_evidence(conn, run_id, asin, url, status, body, None, "empty_review_page")
+            _insert_evidence(conn, run_id, asin, url, status, body, None, "empty_review_page", source_type, raw_html_dir, raw_html_path)
             conn.execute(
                 "INSERT OR REPLACE INTO review_page_state VALUES(?,?,?,?,?,?,?)",
                 ("US", asin, page, url, "failed", url, utc_now()),
@@ -1136,7 +1157,7 @@ def materialize_csvs(conn: sqlite3.Connection, output_dir: Path = DEFAULT_OUTPUT
         "content_module": "SELECT * FROM content_module ORDER BY marketplace,asin,position,unique_key",
         "review_summary": "SELECT * FROM review_summary ORDER BY marketplace,asin",
         "review_record": "SELECT * FROM review_record ORDER BY marketplace,asin,page,review_id",
-        "collection_evidence": "SELECT run_id,asin,marketplace,url,http_status,retrieved_at,source_type,content_hash,block_reason,parser_version,error_code FROM collection_evidence ORDER BY id",
+        "collection_evidence": "SELECT run_id,asin,marketplace,url,http_status,retrieved_at,source_type,content_hash,raw_html_path,block_reason,parser_version,error_code FROM collection_evidence ORDER BY id",
     }
     for table, query in queries.items():
         filename, headers = OUTPUTS[table]
@@ -1160,6 +1181,8 @@ def _select_actions(conn: sqlite3.Connection, max_actions: int) -> list[sqlite3.
 def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], *, limit: int | None = None, run_id: str | None = None) -> int:
     run_id = run_id or f"run-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
     max_actions = min(limit, int(config["max_actions_per_run"])) if limit else int(config["max_actions_per_run"])
+    raw_html_dir_value = config.get("raw_html_dir")
+    raw_html_dir = Path(raw_html_dir_value) if raw_html_dir_value else None
     actions = 0
     blocked = False
     for initial in _select_actions(conn, max_actions):
@@ -1196,7 +1219,7 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                             body, response_status, records, next_url = browser_body, browser_status, browser_records, browser_next_url
                             reason = browser_reason
             source_type = getattr(adapter, "source_type", "selenium_dom")
-            _write_review_action(conn, run_id, row, page, url, records, next_url, body, response_status, reason, int(config["review_page_limit"]), source_type)
+            _write_review_action(conn, run_id, row, page, url, records, next_url, body, response_status, reason, int(config["review_page_limit"]), source_type, raw_html_dir)
             blocked = blocked or bool(reason)
             actions += 1
             if blocked and (bool(config["stop_on_block"]) or response_status == 429 or reason == "too_many_requests"):
@@ -1220,7 +1243,7 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                 if not browser_reason:
                     body, response_status, data, reason = browser_body, browser_status, parse_product_html(browser_body, row["url"]), browser_reason
         source_type = getattr(adapter, "source_type", "selenium_dom")
-        _write_product_action(conn, run_id, row, data, body, response_status, reason, source_type=source_type)
+        _write_product_action(conn, run_id, row, data, body, response_status, reason, source_type=source_type, raw_html_dir=raw_html_dir)
         blocked = blocked or bool(reason)
         actions += 1
         if blocked and (bool(config["stop_on_block"]) or response_status == 429 or reason == "too_many_requests"):
@@ -1235,6 +1258,8 @@ def _prepare_paths(args: argparse.Namespace, config: dict[str, Any]) -> tuple[Pa
     state = resolve_path(args.state or paths.get("state", DEFAULT_DB))
     output = resolve_path(args.output_dir or paths.get("output_dir", DEFAULT_OUTPUT_DIR))
     config["output_dir"] = output
+    raw_html_value = paths.get("raw_html_dir") or (output / "raw_html")
+    config["raw_html_dir"] = resolve_path(raw_html_value)
     return manifest, state, output
 
 
