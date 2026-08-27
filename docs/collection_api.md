@@ -23,10 +23,11 @@ PostgreSQL 环境准备好后，安装可选依赖并切换后端：
 
 ```powershell
 python -m pip install -r requirements-postgres.txt
-python scripts/collection_api.py --backend postgres --dsn "postgresql://user:password@host:5432/dbname"
+$env:AMAZON_POSTGRES_DSN = "host=127.0.0.1 port=5432 dbname=amazon_us_qa user=postgres"
+python scripts/collection_api.py --backend postgres --dsn "$env:AMAZON_POSTGRES_DSN" --tenant-id qa_latest_20260827
 ```
 
-DSN 不写入仓库、日志或配置提交；生产环境通过受控环境变量或密钥管理注入。
+DSN 不写入仓库、日志或配置提交；生产环境通过受控环境变量或密钥管理注入。PostgreSQL 后端必须显式确认 `--tenant-id`，避免 Agent 读到其他回放批次或业务租户的数据。
 
 本机 PostgreSQL 已安装但不知道 CLI 密码时，可先运行 `scripts\bootstrap_postgres.ps1`，交互输入密码执行 schema；脚本默认连接 `127.0.0.1:5432/postgres`，不保存密码。
 

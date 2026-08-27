@@ -244,17 +244,24 @@ def serve(db_path: Path | None = None, host: str = "127.0.0.1", port: int = 8765
         server.server_close()
 
 
+def create_repository(backend: str, db_path: Path, dsn: str, tenant_id: str) -> CollectionRepository:
+    if backend == "sqlite":
+        return SQLiteCollectionRepository(db_path)
+    return PostgresCollectionRepository(dsn, tenant_id=tenant_id)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, default=Path("state/amazon_us.sqlite3"))
     parser.add_argument("--backend", choices=("sqlite", "postgres"), default="sqlite")
     parser.add_argument("--dsn", default="", help="PostgreSQL DSN (required with --backend postgres)")
+    parser.add_argument("--tenant-id", default="default", help="PostgreSQL tenant to expose")
     parser.add_argument("--api-key-env", default="AMAZON_COLLECTION_API_KEY", help="Environment variable containing optional API key")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args(argv)
     try:
-        repository = SQLiteCollectionRepository(args.db) if args.backend == "sqlite" else PostgresCollectionRepository(args.dsn)
+        repository = create_repository(args.backend, args.db, args.dsn, args.tenant_id)
         serve(args.db if args.backend == "sqlite" else None, args.host, args.port, repository, os.environ.get(args.api_key_env, ""))
     except (OSError, ValueError) as exc:
         print(f"error: {exc}")

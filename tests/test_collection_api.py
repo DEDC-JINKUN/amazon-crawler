@@ -190,6 +190,11 @@ class CollectionApiTests(unittest.TestCase):
         self.assertEqual(payload["counts"], {"media": 2, "content_modules": 3})
         self.assertEqual(repository.load_job_status()["counts"], {"succeeded": 1})
 
+    def test_collection_api_postgres_repository_keeps_tenant_scope(self):
+        api = load("collection_api")
+        repository = api.create_repository("postgres", Path("unused.sqlite3"), "postgresql://example", "tenant-a")
+        self.assertEqual(repository.tenant_id, "tenant-a")
+
     def test_refresh_endpoint_only_enqueues_a_request(self):
         worker = load("amazon_us_worker")
         api = load("collection_api")

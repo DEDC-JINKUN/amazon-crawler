@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0 - 2026-08-28
+
+- PostgreSQL repository 、Collection API、验收和对账链路全部支持显式 `tenant_id`，完成多 Agent/多回放批次的读写隔离。
+- Collection API CLI 新增 `--tenant-id`，PostgreSQL 启动命令改用环境变量 DSN，不在命令示例中嵌入密码。
+
 ## 0.1.99 - 2026-08-27
 
 - PostgreSQL repository 和对账工具新增显式 `tenant_id`，所有快照、任务、证据、历史和刷新请求按租户过滤，防止多 Agent 之间串数据。
