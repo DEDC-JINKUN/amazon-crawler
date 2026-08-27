@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.63 - 2026-08-27
+
+- 清洗 Buy Box 配送文本，截断 Add to List/Unable to add 等界面噪声。
+- 真实 HTML 的配送字段现输出 `Delivering to Portland 97218 - Update location`。
+
 ## 0.1.62 - 2026-08-27
 
 - Buy Box 配送字段增加 `Delivering to` 文案识别，继续保留原文并对缺失字段保持空值。

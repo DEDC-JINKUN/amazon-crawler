@@ -51,6 +51,7 @@
 - [x] Buy Box 原文及可选 seller/coupon/delivery 结构化字段。
 - [x] 品牌字段 CTA 归一化并完成真实 HTML 回归。
 - [x] Buy Box `Delivering to` 配送文案识别。
+- [x] Buy Box 配送字段去除列表按钮和错误提示噪声。
 - [x] 竞品候选发现支持 `data-asin` 搜索卡片属性。
 - [x] 审计并明确 BSR/类目与卖家/Coupon/配送字段落点。
 - [x] evidence 保存 ZIP/国家/币种上下文并同步迁移链路。

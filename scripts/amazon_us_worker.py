@@ -683,7 +683,7 @@ def _buy_box_facts(parser: _DOMParser) -> dict[str, str]:
     coupon = re.search(r"(?:save|coupon|off)[^$%\d]{0,20}(?:\$\s*\d+(?:\.\d{1,2})?|\d+\s*%)", text, flags=re.IGNORECASE)
     if coupon:
         facts["coupon"] = _clean(coupon.group(0))
-    delivery = re.search(r"(?:free delivery|get it by|arrives|delivering to)[^\n]{0,120}", text, flags=re.IGNORECASE)
+    delivery = re.search(r"(?:free delivery|get it by|arrives|delivering to).{0,120}?(?=\s+(?:add to list|added to|unable to|sold by|ships from)|$)", text, flags=re.IGNORECASE)
     if delivery:
         facts["delivery"] = _clean(delivery.group(0))
     return facts
