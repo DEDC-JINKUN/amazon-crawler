@@ -510,6 +510,14 @@ def _is_review_url(url: str) -> bool:
     return "/product-reviews/" in path or "/portal/customer-reviews/" in path
 
 
+def _alternate_review_url(url: str, asin: str) -> str | None:
+    """Return the stable review endpoint when Amazon gave a portal URL."""
+    if "/portal/customer-reviews/" not in urlsplit(url).path.lower():
+        return None
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme or "https", parts.netloc or "www.amazon.com", f"/product-reviews/{asin}", "", ""))
+
+
 def _without_fragment(url: str) -> str:
     parts = urlsplit(url)
     return urlunsplit((parts.scheme, parts.netloc, parts.path, parts.query, ""))
@@ -1388,6 +1396,17 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                 continue
             reason = classify_block(response_status, body)
             records, next_url = parse_reviews_html(body, page, url) if not reason else ([], None)
+            alternate_url = _alternate_review_url(url, row["asin"])
+            if not reason and not records and int(row["reported_review_count"] or 0) > 0 and alternate_url:
+                try:
+                    alternate_body, alternate_status = adapter.fetch(alternate_url)
+                except AdapterFetchError:
+                    pass
+                else:
+                    alternate_reason = classify_block(alternate_status, alternate_body)
+                    alternate_records, alternate_next_url = parse_reviews_html(alternate_body, page, alternate_url) if not alternate_reason else ([], None)
+                    if not alternate_reason and (alternate_records or alternate_next_url):
+                        body, response_status, url, records, next_url = alternate_body, alternate_status, alternate_url, alternate_records, alternate_next_url
             if (
                 not reason
                 and not records

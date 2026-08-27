@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.29 - 2026-08-27
+
+- 补齐评论入口降级实现及测试提交，确保 `portal/customer-reviews` 空页时实际尝试 `product-reviews`。
+
 ## 0.1.28 - 2026-08-27
 
 - 增加 `collection_metrics.py`，按 run_id 统计请求、有效页面、记录数、字节数、耗时和吞吐。

@@ -242,6 +242,35 @@ class BatchCheckpointTests(unittest.TestCase):
             self.assertEqual(tuple(page), ("failed", task["next_review_url"]))
             conn.close()
 
+    def test_portal_review_url_falls_back_to_stable_product_reviews_endpoint(self):
+        product = (FIXTURES / "product_unavailable_video_aplus.html").read_text()
+        page = (FIXTURES / "reviews_page_1.html").read_text()
+
+        class Adapter:
+            def __init__(self):
+                self.calls = []
+
+            def fetch(self, url):
+                self.calls.append(url)
+                if "/portal/customer-reviews/" in url:
+                    return "<html><body>No review records</body></html>", 200
+                return page, 200
+
+        with tempfile.TemporaryDirectory() as directory:
+            worker, conn, config = self._setup(Path(directory))
+            worker._set_status(conn, "US", "B00RCPDCQU", "running", reason="test")
+            conn.execute(
+                "UPDATE item_state SET task_stage='reviews',resume_status='reviews_pending',next_review_url=?,next_review_page=1,reported_review_count=17",
+                ("https://www.amazon.com/portal/customer-reviews/B00RCPDCQU",),
+            )
+            conn.commit()
+            worker._set_status(conn, "US", "B00RCPDCQU", "reviews_pending", reason="test")
+            adapter = Adapter()
+            self.assertEqual(worker.run_actions(conn, adapter, config, limit=1), 1)
+            self.assertIn("https://www.amazon.com/product-reviews/B00RCPDCQU", adapter.calls)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM review_record").fetchone()[0], 1)
+            conn.close()
+
     def test_continuous_failures_stop_at_max_attempts(self):
         class Adapter:
             def __init__(self):
