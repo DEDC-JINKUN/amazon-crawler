@@ -99,6 +99,27 @@ class HttpAdapterTests(unittest.TestCase):
         self.assertEqual(opener.calls, 2)
         adapter.close()
 
+    def test_http_error_with_truncated_body_returns_status_without_crashing(self):
+        worker = load_worker()
+
+        class BrokenError(worker.urllib.error.HTTPError):
+            def read(self):
+                raise http.client.IncompleteRead(b"partial error")
+
+        error = BrokenError("https://example.test", 404, "not found", {}, None)
+
+        class ErrorOpener:
+            def open(self, request, timeout):
+                raise error
+
+        opener = ErrorOpener()
+        config = {**worker.DEFAULTS, "user_agent": "Agent/test-agent", "http_max_attempts": 1}
+        with patch.object(worker.urllib.request, "build_opener", return_value=opener):
+            adapter = worker.HttpFirstAdapter(config)
+            body, status = adapter.fetch("https://example.test")
+        self.assertEqual((body, status), ("partial error", 404))
+        adapter.close()
+
     def test_firefox_proxy_settings_use_same_explicit_endpoint(self):
         worker = load_worker()
         self.assertEqual(worker._firefox_proxy_settings("http://127.0.0.1:8080"), {"proxyType": "manual", "httpProxy": "127.0.0.1:8080", "sslProxy": "127.0.0.1:8080"})

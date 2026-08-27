@@ -1274,7 +1274,10 @@ class HttpFirstAdapter:
                     self.source_type = "http_html"
                     return self._decode(response, body), int(response.getcode() or 200)
             except urllib.error.HTTPError as exc:
-                body = exc.read()
+                try:
+                    body = exc.read()
+                except http.client.IncompleteRead as partial:
+                    body = partial.partial or b""
                 self.source_type = "http_html"
                 return self._decode(exc, body), int(exc.code)
             except (urllib.error.URLError, http.client.IncompleteRead, ConnectionResetError, TimeoutError, OSError) as exc:

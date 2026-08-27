@@ -49,3 +49,7 @@
 ## 环境结论
 
 Firefox/Selenium 运行依赖已经具备；此前失败的原因是 Selenium Manager 无法在线下载 geckodriver，以及受限目录无法写 SQLite。固定驱动路径和临时状态库后，单页 HTTP 采集已成功。
+
+### 全新 30 条容量测试
+
+使用 `amazon_us.test_west_batch30.toml` 初始化全新 SQLite 状态库后启动 30 个商品 action。第 1 个 ASIN 的 HTTP 200 页面被识别为 `captcha`，worker 按 `stop_on_block=true` 立即停止，耗时约 1.34 秒；任务状态为 `blocked`，没有继续请求后续 ASIN，也未尝试绕过验证码。该结果说明容量测试必须把挑战页和出口冷却作为一等指标，不能按理论并发线性外推。
