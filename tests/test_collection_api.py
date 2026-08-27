@@ -130,6 +130,40 @@ class CollectionApiTests(unittest.TestCase):
         self.assertEqual(payload["counts"], {"media": 2, "content_modules": 3})
         self.assertEqual(repository.load_job_status()["counts"], {"succeeded": 1})
 
+    def test_refresh_endpoint_only_enqueues_a_request(self):
+        worker = load("amazon_us_worker")
+        api = load("collection_api")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = root / "state.sqlite3"
+            conn = worker.init_db(db)
+            manifest = root / "manifest.csv"
+            manifest.write_text("asin,url,marketplace,source_site_label,source_workbook\nB00RCPDCQU,https://www.amazon.com/dp/B00RCPDCQU,US,test,fixture.csv\n", encoding="utf-8")
+            worker.initialize_manifest(conn, manifest, worker.DEFAULTS)
+            conn.close()
+            server = api.CollectionServer(("127.0.0.1", 0), db)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{server.server_port}/v1/asin/US/B00RCPDCQU/refresh",
+                    data=b'{"requested_by":"test-agent","reason":"stale_price"}',
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=2) as response:
+                    payload = json.loads(response.read())
+                    self.assertEqual(response.status, 202)
+                self.assertEqual(payload["job"]["status"], "queued")
+                conn = worker.init_db(db)
+                count = conn.execute("SELECT COUNT(*) FROM refresh_request").fetchone()[0]
+                conn.close()
+                self.assertEqual(count, 1)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
 
 if __name__ == "__main__":
     unittest.main()

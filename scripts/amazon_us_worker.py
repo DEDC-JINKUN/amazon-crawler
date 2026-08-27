@@ -706,6 +706,11 @@ def init_db(path: Path = DEFAULT_DB, max_attempts: int = 3) -> sqlite3.Connectio
           id INTEGER PRIMARY KEY AUTOINCREMENT, marketplace TEXT NOT NULL, asin TEXT NOT NULL,
           from_status TEXT, to_status TEXT NOT NULL, reason TEXT, changed_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS refresh_request (
+          job_id TEXT PRIMARY KEY, marketplace TEXT NOT NULL, asin TEXT NOT NULL,
+          requested_by TEXT NOT NULL, reason TEXT NOT NULL, status TEXT NOT NULL,
+          requested_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS review_page_state (
           marketplace TEXT NOT NULL, asin TEXT NOT NULL, page INTEGER NOT NULL, url TEXT NOT NULL,
           status TEXT NOT NULL, next_url TEXT, fetched_at TEXT, PRIMARY KEY(marketplace, asin, page)

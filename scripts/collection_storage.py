@@ -6,6 +6,7 @@ be added later without changing API routes or response fields.
 from __future__ import annotations
 
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -17,6 +18,8 @@ class CollectionRepository(Protocol):
     def load_evidence(self, marketplace: str, asin: str, limit: int = 20) -> list[dict[str, Any]]: ...
 
     def load_job_status(self) -> dict[str, Any]: ...
+
+    def request_refresh(self, marketplace: str, asin: str, requested_by: str, reason: str) -> dict[str, Any]: ...
 
 
 def _dict_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -46,11 +49,14 @@ class SQLiteCollectionRepository:
     def __init__(self, db_path: Path):
         self.db_path = db_path
 
-    def _connection(self) -> sqlite3.Connection:
+    def _connection(self, read_only: bool = True) -> sqlite3.Connection:
         if not self.db_path.exists():
             raise FileNotFoundError(f"SQLite database not found: {self.db_path}")
-        uri = f"file:{self.db_path.resolve().as_posix()}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True, timeout=2)
+        if read_only:
+            uri = f"file:{self.db_path.resolve().as_posix()}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, timeout=2)
+        else:
+            conn = sqlite3.connect(str(self.db_path), timeout=2)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -108,6 +114,30 @@ class SQLiteCollectionRepository:
                 (marketplace, asin, limit),
             ).fetchall()
             return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def request_refresh(self, marketplace: str, asin: str, requested_by: str, reason: str) -> dict[str, Any]:
+        conn = self._connection(read_only=False)
+        try:
+            exists = conn.execute("SELECT 1 FROM item_state WHERE marketplace=? AND asin=?", (marketplace, asin)).fetchone()
+            if exists is None:
+                raise KeyError(f"ASIN not found: {marketplace}/{asin}")
+            request = {
+                "job_id": f"refresh-{uuid.uuid4().hex}",
+                "marketplace": marketplace,
+                "asin": asin,
+                "requested_by": requested_by or "collection-api",
+                "reason": reason or "on_demand",
+                "status": "queued",
+                "requested_at": _now(),
+            }
+            conn.execute(
+                "INSERT INTO refresh_request(job_id,marketplace,asin,requested_by,reason,status,requested_at) VALUES(?,?,?,?,?,?,?)",
+                tuple(request.values()),
+            )
+            conn.commit()
+            return request
         finally:
             conn.close()
 
@@ -210,3 +240,28 @@ class PostgresCollectionRepository:
                     (marketplace, asin, limit),
                 )
                 return [dict(row) for row in cursor.fetchall()]
+
+    def request_refresh(self, marketplace: str, asin: str, requested_by: str, reason: str) -> dict[str, Any]:
+        request = {
+            "job_id": f"refresh-{uuid.uuid4().hex}",
+            "marketplace": marketplace,
+            "asin": asin,
+            "requested_by": requested_by or "collection-api",
+            "reason": reason or "on_demand",
+            "status": "queued",
+        }
+        with self._connect_factory() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT 1 FROM amazon_us.item_state WHERE marketplace=%s AND asin=%s LIMIT 1",
+                    (marketplace, asin),
+                )
+                if cursor.fetchone() is None:
+                    raise KeyError(f"ASIN not found: {marketplace}/{asin}")
+                cursor.execute(
+                    "INSERT INTO amazon_us.refresh_request(job_id,marketplace,asin,requested_by,reason,status) VALUES(%s,%s,%s,%s,%s,%s)",
+                    (request["job_id"], marketplace, asin, request["requested_by"], request["reason"], request["status"]),
+                )
+            conn.commit()
+        request["requested_at"] = _now()
+        return request

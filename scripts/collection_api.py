@@ -88,6 +88,35 @@ class CollectionHandler(BaseHTTPRequestHandler):
             return
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "route_not_found"})
 
+    def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
+        path = urlsplit(self.path).path
+        match = re.fullmatch(r"/v1/asin/([A-Za-z]{2})/([A-Za-z0-9]{10})/refresh", path)
+        if not match:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "route_not_found"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length > 4096:
+                raise ValueError("request body too large")
+            raw = self.rfile.read(length) if length else b"{}"
+            body = json.loads(raw.decode("utf-8"))
+            if not isinstance(body, dict):
+                raise ValueError("request body must be a JSON object")
+            requested_by = str(body.get("requested_by") or "collection-api")[:120]
+            reason = str(body.get("reason") or "on_demand")[:240]
+            marketplace, asin = match.group(1).upper(), match.group(2).upper()
+            request = self.server.repository.request_refresh(marketplace, asin, requested_by, reason)
+        except ValueError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request", "detail": str(exc)})
+            return
+        except KeyError:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "asin_not_found", "asin": asin, "marketplace": marketplace})
+            return
+        except (OSError, RuntimeError, sqlite3.Error) as exc:
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable", "detail": str(exc)})
+            return
+        self._send_json(HTTPStatus.ACCEPTED, {"schema_version": API_SCHEMA_VERSION, "job": request})
+
     def log_message(self, format: str, *args: Any) -> None:
         return
 

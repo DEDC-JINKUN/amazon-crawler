@@ -43,9 +43,20 @@ GET /v1/jobs/status
 
 返回各任务状态数量，用于运营查看积压和失败情况。
 
+### 提交按需刷新
+
+```http
+POST /v1/asin/US/{asin}/refresh
+Content-Type: application/json
+
+{"requested_by":"agent-name","reason":"price_is_stale"}
+```
+
+接口只登记 `refresh_request` 队列并返回 `202 Accepted`，不会在 HTTP 请求线程中直接运行爬虫；后续由统一调度器领取。当前 API 仅绑定本机，真实内网部署前还需增加认证。
+
 ## 当前不支持
 
-- `POST /refresh` 等写入或刷新接口；
+- 直接在 API 请求线程中运行爬虫；
 - Agent 直接运行爬虫；
 - 远程公网访问；
 - 直接查询个人 Cookie、Token 或代理凭证。

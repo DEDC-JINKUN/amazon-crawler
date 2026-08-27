@@ -63,6 +63,22 @@ CREATE TABLE IF NOT EXISTS state_history (
     changed_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS refresh_request (
+    job_id text PRIMARY KEY,
+    tenant_id text NOT NULL DEFAULT 'default',
+    marketplace text NOT NULL CHECK (marketplace = 'US'),
+    asin varchar(10) NOT NULL,
+    subject_type text NOT NULL DEFAULT 'candidate',
+    requested_by text NOT NULL,
+    reason text NOT NULL,
+    status text NOT NULL CHECK (status IN ('queued', 'claimed', 'completed', 'failed', 'cancelled')),
+    requested_at timestamptz NOT NULL DEFAULT now(),
+    claimed_at timestamptz,
+    completed_at timestamptz
+);
+
+CREATE INDEX IF NOT EXISTS idx_refresh_request_queue ON refresh_request (tenant_id, marketplace, status, requested_at);
+
 CREATE TABLE IF NOT EXISTS collection_evidence (
     id bigserial PRIMARY KEY,
     tenant_id text NOT NULL DEFAULT 'default',
