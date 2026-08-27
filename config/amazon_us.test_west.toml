@@ -1,6 +1,8 @@
 # Small-batch live validation only. Do not use as the production default.
 [worker]
 request_timeout_seconds = 30
+http_max_attempts = 2
+http_retry_backoff_seconds = 0.5
 headless = true
 max_actions_per_run = 10
 max_attempts = 3

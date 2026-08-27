@@ -64,6 +64,8 @@ STOP_PHRASES = (
 )
 DEFAULTS: dict[str, Any] = {
     "request_timeout_seconds": 30,
+    "http_max_attempts": 2,
+    "http_retry_backoff_seconds": 0.5,
     "headless": True,
     "max_actions_per_run": 10,
     "max_attempts": 3,
@@ -1243,27 +1245,35 @@ class HttpFirstAdapter:
         return body.decode(charset, errors="replace")
 
     def fetch(self, url: str) -> tuple[str, int | None]:
-        self.limiter.acquire(self.egress_id)
-        request = urllib.request.Request(
-            url,
-            headers={
-                "Accept": "text/html,application/xhtml+xml",
-                "Accept-Encoding": "identity",
-                "User-Agent": self.user_agent,
-            },
-            method="GET",
-        )
-        try:
-            with self.opener.open(request, timeout=self.timeout) as response:
-                body = response.read()
+        max_attempts = max(1, min(int(self.config.get("http_max_attempts", 2)), 3))
+        backoff = max(0.0, min(float(self.config.get("http_retry_backoff_seconds", 0.5)), 5.0))
+        last_error: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            self.limiter.acquire(self.egress_id)
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "Accept": "text/html,application/xhtml+xml",
+                    "Accept-Encoding": "identity",
+                    "Connection": "close",
+                    "User-Agent": self.user_agent,
+                },
+                method="GET",
+            )
+            try:
+                with self.opener.open(request, timeout=self.timeout) as response:
+                    body = response.read()
+                    self.source_type = "http_html"
+                    return self._decode(response, body), int(response.getcode() or 200)
+            except urllib.error.HTTPError as exc:
+                body = exc.read()
                 self.source_type = "http_html"
-                return self._decode(response, body), int(response.getcode() or 200)
-        except urllib.error.HTTPError as exc:
-            body = exc.read()
-            self.source_type = "http_html"
-            return self._decode(exc, body), int(exc.code)
-        except (urllib.error.URLError, http.client.IncompleteRead, ConnectionResetError, TimeoutError, OSError) as exc:
-            raise AdapterFetchError(str(exc)) from exc
+                return self._decode(exc, body), int(exc.code)
+            except (urllib.error.URLError, http.client.IncompleteRead, ConnectionResetError, TimeoutError, OSError) as exc:
+                last_error = exc
+                if attempt < max_attempts and backoff:
+                    time.sleep(backoff * attempt)
+        raise AdapterFetchError(f"{last_error} after {max_attempts} HTTP attempts") from last_error
 
     def needs_browser_fallback(self, data: dict[str, Any]) -> bool:
         # A page without these anchors cannot be safely accepted as a product page.

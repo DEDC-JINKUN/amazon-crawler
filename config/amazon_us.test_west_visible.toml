@@ -1,6 +1,8 @@
 # One-ASIN diagnosis only; do not use for scheduled production runs.
 [worker]
 request_timeout_seconds = 30
+http_max_attempts = 2
+http_retry_backoff_seconds = 0.5
 headless = false
 max_actions_per_run = 10
 max_attempts = 3

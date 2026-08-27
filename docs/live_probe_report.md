@@ -42,6 +42,10 @@
 
 在全新 SQLite 状态库上重复相同 10 条任务时，只有 3 条完成商品页快照，7 条在 HTTP 大页面传输阶段发生 `IncompleteRead`；未形成足够样本评价 description 覆盖率。该结果归类为网络传输稳定性问题，不作为解析器退化结论；下一步先增加受控 HTTP 重试/传输诊断，再重跑。
 
+### 受控 HTTP 重试后的 10 条回归
+
+设置每个页面最多 2 次 HTTP 尝试、0.5 秒退避后，在全新 SQLite 状态库重复相同 10 条：总耗时 32.99 秒，9 条商品页成功、1 条 `asin_mismatch`，`IncompleteRead=0`，全部商品页由 HTTP 完成且未启动 Firefox。输出商品快照 9、媒体 360、内容模块 204；bullets 5/9、description 4/9。结果恢复到此前 9/10 基线，支持继续扩大到 30 条前先完成评论分页处理。
+
 ## 环境结论
 
 Firefox/Selenium 运行依赖已经具备；此前失败的原因是 Selenium Manager 无法在线下载 geckodriver，以及受限目录无法写 SQLite。固定驱动路径和临时状态库后，单页 HTTP 采集已成功。

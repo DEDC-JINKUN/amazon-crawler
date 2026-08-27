@@ -55,6 +55,17 @@ class _Opener:
         return self.response
 
 
+class _SequenceOpener:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = 0
+
+    def open(self, request, timeout):
+        response = self.responses[self.calls]
+        self.calls += 1
+        return response
+
+
 class HttpAdapterTests(unittest.TestCase):
     def test_incomplete_chunked_response_becomes_retryable_adapter_error(self):
         worker = load_worker()
@@ -65,12 +76,28 @@ class HttpAdapterTests(unittest.TestCase):
 
         opener = _Opener(BrokenResponse(b""))
         config = dict(worker.DEFAULTS)
-        config["user_agent"] = "Agent/test-agent"
+        config.update({"user_agent": "Agent/test-agent", "http_max_attempts": 1})
         with patch.object(worker.urllib.request, "build_opener", return_value=opener):
             adapter = worker.HttpFirstAdapter(config)
             with self.assertRaises(worker.AdapterFetchError):
                 adapter.fetch("https://www.amazon.com/dp/B00RCPDCQU")
             adapter.close()
+
+    def test_incomplete_response_retries_once_then_succeeds(self):
+        worker = load_worker()
+
+        class BrokenResponse(_Response):
+            def read(self):
+                raise http.client.IncompleteRead(b"partial")
+
+        opener = _SequenceOpener([BrokenResponse(b""), _Response(b"<html>complete</html>")])
+        config = {**worker.DEFAULTS, "user_agent": "Agent/test-agent", "http_max_attempts": 2, "http_retry_backoff_seconds": 0}
+        with patch.object(worker.urllib.request, "build_opener", return_value=opener):
+            adapter = worker.HttpFirstAdapter(config)
+            body, status = adapter.fetch("https://www.amazon.com/dp/B00RCPDCQU")
+        self.assertEqual((body, status), ("<html>complete</html>", 200))
+        self.assertEqual(opener.calls, 2)
+        adapter.close()
 
     def test_firefox_proxy_settings_use_same_explicit_endpoint(self):
         worker = load_worker()
