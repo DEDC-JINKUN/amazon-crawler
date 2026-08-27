@@ -23,6 +23,7 @@
 - [x] 运行前 preflight 检查（清单、配置、Python、Firefox/Selenium 和状态目录）。
 - [x] 单 ASIN 真实页面探针（HTTP 成功、原始 HTML 和字段输出可追溯）。
 - [x] 开发依赖独立锁定（venv 内 pytest，不依赖系统全局包）。
+- [x] 交互式 PostgreSQL 回放与验证脚本（实际执行待用户输入密码）。
 
 ## MVP 顺序
 

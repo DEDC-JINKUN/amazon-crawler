@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3 - 2026-08-27
+
+- 增加交互式 SQLite→PostgreSQL 回放脚本和 PostgreSQL repository 验证命令。
+- 回放脚本通过临时 `PGPASSWORD` 接收密码，不写入仓库或持久化环境变量。
+- 补充 PostgreSQL 连接和回放操作文档。
+
 ## 0.1.2 - 2026-08-27
 
 - 增加交互式 PostgreSQL schema 初始化脚本，不保存数据库密码。

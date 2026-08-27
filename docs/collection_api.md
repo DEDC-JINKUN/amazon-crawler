@@ -30,6 +30,8 @@ DSN 不写入仓库、日志或配置提交；生产环境通过受控环境变�
 
 本机 PostgreSQL 已安装但不知道 CLI 密码时，可先运行 `scripts\bootstrap_postgres.ps1`，交互输入密码执行 schema；脚本默认连接 `127.0.0.1:5432/postgres`，不保存密码。
 
+schema 初始化后运行 `scripts\replay_postgres.ps1`，可交互输入密码完成 SQLite 回放并调用 PostgreSQL repository 验证；密码仅存在于当前 PowerShell 进程。
+
 ## 路由
 
 ### 健康检查

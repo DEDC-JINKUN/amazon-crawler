@@ -2,7 +2,7 @@
 
 面向 Amazon.com 自有 ASIN 和竞品 ASIN 的统一网页采集 MVP。
 
-当前版本：`0.1.2`（单机 MVP，已完成单 ASIN 真实页面探针和运行环境验证）。
+当前版本：`0.1.3`（单机 MVP，已完成单 ASIN 真实页面探针和 PostgreSQL 回放脚本）。
 
 ## 当前开发边界
 
@@ -58,6 +58,12 @@ docker compose ps
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\bootstrap_postgres.ps1
+```
+
+schema 初始化后，使用交互式回放脚本迁移本地状态并验证 PostgreSQL：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\replay_postgres.ps1
 ```
 
 本地只读 Collection API：
