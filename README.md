@@ -4,6 +4,8 @@
 
 当前版本：`0.1.57`（发布 evidence 健康检查工具）。
 
+本地测试结果可用 `scripts/evidence_health.py` 检查源 HTML 存在性和哈希；用 `scripts/collection_metrics.py` 按 `run_id` 查看请求数、流量和有效吞吐。
+
 ## 当前开发边界
 
 - HTTP 优先获取公开 HTML；页面字段不足时再使用 Firefox 渲染。

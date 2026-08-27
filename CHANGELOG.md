@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.58 - 2026-08-27
+
+- README 增加 evidence 健康检查和 collection metrics 的交接命令入口。
+
 ## 0.1.57 - 2026-08-27
 
 - 补齐 evidence 健康检查工具及测试的发布提交，确保源 HTML 缺失/哈希不一致可复现检查。

@@ -60,6 +60,7 @@
 - [x] 旧 SQLite context NULL/可空整数迁移兼容并完成独立租户实测。
 - [x] 原始 HTML 字节原子写入和 evidence 哈希一致性保障。
 - [x] evidence 健康检查工具及发布完整性验证。
+- [x] README 交接入口补充 evidence/metrics 检查命令。
 - [x] 美国上下文质量门禁（国家/币种不匹配不写入快照）。
 - [x] 美国 ZIP 格式门禁（5 位或 ZIP+4，live 模式必填）。
 - [x] 商品历史快照保存和 `/history` 查询。
