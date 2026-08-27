@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.4 - 2026-08-28
+
+- Collection API 新增 `/readyz`，区分进程存活的 `/healthz` 与数据库/schema 可用的就绪状态。
+- 数据库断连、schema 缺失或未知驱动异常均返回 HTTP 503，不把故障误报为健康。
+- 增加 readyz 成功和数据库异常回归。
+
 ## 0.2.3 - 2026-08-28
 
 - 实际验证 Collection API 错误租户访问同一 ASIN 返回 404，确认不会跨租户泄露。

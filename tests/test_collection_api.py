@@ -78,6 +78,8 @@ class CollectionApiTests(unittest.TestCase):
             try:
                 with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/healthz", timeout=2) as response:
                     self.assertEqual(json.loads(response.read())["ok"], True)
+                with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/readyz", timeout=2) as response:
+                    self.assertEqual(json.loads(response.read())["ok"], True)
                 with self.assertRaises(urllib.error.HTTPError) as raised:
                     urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/v1/asin/US/B00RCPDCQU", timeout=2)
                 self.assertEqual(raised.exception.code, 404)
@@ -131,6 +133,28 @@ class CollectionApiTests(unittest.TestCase):
             request = urllib.request.Request(f"http://127.0.0.1:{server.server_port}/v1/jobs/status", headers={"X-Collection-API-Key": "secret"})
             with urllib.request.urlopen(request, timeout=2) as response:
                 self.assertEqual(response.status, 200)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_readyz_converts_unexpected_repository_error_to_503(self):
+        api = load("collection_api")
+
+        class BrokenRepository:
+            def load_job_status(self):
+                raise Exception("driver detail")
+
+        server = api.CollectionServer(("127.0.0.1", 0), repository=BrokenRepository())
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            response = urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/readyz", timeout=2)
+        except urllib.error.HTTPError as exc:
+            self.assertEqual(exc.code, 503)
+            self.assertEqual(json.loads(exc.read())["error"], "database_unavailable")
+        else:
+            self.fail(f"expected 503, got {response.status}")
         finally:
             server.shutdown()
             server.server_close()

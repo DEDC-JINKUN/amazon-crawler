@@ -83,6 +83,23 @@ class CollectionHandler(BaseHTTPRequestHandler):
         if path == "/healthz":
             self._send_json(HTTPStatus.OK, {"ok": True, "schema_version": API_SCHEMA_VERSION})
             return
+        if path == "/readyz":
+            try:
+                checker = getattr(self.server.repository, "load_schema_contract", None)
+                if checker is not None:
+                    contract = checker()
+                    if contract.get("item_state") != ["next_retry_at"] or contract.get("collection_evidence") != ["context_json", "transfer_bytes"]:
+                        self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "schema_not_ready"})
+                        return
+                self.server.repository.load_job_status()
+            except (OSError, RuntimeError, sqlite3.Error, KeyError, ValueError):
+                self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "database_unavailable"})
+                return
+            except Exception:
+                self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "database_unavailable"})
+                return
+            self._send_json(HTTPStatus.OK, {"ok": True, "schema_version": API_SCHEMA_VERSION})
+            return
         if not self._authorized():
             return
         if path == "/v1/jobs/status":
