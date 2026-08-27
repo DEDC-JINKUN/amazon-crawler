@@ -532,7 +532,7 @@ POC 向生产迁移时执行以下改造：
 
 1. 付费出口的 `check_egress.py` 探针回执，证明线路可连通且未返回 403/429/CAPTCHA 或空响应；
 2. 小批量 worker 产生的原始 HTML、数据库状态、CSV 和验收 JSON；
-3. `run_receipt.json`，同时包含结构验收、成功 ASIN、失败/阻断 ASIN、`transfer_bytes` 和可选代理费用；
+3. Collection API 的 `/readyz` 就绪回执，以及 `run_receipt.json`；回执同时包含结构验收、成功 ASIN、失败/阻断 ASIN、`transfer_bytes` 和可选代理费用；
 4. 以代理商后台用量/费用前后差值出具“元/成功 ASIN”和 5,800 个 ASIN 外推，不以理论并发数或页面体积作承诺。
 
 ### 后续扩容阶段（不计入一周 MVP）
