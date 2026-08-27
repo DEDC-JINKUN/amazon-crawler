@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import email.utils
 import hashlib
 import html as html_module
 import http.client
 import json
+import math
 import os
 import re
 import sqlite3
@@ -663,6 +665,25 @@ def _normalize_brand(value: str) -> str:
     return _clean(match.group(1)) if match else text
 
 
+def _retry_after_seconds(value: str | None, now: datetime | None = None) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        seconds = int(text)
+    else:
+        try:
+            retry_at = email.utils.parsedate_to_datetime(text)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        seconds = math.ceil((retry_at - (now or datetime.now(timezone.utc))).total_seconds())
+    if seconds <= 0:
+        return None
+    return min(seconds, 86400)
+
+
 def _buy_box_facts(parser: _DOMParser) -> dict[str, str]:
     text = _first_text(parser, [{"id_value": "desktop_buybox"}, {"id_value": "buybox"}])
     if not text:
@@ -1167,6 +1188,7 @@ def extract_response_status(driver: Any) -> int | None:
 class SeleniumFirefoxAdapter:
     def __init__(self, config: dict[str, Any] | None = None, headless: bool | None = None, timeout: int | None = None) -> None:
         config = config or DEFAULTS
+        self.config = config
         try:
             from selenium import webdriver
             from selenium.webdriver.common.proxy import Proxy
@@ -1305,6 +1327,7 @@ class HttpFirstAdapter:
             int(self.config.get("rate_burst", 1)),
         )
         self.browser: SeleniumFirefoxAdapter | None = None
+        self.last_retry_after_seconds: int | None = None
 
     @staticmethod
     def _decode(response: Any, body: bytes) -> str:
@@ -1318,6 +1341,7 @@ class HttpFirstAdapter:
         return body.decode(charset, errors="replace")
 
     def fetch(self, url: str) -> tuple[str, int | None]:
+        self.last_retry_after_seconds = None
         max_attempts = max(1, min(int(self.config.get("http_max_attempts", 2)), 3))
         backoff = max(0.0, min(float(self.config.get("http_retry_backoff_seconds", 0.5)), 5.0))
         last_error: Exception | None = None
@@ -1339,6 +1363,8 @@ class HttpFirstAdapter:
                     self.source_type = "http_html"
                     return self._decode(response, body), int(response.getcode() or 200)
             except urllib.error.HTTPError as exc:
+                if int(exc.code) == 429:
+                    self.last_retry_after_seconds = _retry_after_seconds(exc.headers.get("Retry-After") if exc.headers else None)
                 try:
                     body = exc.read()
                 except http.client.IncompleteRead as partial:
@@ -1474,9 +1500,11 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                 else:
                     alternate_reason = classify_block(alternate_status, alternate_body)
                     alternate_records, alternate_next_url = parse_reviews_html(alternate_body, page, alternate_url) if not alternate_reason else ([], None)
-                    if not alternate_reason and (alternate_records or alternate_next_url):
+                    if alternate_reason:
+                        body, response_status, url, records, next_url, reason = alternate_body, alternate_status, alternate_url, [], None, alternate_reason
+                    elif alternate_records or alternate_next_url:
                         body, response_status, url, records, next_url = alternate_body, alternate_status, alternate_url, alternate_records, alternate_next_url
-                    elif not alternate_reason:
+                    else:
                         # Keep the empty fallback page as evidence before the
                         # primary portal result is recorded below.
                         _insert_evidence(conn, run_id, row["asin"], alternate_url, alternate_status, alternate_body, None, "empty_review_page", getattr(adapter, "source_type", "http_html"), raw_html_dir, context=config.get("context"))
@@ -1492,13 +1520,17 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                     pass
                 else:
                     browser_reason = classify_block(browser_status, browser_body)
-                    if not browser_reason:
+                    if browser_reason:
+                        body, response_status, records, next_url, reason = browser_body, browser_status, [], None, browser_reason
+                    else:
                         browser_records, browser_next_url = parse_reviews_html(browser_body, page, url)
                         if browser_records or browser_next_url:
                             body, response_status, records, next_url = browser_body, browser_status, browser_records, browser_next_url
                             reason = browser_reason
             source_type = getattr(adapter, "source_type", "selenium_dom")
-            _write_review_action(conn, run_id, row, page, url, records, next_url, body, response_status, reason, int(config["review_page_limit"]), source_type, raw_html_dir, config.get("context"), config.get("rate_limit_cooldown_seconds"))
+            retry_after = getattr(adapter, "last_retry_after_seconds", None)
+            cooldown = retry_after if retry_after is not None else config.get("rate_limit_cooldown_seconds")
+            _write_review_action(conn, run_id, row, page, url, records, next_url, body, response_status, reason, int(config["review_page_limit"]), source_type, raw_html_dir, config.get("context"), cooldown)
             if refresh_job_id and row["asin"] == refresh_asin:
                 _finish_refresh_request(conn, refresh_job_id, "queued" if reason == "http_429" else "failed" if reason else "completed")
             blocked = blocked or bool(reason)
@@ -1536,7 +1568,9 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                 pass
             else:
                 browser_reason = classify_block(browser_status, browser_body)
-                if not browser_reason:
+                if browser_reason:
+                    body, response_status, data, reason = browser_body, browser_status, {"asin": "", "canonical_url": ""}, browser_reason
+                else:
                     body, response_status, data, reason = browser_body, browser_status, parse_product_html(browser_body, row["url"]), browser_reason
         context_errors = validate_context(data, config.get("context")) if not reason else []
         if context_errors and hasattr(adapter, "fetch_browser"):
@@ -1548,14 +1582,18 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                 browser_reason = classify_block(browser_status, browser_body)
                 browser_data = parse_product_html(browser_body, row["url"]) if not browser_reason else data
                 browser_context_errors = validate_context(browser_data, config.get("context")) if not browser_reason else context_errors
-                if not browser_reason and not browser_context_errors:
+                if browser_reason:
+                    body, response_status, data, reason, context_errors = browser_body, browser_status, {"asin": "", "canonical_url": ""}, browser_reason, []
+                elif not browser_context_errors:
                     body, response_status, data, reason, context_errors = browser_body, browser_status, browser_data, browser_reason, []
         if context_errors:
             error_code = "context_mismatch:" + ",".join(context_errors)
         else:
             error_code = None
         source_type = getattr(adapter, "source_type", "selenium_dom")
-        _write_product_action(conn, run_id, row, data, body, response_status, reason, error_code=error_code, source_type=source_type, raw_html_dir=raw_html_dir, context=config.get("context"), cooldown_seconds=config.get("rate_limit_cooldown_seconds"))
+        retry_after = getattr(adapter, "last_retry_after_seconds", None)
+        cooldown = retry_after if retry_after is not None else config.get("rate_limit_cooldown_seconds")
+        _write_product_action(conn, run_id, row, data, body, response_status, reason, error_code=error_code, source_type=source_type, raw_html_dir=raw_html_dir, context=config.get("context"), cooldown_seconds=cooldown)
         if refresh_job_id and row["asin"] == refresh_asin:
             _finish_refresh_request(conn, refresh_job_id, "queued" if reason == "http_429" else "failed" if reason else "completed")
         blocked = blocked or bool(reason)

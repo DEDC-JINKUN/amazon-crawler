@@ -6,6 +6,7 @@ import importlib.util
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -349,6 +350,42 @@ class BatchCheckpointTests(unittest.TestCase):
             retry_at = conn.execute("SELECT next_retry_at FROM item_state").fetchone()[0]
             self.assertTrue(retry_at)
             conn.close()
+
+    def test_alternate_review_429_preserves_evidence_and_retry_after(self):
+        product = (FIXTURES / "product_unavailable_video_aplus.html").read_text()
+
+        class ProductGood:
+            def fetch(self, url):
+                return product, 200
+
+        class Alternate429:
+            source_type = "http_html"
+            last_retry_after_seconds = None
+
+            def fetch(self, url):
+                if "/portal/customer-reviews/" in url:
+                    return "<html><body>No review cards</body></html>", 200
+                self.last_retry_after_seconds = 120
+                return "Too many requests", 429
+
+        with tempfile.TemporaryDirectory() as directory:
+            worker, conn, config = self._setup(Path(directory))
+            try:
+                worker.run_actions(conn, ProductGood(), config)
+                primary = "https://www.amazon.com/portal/customer-reviews/B00RCPDCQU"
+                conn.execute("UPDATE item_state SET next_review_url=?", (primary,))
+                conn.commit()
+                self.assertEqual(worker.run_actions(conn, Alternate429(), config), -1)
+                state = conn.execute("SELECT status,block_reason,next_retry_at,next_review_url FROM item_state").fetchone()
+                self.assertEqual((state["status"], state["block_reason"], state["next_review_url"]), ("reviews_pending", "http_429", primary))
+                retry_at = datetime.fromisoformat(state["next_retry_at"])
+                delta = (retry_at - datetime.now(timezone.utc)).total_seconds()
+                self.assertGreaterEqual(delta, 115)
+                self.assertLessEqual(delta, 120)
+                evidence = conn.execute("SELECT url,http_status,block_reason FROM collection_evidence ORDER BY id DESC LIMIT 1").fetchone()
+                self.assertEqual(tuple(evidence), ("https://www.amazon.com/product-reviews/B00RCPDCQU", 429, "http_429"))
+            finally:
+                conn.close()
 
     def test_captcha_stops_batch_and_leaves_unclaimed_tasks_pending(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -54,6 +54,9 @@
 - [x] Buy Box 配送字段去除列表按钮和错误提示噪声。
 - [x] worker/raw HTML/evidence 健康检查端到端哈希回归。
 - [x] 429 `next_retry_at` 冷却和防紧密重试机制。
+- [x] 429 数字秒数/HTTP-date `Retry-After` 优先冷却，并对异常值安全回退。
+- [x] 代理计费流量与成功 ASIN 成本外推工具。
+- [x] Firefox 适配器保留运行配置，保证 ZIP 上下文初始化可用。
 - [x] 竞品候选发现支持 `data-asin` 搜索卡片属性。
 - [x] 审计并明确 BSR/类目与卖家/Coupon/配送字段落点。
 - [x] evidence 保存 ZIP/国家/币种上下文并同步迁移链路。

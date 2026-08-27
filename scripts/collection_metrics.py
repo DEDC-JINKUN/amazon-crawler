@@ -4,14 +4,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sqlite3
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 
 TABLES = ("product_snapshot", "media_asset", "content_module", "review_summary", "review_record")
+
+
+def _is_product_page(url: Any, asin: Any) -> bool:
+    path = urlsplit(str(url or "")).path
+    match = re.search(r"/dp/([A-Za-z0-9]{10})(?:/|$)", path)
+    return bool(match and match.group(1).upper() == str(asin or "").upper())
 
 
 def _parse_time(value: Any) -> datetime | None:
@@ -35,7 +43,7 @@ def build_report(db_path: Path, raw_html_dir: Path | None = None, run_id: str | 
             row = conn.execute("SELECT run_id FROM collection_evidence ORDER BY id DESC LIMIT 1").fetchone()
             run_id = row["run_id"] if row else None
         evidence = list(conn.execute(
-            "SELECT asin,source_type,http_status,retrieved_at,error_code,block_reason,raw_html_path FROM collection_evidence WHERE run_id=? ORDER BY id",
+            "SELECT asin,url,source_type,http_status,retrieved_at,error_code,block_reason,raw_html_path FROM collection_evidence WHERE run_id=? ORDER BY id",
             (run_id,),
         )) if run_id else []
         asins = sorted({row["asin"] for row in evidence})
@@ -55,23 +63,42 @@ def build_report(db_path: Path, raw_html_dir: Path | None = None, run_id: str | 
     elapsed = max(0.0, (finished - started).total_seconds()) if started and finished else None
     bytes_total = 0
     readable_files = 0
+    seen_raw_paths: set[str] = set()
     if raw_html_dir:
         for row in evidence:
             if not row["raw_html_path"]:
                 continue
-            path = raw_html_dir / str(row["raw_html_path"])
+            raw_path = str(row["raw_html_path"])
+            if raw_path in seen_raw_paths:
+                continue
+            seen_raw_paths.add(raw_path)
+            path = raw_html_dir / raw_path
             try:
                 bytes_total += path.stat().st_size
                 readable_files += 1
             except OSError:
                 pass
     page_count = len(evidence)
-    success_pages = sum(1 for row in evidence if row["http_status"] and 200 <= int(row["http_status"]) < 300 and not row["error_code"] and not row["block_reason"])
+    successful_evidence = [
+        row for row in evidence
+        if row["http_status"] and 200 <= int(row["http_status"]) < 300 and not row["error_code"] and not row["block_reason"]
+    ]
+    success_pages = len(successful_evidence)
+    failed_product_keys = {
+        (row["asin"], row["url"])
+        for row in evidence
+        if _is_product_page(row["url"], row["asin"]) and (row["error_code"] or row["block_reason"])
+    }
+    successful_asins = {
+        row["asin"] for row in successful_evidence
+        if _is_product_page(row["url"], row["asin"]) and (row["asin"], row["url"]) not in failed_product_keys
+    }
     return {
         "schema_version": "amazon-us-collection-metrics-v1",
         "run_id": run_id,
         "evidence_count": page_count,
         "unique_asin_count": len(asins),
+        "unique_successful_asin_count": len(successful_asins),
         "source_counts": dict(Counter(row["source_type"] or "unknown" for row in evidence)),
         "http_status_counts": dict(Counter(str(row["http_status"] or "unknown") for row in evidence)),
         "error_counts": dict(Counter(row["error_code"] or row["block_reason"] or "none" for row in evidence)),

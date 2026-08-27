@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import importlib.util
 import http.client
+import io
+import sys
+import types
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -67,6 +71,81 @@ class _SequenceOpener:
 
 
 class HttpAdapterTests(unittest.TestCase):
+    def test_firefox_adapter_keeps_config_for_delivery_context(self):
+        worker = load_worker()
+
+        class FakeOptions:
+            def __init__(self):
+                self.profile = None
+
+            def add_argument(self, value):
+                pass
+
+            def set_preference(self, name, value):
+                pass
+
+        class FakeDriver:
+            def set_page_load_timeout(self, value):
+                pass
+
+            def quit(self):
+                pass
+
+        webdriver = types.ModuleType("selenium.webdriver")
+        webdriver.Firefox = lambda **kwargs: FakeDriver()
+        selenium = types.ModuleType("selenium")
+        selenium.webdriver = webdriver
+        proxy_module = types.ModuleType("selenium.webdriver.common.proxy")
+        proxy_module.Proxy = lambda value: value
+        options_module = types.ModuleType("selenium.webdriver.firefox.options")
+        options_module.Options = FakeOptions
+        service_module = types.ModuleType("selenium.webdriver.firefox.service")
+        service_module.Service = lambda **kwargs: object()
+        fake_modules = {
+            "selenium": selenium,
+            "selenium.webdriver": webdriver,
+            "selenium.webdriver.common": types.ModuleType("selenium.webdriver.common"),
+            "selenium.webdriver.common.proxy": proxy_module,
+            "selenium.webdriver.firefox": types.ModuleType("selenium.webdriver.firefox"),
+            "selenium.webdriver.firefox.options": options_module,
+            "selenium.webdriver.firefox.service": service_module,
+        }
+        config = {**worker.DEFAULTS, "context": {"postal_code": "90001"}}
+        with patch.dict(sys.modules, fake_modules):
+            adapter = worker.SeleniumFirefoxAdapter(config)
+        self.assertIs(adapter.config, config)
+        adapter.close()
+
+    def test_retry_after_parses_bounded_delta_seconds(self):
+        worker = load_worker()
+        self.assertEqual(worker._retry_after_seconds("120"), 120)
+        self.assertEqual(worker._retry_after_seconds("999999"), 86400)
+        self.assertIsNone(worker._retry_after_seconds("0"))
+        self.assertIsNone(worker._retry_after_seconds("tomorrow"))
+        now = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
+        self.assertEqual(worker._retry_after_seconds("Thu, 27 Aug 2026 14:00:00 GMT", now), 7200)
+
+    def test_http_429_captures_retry_after_for_task_cooldown(self):
+        worker = load_worker()
+        error = worker.urllib.error.HTTPError(
+            "https://example.test",
+            429,
+            "too many requests",
+            {"Retry-After": "120"},
+            io.BytesIO(b"Too many requests"),
+        )
+
+        class ErrorOpener:
+            def open(self, request, timeout):
+                raise error
+
+        with patch.object(worker.urllib.request, "build_opener", return_value=ErrorOpener()):
+            adapter = worker.HttpFirstAdapter({**worker.DEFAULTS, "http_max_attempts": 1})
+            body, status = adapter.fetch("https://example.test")
+        self.assertEqual((body, status), ("Too many requests", 429))
+        self.assertEqual(adapter.last_retry_after_seconds, 120)
+        adapter.close()
+
     def test_incomplete_chunked_response_becomes_retryable_adapter_error(self):
         worker = load_worker()
 

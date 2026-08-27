@@ -18,7 +18,7 @@
 
 - `blocked`：403 或明确访问阻断页的终态；不自动重试。
 - `failed`：非阻断错误；`attempts` 是当前 stage 连续失败次数，成功 product/review action 重置为 0，仅在 `< max_attempts` 时重试；达到上限的 failed 会在验收中列为 `exhausted_failed`。
-- HTTP `429` 不进入永久 `blocked`：写入 `http_429` evidence，保留 product/review 游标，转回 `pending` 或 `reviews_pending`，下一小时使用同一会话类型重试。
+- HTTP `429` 不进入永久 `blocked`：写入 `http_429` evidence，保留 product/review 游标，转回 `pending` 或 `reviews_pending`。响应提供数字秒数或 HTTP-date 形式 `Retry-After` 时优先按其冷却（最多 24 小时）；缺失、无效、为 0 或早于当前时间时，按配置的默认 1 小时冷却。
 
 ## 输出表
 

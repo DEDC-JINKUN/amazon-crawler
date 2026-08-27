@@ -10,7 +10,7 @@
 
 HTTP 请求支持全局和出口级 Token Bucket 限速：`global_requests_per_second`、`egress_requests_per_second` 和 `rate_burst` 默认为 0/0/1，保持 POC 不主动等待；生产接入授权出口后再设置。限速模块不负责代理轮换，出口切换仍需经过批准、隔离和人工审计。
 
-遇到 HTTP `403`、或页面标题/正文包含明确阻断短语 `robot check`、`enter the characters`、`captcha`、`sorry we just need to make sure you're not a robot`、`automated access`、`access denied`、`too many requests`，立即写入 `blocked` 和 `block_reason`，停止本次流水线，不重试、不切换 IP、不代理规避、不伪装身份。HTTP `429` 是可恢复的限流：保留当前 product/review 游标，写 evidence 和 `http_429`，本次 run 停止；下一小时使用同一会话类型/透明身份重试同一 action，不代理、不换 IP。普通文本如 `robot vacuum` 不会阻断。
+遇到 HTTP `403`、或页面标题/正文包含明确阻断短语 `robot check`、`enter the characters`、`captcha`、`sorry we just need to make sure you're not a robot`、`automated access`、`access denied`、`too many requests`，立即写入 `blocked` 和 `block_reason`，停止本次流水线，不重试、不切换 IP、不代理规避、不伪装身份。HTTP `429` 是可恢复的限流：保留当前 product/review 游标，写 evidence 和 `http_429`，本次 run 停止；优先按数字秒数或 HTTP-date `Retry-After` 冷却（最多 24 小时），无效或缺失时默认等待 1 小时，然后使用同一会话类型/透明身份重试同一 action，不代理、不换 IP。普通文本如 `robot vacuum` 不会阻断。
 
 ## SQLite 事实源与 Box 映射
 
@@ -34,7 +34,7 @@ SQLite 是唯一事实源。每个 page action 只发一个页面请求，并在
 - `running -> product_done -> succeeded`：没有可分页评论入口；`review_summary.status` 为 `not_available` 或 `section_only`，`fetched_count=0`，不宣称已采集全评论。
 - `reviews_pending -> running -> reviews_pending`：评论页仍有下一页或达到分页 limit。
 - `running -> blocked`：403/明确阻断页，终态，不重试。
-- `running -> pending/reviews_pending`：429 限流延迟，保留 `last_error=block_reason=http_429` 与当前游标，不标记永久 blocked；下一小时用同一会话类型重试。
+- `running -> pending/reviews_pending`：429 限流延迟，保留 `last_error=block_reason=http_429` 与当前游标，不标记永久 blocked；按有效 `Retry-After` 或默认 1 小时冷却后用同一会话类型重试。
 - 非阻断错误进入 `failed`，只在 `attempts < max_attempts` 时再次领取；attempts 是当前 stage 的连续失败次数，成功 action 后重置为 0。
 
 `next_review_page` 与 `next_review_url` 是精确续跑游标。产品 action 和评论 page action 分离；已有评论游标不会重抓产品。`--once` 表示本次批次运行后退出，批次默认最多 `max_actions_per_run=10` 个 action；通常每个 action 一次 HTTP 请求，HTTP 页面字段不足时可能追加一次 Firefox 请求。`--limit` 可覆盖本次 action 数上限。
@@ -102,7 +102,7 @@ HTTP 传输层默认 `http_max_attempts=2`、`http_retry_backoff_seconds=0.5`，
 
 评论记录以 `marketplace + asin + review_id` 为主键：重复抓取不会新增重复记录，Amazon 编辑同一评论时会更新已有记录；分页游标仍按 `next_review_url/next_review_page` 续跑。
 
-`--once` 是一批 action，不是一条商品或一页评论。遇 403/CAPTCHA 阻断返回非零并保留 checkpoint，不再选择；遇 429 返回非零但保留 pending/reviews_pending 游标，下一小时使用同一会话类型重试；非阻断 failed 在达到 `max_attempts` 前继续。
+`--once` 是一批 action，不是一条商品或一页评论。遇 403/CAPTCHA 阻断返回非零并保留 checkpoint，不再选择；遇 429 返回非零但保留 pending/reviews_pending 游标，按有效 `Retry-After` 或默认 1 小时冷却后用同一会话类型重试；非阻断 failed 在达到 `max_attempts` 前继续。
 
 若配置 `user_agent`，必须包含透明标识 `Agent/<agent_name>`；默认配置已使用带 `Agent/amazon-us-worker` 的 Firefox UA，不覆盖为隐藏身份。不存在 Selenium 时 live 模式仅报告清晰依赖错误，不会发出网络请求。
 
