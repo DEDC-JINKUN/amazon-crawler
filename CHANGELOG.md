@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.2 - 2026-08-28
+
+- `replay_postgres.ps1` 新增 `-TenantId`，并将租户同时传给 SQLite 回放和 PostgreSQL 验收。
+- 补充 Windows 回放入口的租户隔离回归。
+
 ## 0.2.1 - 2026-08-28
 
 - 实际启动 PostgreSQL tenant-scoped Collection API，验证状态和单 ASIN HTTP 路由均只返回指定租户数据。

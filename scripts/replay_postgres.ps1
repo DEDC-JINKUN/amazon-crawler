@@ -4,7 +4,8 @@ param(
   [string]$User = "postgres",
   [string]$Database = "postgres",
   [ValidateSet("own", "competitor", "candidate")]
-  [string]$SubjectType = "candidate"
+  [string]$SubjectType = "candidate",
+  [string]$TenantId = "default"
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,9 +22,9 @@ $securePassword = Read-Host "Enter PostgreSQL password for $User@$HostName`:$Por
 $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
 try {
   $env:PGPASSWORD = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
-  & $python (Join-Path $root "scripts\migrate_sqlite_to_postgres.py") --sqlite $sqlite --dsn $dsn --schema $schema --subject-type $SubjectType
+  & $python (Join-Path $root "scripts\migrate_sqlite_to_postgres.py") --sqlite $sqlite --dsn $dsn --schema $schema --subject-type $SubjectType --tenant-id $TenantId
   if ($LASTEXITCODE -ne 0) { throw "SQLite to PostgreSQL replay failed with exit code $LASTEXITCODE" }
-  & $python (Join-Path $root "scripts\verify_postgres.py") --dsn $dsn
+  & $python (Join-Path $root "scripts\verify_postgres.py") --dsn $dsn --tenant-id $TenantId
   if ($LASTEXITCODE -ne 0) { throw "PostgreSQL verification failed with exit code $LASTEXITCODE" }
 }
 finally {

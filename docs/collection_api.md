@@ -35,6 +35,8 @@ DSN 不写入仓库、日志或配置提交；生产环境通过受控环境变�
 
 schema 初始化后运行 `scripts\replay_postgres.ps1`，可交互输入密码完成 SQLite 回放并调用 PostgreSQL repository 验证；JSONB 字段由迁移工具自动适配，密码仅存在于当前 PowerShell 进程。
 
+PowerShell 回放支持 `-TenantId qa_latest_20260827`，并会同时将该租户传给迁移和 PostgreSQL 验收；生产不应使用不明确的 `default` 租户。
+
 ## 路由
 
 ### 健康检查

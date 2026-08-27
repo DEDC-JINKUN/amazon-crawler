@@ -24,3 +24,9 @@ def test_windows_entrypoints_keep_distinct_error_stages():
         assert "WORKER_EXIT" in text or "MATERIALIZE_EXIT" in text
         assert "VERIFY_EXIT" in text
         assert "RECEIPT_EXIT" in text
+
+
+def test_replay_postgres_exposes_tenant_id():
+    text = (ROOT / "scripts" / "replay_postgres.ps1").read_text(encoding="utf-8")
+    assert "$TenantId = \"default\"" in text
+    assert "--tenant-id $TenantId" in text
