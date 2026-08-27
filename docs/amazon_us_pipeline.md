@@ -84,6 +84,8 @@ Windows 每小时任务应调用 `run_scheduled_windows.bat`：它会先运行 `
 
 美国 VPN 下使用全新空状态库采集 `B00RCPDCQU` 已通过商品页门禁：HTTP 200、美元 `$23.99`、`product_done`，媒体 34、内容模块 23、评论摘要 1、证据 1；评论页为空单独标记 `empty_review_page`。该输出位于 `data/amazon_us/quick_clean_vpn`，仅为测试副本。
 
+美国 VPN/90001 的全新 SQLite 10 条小批量已完成：9 条商品页成功、1 条 `asin_mismatch` 拦截；bullets 覆盖率 55.56%，描述覆盖率 44.44%。这批结果支持继续修解析器，但不支持直接扩大到全量 ASIN。
+
 `--once` 是一批 action，不是一条商品或一页评论。遇 403/CAPTCHA 阻断返回非零并保留 checkpoint，不再选择；遇 429 返回非零但保留 pending/reviews_pending 游标，下一小时使用同一会话类型重试；非阻断 failed 在达到 `max_attempts` 前继续。
 
 若配置 `user_agent`，必须包含透明标识 `Agent/<agent_name>`；默认配置已使用带 `Agent/amazon-us-worker` 的 Firefox UA，不覆盖为隐藏身份。不存在 Selenium 时 live 模式仅报告清晰依赖错误，不会发出网络请求。
