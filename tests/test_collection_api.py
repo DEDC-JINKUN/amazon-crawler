@@ -156,6 +156,9 @@ class CollectionApiTests(unittest.TestCase):
                     payload = json.loads(response.read())
                     self.assertEqual(response.status, 202)
                 self.assertEqual(payload["job"]["status"], "queued")
+                job_id = payload["job"]["job_id"]
+                with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/v1/jobs/{job_id}", timeout=2) as response:
+                    self.assertEqual(json.loads(response.read())["job"]["status"], "queued")
                 conn = worker.init_db(db)
                 count = conn.execute("SELECT COUNT(*) FROM refresh_request").fetchone()[0]
                 conn.close()

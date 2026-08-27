@@ -53,6 +53,14 @@ GET /v1/jobs/status
 
 返回各任务状态数量以及 `refresh_request` 队列状态，用于运营查看采集积压、按需刷新积压和失败情况。
 
+### 查询刷新任务
+
+```http
+GET /v1/jobs/{job_id}
+```
+
+返回刷新请求的 `queued`、`claimed`、`completed` 或 `failed` 状态。
+
 ### 提交按需刷新
 
 ```http

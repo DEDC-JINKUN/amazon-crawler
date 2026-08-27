@@ -19,6 +19,8 @@ class CollectionRepository(Protocol):
 
     def load_job_status(self) -> dict[str, Any]: ...
 
+    def load_refresh_request(self, job_id: str) -> dict[str, Any] | None: ...
+
     def request_refresh(self, marketplace: str, asin: str, requested_by: str, reason: str) -> dict[str, Any]: ...
 
 
@@ -140,6 +142,14 @@ class SQLiteCollectionRepository:
             )
             conn.commit()
             return request
+        finally:
+            conn.close()
+
+    def load_refresh_request(self, job_id: str) -> dict[str, Any] | None:
+        conn = self._connection()
+        try:
+            row = conn.execute("SELECT * FROM refresh_request WHERE job_id=?", (job_id,)).fetchone()
+            return _dict_row(row)
         finally:
             conn.close()
 
@@ -270,3 +280,10 @@ class PostgresCollectionRepository:
             conn.commit()
         request["requested_at"] = _now()
         return request
+
+    def load_refresh_request(self, job_id: str) -> dict[str, Any] | None:
+        with self._connect_factory() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT * FROM amazon_us.refresh_request WHERE job_id=%s", (job_id,))
+                row = cursor.fetchone()
+                return dict(row) if row is not None else None

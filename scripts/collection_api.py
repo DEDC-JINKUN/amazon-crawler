@@ -62,6 +62,18 @@ class CollectionHandler(BaseHTTPRequestHandler):
             except (OSError, RuntimeError, sqlite3.Error) as exc:
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable", "detail": str(exc)})
             return
+        job_match = re.fullmatch(r"/v1/jobs/([A-Za-z0-9_-]+)", path)
+        if job_match:
+            try:
+                job = self.server.repository.load_refresh_request(job_match.group(1))
+            except (OSError, RuntimeError, sqlite3.Error) as exc:
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable", "detail": str(exc)})
+                return
+            if job is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "job_not_found", "job_id": job_match.group(1)})
+                return
+            self._send_json(HTTPStatus.OK, {"schema_version": API_SCHEMA_VERSION, "job": job})
+            return
         evidence_match = re.fullmatch(r"/v1/asin/([A-Za-z]{2})/([A-Za-z0-9]{10})/evidence", path)
         if evidence_match:
             marketplace, asin = evidence_match.group(1).upper(), evidence_match.group(2).upper()
