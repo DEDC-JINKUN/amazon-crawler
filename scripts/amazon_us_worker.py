@@ -937,6 +937,10 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     if user_agent and f"Agent/{agent_name}" not in user_agent:
         raise ValueError("user_agent 必须包含透明标识 Agent/<agent_name>")
     config["agent_name"] = agent_name
+    encoding = str(config.get("http_accept_encoding") or "identity").strip().lower()
+    if encoding not in {"gzip", "identity"}:
+        raise ValueError("http_accept_encoding must be gzip or identity")
+    config["http_accept_encoding"] = encoding
     config["max_attempts"] = max(1, int(config["max_attempts"]))
     config["max_actions_per_run"] = max(1, int(config["max_actions_per_run"]))
     config["review_page_limit"] = max(0, int(config["review_page_limit"]))

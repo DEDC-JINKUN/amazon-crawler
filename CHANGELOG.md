@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.91 - 2026-08-27
+
+- 配置加载时限制 `http_accept_encoding` 为已实现的 `gzip` 或 `identity`，避免误配不支持的压缩格式。
+- 增加不支持压缩配置的启动回归。
+
 ## 0.1.90 - 2026-08-27
 
 - SQLite/PostgreSQL 只读对账新增最新 evidence `transfer_bytes` 比对，后端丢失流量证据时不再误报一致。

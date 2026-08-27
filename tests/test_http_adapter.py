@@ -5,6 +5,7 @@ import gzip
 import http.client
 import io
 import sys
+import tempfile
 import types
 import unittest
 from datetime import datetime, timezone
@@ -93,6 +94,14 @@ class HttpAdapterTests(unittest.TestCase):
         self.assertEqual(adapter.last_transfer_bytes, len(compressed))
         self.assertLess(adapter.last_transfer_bytes, len(plain))
         adapter.close()
+
+    def test_config_rejects_unsupported_content_encoding(self):
+        worker = load_worker()
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            config_path.write_text('[worker]\nagent_name="test-agent"\nuser_agent="Agent/test-agent"\nhttp_accept_encoding="br"\n', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "http_accept_encoding"):
+                worker.load_config(config_path)
 
     def test_firefox_adapter_keeps_config_for_delivery_context(self):
         worker = load_worker()
