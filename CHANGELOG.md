@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.80 - 2026-08-27
+
+- Windows 人工单批入口同样自动保存 `run_receipt.json`，定时和手动测试共用统一回执格式。
+- 手动入口的 worker/验收错误码优先返回，回执失败不会隐藏原始失败。
+
 ## 0.1.79 - 2026-08-27
 
 - Windows 定时采集脚本自动生成 `data/amazon_us/run_receipt.json`，保留每次运行的验收、流量和成本回执。
