@@ -14,6 +14,8 @@ from typing import Any, Protocol
 class CollectionRepository(Protocol):
     def load_product(self, marketplace: str, asin: str) -> dict[str, Any] | None: ...
 
+    def load_evidence(self, marketplace: str, asin: str, limit: int = 20) -> list[dict[str, Any]]: ...
+
     def load_job_status(self) -> dict[str, Any]: ...
 
 
@@ -77,6 +79,19 @@ class SQLiteCollectionRepository:
                 "retrieved_at": _now(),
                 "counts": {row["status"]: row["count"] for row in rows},
             }
+        finally:
+            conn.close()
+
+    def load_evidence(self, marketplace: str, asin: str, limit: int = 20) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 100))
+        conn = self._connection()
+        try:
+            rows = conn.execute(
+                "SELECT run_id, url, http_status, retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code "
+                "FROM collection_evidence WHERE marketplace=? AND asin=? ORDER BY id DESC LIMIT ?",
+                (marketplace, asin, limit),
+            ).fetchall()
+            return [dict(row) for row in rows]
         finally:
             conn.close()
 
@@ -166,3 +181,14 @@ class PostgresCollectionRepository:
                     "retrieved_at": _now(),
                     "counts": {row["status"]: row["count"] for row in rows},
                 }
+
+    def load_evidence(self, marketplace: str, asin: str, limit: int = 20) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 100))
+        with self._connect_factory() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT run_id, url, http_status, retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code "
+                    "FROM amazon_us.collection_evidence WHERE marketplace=%s AND asin=%s ORDER BY id DESC LIMIT %s",
+                    (marketplace, asin, limit),
+                )
+                return [dict(row) for row in cursor.fetchall()]

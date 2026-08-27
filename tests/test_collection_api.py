@@ -48,6 +48,7 @@ class CollectionApiTests(unittest.TestCase):
                 self.assertEqual(payload["asin"], "B00RCPDCQU")
                 self.assertEqual(payload["source"], "selenium_dom")
                 self.assertTrue(payload["evidence"]["raw_html_path"])
+                self.assertEqual(len(api.load_evidence(db, "US", "B00RCPDCQU")), 1)
                 self.assertEqual(api.load_job_status(db)["counts"]["reviews_pending"], 1)
 
     def test_server_is_loopback_only_and_has_json_routes(self):

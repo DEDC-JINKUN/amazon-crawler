@@ -33,6 +33,10 @@ def load_job_status(db_path: Path) -> dict[str, Any]:
     return SQLiteCollectionRepository(db_path).load_job_status()
 
 
+def load_evidence(db_path: Path, marketplace: str, asin: str, limit: int = 20) -> list[dict[str, Any]]:
+    return SQLiteCollectionRepository(db_path).load_evidence(marketplace, asin, limit)
+
+
 class CollectionHandler(BaseHTTPRequestHandler):
     server: "CollectionServer"
 
@@ -55,6 +59,19 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.OK, self.server.repository.load_job_status())
             except (OSError, RuntimeError, sqlite3.Error) as exc:
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable", "detail": str(exc)})
+            return
+        evidence_match = re.fullmatch(r"/v1/asin/([A-Za-z]{2})/([A-Za-z0-9]{10})/evidence", path)
+        if evidence_match:
+            marketplace, asin = evidence_match.group(1).upper(), evidence_match.group(2).upper()
+            try:
+                evidence = self.server.repository.load_evidence(marketplace, asin)
+            except (OSError, RuntimeError, sqlite3.Error) as exc:
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable", "detail": str(exc)})
+                return
+            if not evidence:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "evidence_not_found", "asin": asin, "marketplace": marketplace})
+                return
+            self._send_json(HTTPStatus.OK, {"schema_version": API_SCHEMA_VERSION, "marketplace": marketplace, "asin": asin, "items": evidence})
             return
         match = ASIN_PATH.fullmatch(path)
         if match:
