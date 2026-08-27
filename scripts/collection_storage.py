@@ -96,10 +96,12 @@ class SQLiteCollectionRepository:
         conn = self._connection()
         try:
             rows = conn.execute("SELECT status, COUNT(*) AS count FROM item_state GROUP BY status ORDER BY status").fetchall()
+            refresh_rows = conn.execute("SELECT status, COUNT(*) AS count FROM refresh_request GROUP BY status ORDER BY status").fetchall()
             return {
                 "schema_version": "amazon-us-collection-v1",
                 "retrieved_at": _now(),
                 "counts": {row["status"]: row["count"] for row in rows},
+                "refresh_requests": {row["status"]: row["count"] for row in refresh_rows},
             }
         finally:
             conn.close()
@@ -224,10 +226,13 @@ class PostgresCollectionRepository:
             with conn.cursor() as cursor:
                 cursor.execute("SELECT status, COUNT(*) AS count FROM amazon_us.item_state GROUP BY status ORDER BY status")
                 rows = cursor.fetchall()
+                cursor.execute("SELECT status, COUNT(*) AS count FROM amazon_us.refresh_request GROUP BY status ORDER BY status")
+                refresh_rows = cursor.fetchall()
                 return {
                     "schema_version": "amazon-us-collection-v1",
                     "retrieved_at": _now(),
                     "counts": {row["status"]: row["count"] for row in rows},
+                    "refresh_requests": {row["status"]: row["count"] for row in refresh_rows},
                 }
 
     def load_evidence(self, marketplace: str, asin: str, limit: int = 20) -> list[dict[str, Any]]:
