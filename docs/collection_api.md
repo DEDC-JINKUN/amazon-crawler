@@ -10,6 +10,15 @@ python scripts/collection_api.py --db state/amazon_us.sqlite3 --host 127.0.0.1 -
 
 默认只监听回环地址 `127.0.0.1`。如需部署到其他机器，必须先增加认证、网络隔离和权限控制，不能直接修改 host 绕过限制。
 
+可通过环境变量开启 API Key 认证。健康检查不要求 Key，其余路由需携带 `X-Collection-API-Key`：
+
+```powershell
+$env:AMAZON_COLLECTION_API_KEY = "local-dev-key"
+python scripts/collection_api.py --api-key-env AMAZON_COLLECTION_API_KEY
+```
+
+API Key 不写入仓库、命令行参数或日志。
+
 PostgreSQL 环境准备好后，安装可选依赖并切换后端：
 
 ```powershell

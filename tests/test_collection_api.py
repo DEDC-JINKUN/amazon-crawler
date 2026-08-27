@@ -77,6 +77,42 @@ class CollectionApiTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=2)
 
+    def test_optional_api_key_protects_non_health_routes(self):
+        api = load("collection_api")
+
+        class Repository:
+            def load_product(self, marketplace, asin):
+                return {"asin": asin, "marketplace": marketplace}
+
+            def load_job_status(self):
+                return {"counts": {}}
+
+            def load_evidence(self, marketplace, asin, limit=20):
+                return []
+
+            def request_refresh(self, marketplace, asin, requested_by, reason):
+                return {"job_id": "test", "status": "queued"}
+
+            def load_refresh_request(self, job_id):
+                return None
+
+        server = api.CollectionServer(("127.0.0.1", 0), repository=Repository(), api_key="secret")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/healthz", timeout=2) as response:
+                self.assertEqual(response.status, 200)
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/v1/jobs/status", timeout=2)
+            self.assertEqual(raised.exception.code, 401)
+            request = urllib.request.Request(f"http://127.0.0.1:{server.server_port}/v1/jobs/status", headers={"X-Collection-API-Key": "secret"})
+            with urllib.request.urlopen(request, timeout=2) as response:
+                self.assertEqual(response.status, 200)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def test_postgres_repository_uses_same_response_contract(self):
         storage = load("collection_storage")
 

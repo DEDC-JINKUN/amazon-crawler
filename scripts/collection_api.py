@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
+import os
 import re
 import sqlite3
 from http import HTTPStatus
@@ -51,10 +53,26 @@ class CollectionHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _authorized(self) -> bool:
+        expected = self.server.api_key
+        if not expected:
+            return True
+        supplied = self.headers.get("X-Collection-API-Key", "")
+        if hmac.compare_digest(supplied, expected):
+            return True
+        self.send_response(HTTPStatus.UNAUTHORIZED)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("WWW-Authenticate", "ApiKey")
+        self.end_headers()
+        self.wfile.write(b'{"error":"unauthorized"}')
+        return False
+
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
         path = urlsplit(self.path).path
         if path == "/healthz":
             self._send_json(HTTPStatus.OK, {"ok": True, "schema_version": API_SCHEMA_VERSION})
+            return
+        if not self._authorized():
             return
         if path == "/v1/jobs/status":
             try:
@@ -110,6 +128,8 @@ class CollectionHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
         path = urlsplit(self.path).path
+        if not self._authorized():
+            return
         if path == "/v1/asin/batch":
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -175,7 +195,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
 
 
 class CollectionServer(ThreadingHTTPServer):
-    def __init__(self, address: tuple[str, int], db_path: Path | None = None, repository: CollectionRepository | None = None):
+    def __init__(self, address: tuple[str, int], db_path: Path | None = None, repository: CollectionRepository | None = None, api_key: str | None = None):
         if address[0] not in LOOPBACK_HOSTS:
             raise ValueError("Collection API only allows loopback host by default")
         if repository is None:
@@ -184,12 +204,13 @@ class CollectionServer(ThreadingHTTPServer):
             repository = SQLiteCollectionRepository(db_path)
         super().__init__(address, CollectionHandler)
         self.repository = repository
+        self.api_key = api_key or ""
 
 
-def serve(db_path: Path | None = None, host: str = "127.0.0.1", port: int = 8765, repository: CollectionRepository | None = None) -> None:
+def serve(db_path: Path | None = None, host: str = "127.0.0.1", port: int = 8765, repository: CollectionRepository | None = None, api_key: str | None = None) -> None:
     if host not in LOOPBACK_HOSTS:
         raise ValueError("Collection API only allows loopback host by default")
-    server = CollectionServer((host, port), db_path, repository)
+    server = CollectionServer((host, port), db_path, repository, api_key)
     try:
         print(f"Collection API listening on http://{host}:{server.server_port}")
         server.serve_forever()
@@ -204,12 +225,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db", type=Path, default=Path("state/amazon_us.sqlite3"))
     parser.add_argument("--backend", choices=("sqlite", "postgres"), default="sqlite")
     parser.add_argument("--dsn", default="", help="PostgreSQL DSN (required with --backend postgres)")
+    parser.add_argument("--api-key-env", default="AMAZON_COLLECTION_API_KEY", help="Environment variable containing optional API key")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args(argv)
     try:
         repository = SQLiteCollectionRepository(args.db) if args.backend == "sqlite" else PostgresCollectionRepository(args.dsn)
-        serve(args.db if args.backend == "sqlite" else None, args.host, args.port, repository)
+        serve(args.db if args.backend == "sqlite" else None, args.host, args.port, repository, os.environ.get(args.api_key_env, ""))
     except (OSError, ValueError) as exc:
         print(f"error: {exc}")
         return 1
