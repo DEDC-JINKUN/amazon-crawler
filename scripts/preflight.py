@@ -45,6 +45,9 @@ def run_preflight(manifest: Path, config: Path, db: Path, *, require_live: bool 
             worker_spec.loader.exec_module(worker)
             loaded = worker.load_config(config)
             checks.append(_check("user_agent", f"Agent/{loaded['agent_name']}" in loaded["user_agent"], "transparent"))
+            context = loaded.get("context", {})
+            postal_code = str(context.get("postal_code") or "").strip()
+            checks.append(_check("us_postal_code", bool(postal_code) or not (require_live and str(context.get("expected_country") or "").upper() == "US"), "configured" if postal_code else "required for live US collection"))
         except (OSError, ValueError, KeyError) as exc:
             checks.append(_check("config_parse", False, str(exc)))
     selenium_available = importlib.util.find_spec("selenium") is not None

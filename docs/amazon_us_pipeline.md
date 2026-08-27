@@ -70,7 +70,7 @@ env -u APPIMAGE -u __PYVENV_LAUNCHER__ .venv/bin/python scripts/amazon_us_worker
 
 Windows 运行前先执行 `powershell -ExecutionPolicy Bypass -File scripts\install_geckodriver.ps1` 和 `python scripts\preflight.py --require-live`。固定驱动版本后再执行 live；真实探针记录见 `docs/live_probe_report.md`。
 
-Windows 每小时任务应调用 `run_scheduled_windows.bat`：它会先运行 preflight，再按字段新鲜度生成刷新队列，随后执行 worker、物化 CSV 和验收。`install_hourly_task_windows.bat` 已指向该脚本；`run_once_windows.bat` 仍用于人工单批运行。
+Windows 每小时任务应调用 `run_scheduled_windows.bat`：它会先运行 `preflight --require-live`（包括美国 ZIP 检查），再按字段新鲜度生成刷新队列，随后执行 worker、物化 CSV 和验收。`install_hourly_task_windows.bat` 已指向该脚本；`run_once_windows.bat` 仍用于人工单批运行。
 
 `--once` 是一批 action，不是一条商品或一页评论。遇 403/CAPTCHA 阻断返回非零并保留 checkpoint，不再选择；遇 429 返回非零但保留 pending/reviews_pending 游标，下一小时使用同一会话类型重试；非阻断 failed 在达到 `max_attempts` 前继续。
 

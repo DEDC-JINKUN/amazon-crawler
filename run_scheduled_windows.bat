@@ -6,7 +6,7 @@ if not exist ".venv\Scripts\python.exe" (
   exit /b 1
 )
 call .venv\Scripts\activate.bat
-python scripts\preflight.py || exit /b 1
+python scripts\preflight.py --require-live || exit /b 1
 python scripts\schedule_refresh.py --db state\amazon_us.sqlite3 --fields price,availability --limit 1000 || exit /b 1
 python scripts\amazon_us_worker.py --config config\amazon_us.windows.toml --live --once
 set WORKER_EXIT=%ERRORLEVEL%
