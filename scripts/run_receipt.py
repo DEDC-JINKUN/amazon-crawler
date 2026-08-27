@@ -102,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
             business_units=args.business_units,
         )
         receipt = compose_receipt(verification, verification_errors, collection, cost)
-    except (OSError, ValueError, sqlite3.Error) as exc:
+    except (OSError, ValueError, sqlite3.Error, KeyError, TypeError) as exc:
         print(f"run receipt failed: {exc}", file=sys.stderr)
         return 2
     encoded = json.dumps(receipt, ensure_ascii=False, indent=2) + "\n"
