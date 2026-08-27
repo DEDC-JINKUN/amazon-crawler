@@ -1,6 +1,6 @@
 # Collection API（本地只读版）
 
-Collection API 是 Agent 查询采集结果的统一入口。当前版本只读 SQLite，不启动采集、不修改任务、不暴露到公网。
+Collection API 是 Agent 查询采集结果的统一入口。当前版本只读 SQLite，不启动采集、不修改任务、不暴露到公网。API 通过 `collection_storage.py` 的 repository 接口访问数据，后续替换 PostgreSQL 时保持路由和响应不变。
 
 ## 启动
 
@@ -41,4 +41,4 @@ GET /v1/jobs/status
 - 远程公网访问；
 - 直接查询个人 Cookie、Token 或代理凭证。
 
-后续接入 PostgreSQL 时保持相同路由和响应契约，将 SQLite 查询层替换为数据库适配器即可。
+后续接入 PostgreSQL 时保持相同路由和响应契约，将 SQLite repository 替换为 PostgreSQL repository 即可。

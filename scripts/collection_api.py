@@ -13,70 +13,25 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+try:
+    from collection_storage import SQLiteCollectionRepository
+except ModuleNotFoundError:
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from collection_storage import SQLiteCollectionRepository
+
 API_SCHEMA_VERSION = "amazon-us-collection-v1"
 ASIN_PATH = re.compile(r"^/v1/asin/([A-Za-z]{2})/([A-Za-z0-9]{10})$")
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
-def _dict_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
-    return dict(row) if row is not None else None
-
-
-def _read_connection(db_path: Path) -> sqlite3.Connection:
-    if not db_path.exists():
-        raise FileNotFoundError(f"SQLite database not found: {db_path}")
-    conn = sqlite3.connect(str(db_path), timeout=2)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-
 def load_product(db_path: Path, marketplace: str, asin: str) -> dict[str, Any] | None:
     """Return a snapshot plus task/evidence metadata without writing to SQLite."""
-    conn = _read_connection(db_path)
-    try:
-        product = conn.execute("SELECT * FROM product_snapshot WHERE marketplace=? AND asin=?", (marketplace, asin)).fetchone()
-        state = conn.execute("SELECT * FROM item_state WHERE marketplace=? AND asin=?", (marketplace, asin)).fetchone()
-        if product is None and state is None:
-            return None
-        evidence = conn.execute(
-            "SELECT run_id, url, http_status, retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code "
-            "FROM collection_evidence WHERE marketplace=? AND asin=? ORDER BY id DESC LIMIT 1",
-            (marketplace, asin),
-        ).fetchone()
-        media_count = conn.execute("SELECT COUNT(*) FROM media_asset WHERE marketplace=? AND asin=?", (marketplace, asin)).fetchone()[0]
-        content_count = conn.execute("SELECT COUNT(*) FROM content_module WHERE marketplace=? AND asin=?", (marketplace, asin)).fetchone()[0]
-        status = state["status"] if state is not None else "unknown"
-        return {
-            "schema_version": API_SCHEMA_VERSION,
-            "marketplace": marketplace,
-            "asin": asin,
-            "retrieved_at": (product["collected_at"] if product is not None else evidence["retrieved_at"] if evidence is not None else None),
-            "quality_status": "valid" if status in {"product_done", "succeeded"} else status,
-            "source": evidence["source_type"] if evidence is not None else None,
-            "product": _dict_row(product),
-            "task": _dict_row(state),
-            "evidence": _dict_row(evidence),
-            "counts": {"media": media_count, "content_modules": content_count},
-        }
-    finally:
-        conn.close()
+    return SQLiteCollectionRepository(db_path).load_product(marketplace, asin)
 
 
 def load_job_status(db_path: Path) -> dict[str, Any]:
-    conn = _read_connection(db_path)
-    try:
-        rows = conn.execute("SELECT status, COUNT(*) AS count FROM item_state GROUP BY status ORDER BY status").fetchall()
-        return {
-            "schema_version": API_SCHEMA_VERSION,
-            "retrieved_at": _now(),
-            "counts": {row["status"]: row["count"] for row in rows},
-        }
-    finally:
-        conn.close()
+    return SQLiteCollectionRepository(db_path).load_job_status()
 
 
 class CollectionHandler(BaseHTTPRequestHandler):

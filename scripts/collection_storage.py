@@ -1,0 +1,81 @@
+"""Storage interfaces used by Collection API.
+
+The first implementation is read-only SQLite. A PostgreSQL implementation can
+be added later without changing API routes or response fields.
+"""
+from __future__ import annotations
+
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Protocol
+
+
+class CollectionRepository(Protocol):
+    def load_product(self, marketplace: str, asin: str) -> dict[str, Any] | None: ...
+
+    def load_job_status(self) -> dict[str, Any]: ...
+
+
+def _dict_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    return dict(row) if row is not None else None
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+class SQLiteCollectionRepository:
+    """Read-only-by-convention repository over the local SQLite snapshot."""
+
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+
+    def _connection(self) -> sqlite3.Connection:
+        if not self.db_path.exists():
+            raise FileNotFoundError(f"SQLite database not found: {self.db_path}")
+        conn = sqlite3.connect(str(self.db_path), timeout=2)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def load_product(self, marketplace: str, asin: str) -> dict[str, Any] | None:
+        conn = self._connection()
+        try:
+            product = conn.execute("SELECT * FROM product_snapshot WHERE marketplace=? AND asin=?", (marketplace, asin)).fetchone()
+            state = conn.execute("SELECT * FROM item_state WHERE marketplace=? AND asin=?", (marketplace, asin)).fetchone()
+            if product is None and state is None:
+                return None
+            evidence = conn.execute(
+                "SELECT run_id, url, http_status, retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code "
+                "FROM collection_evidence WHERE marketplace=? AND asin=? ORDER BY id DESC LIMIT 1",
+                (marketplace, asin),
+            ).fetchone()
+            media_count = conn.execute("SELECT COUNT(*) FROM media_asset WHERE marketplace=? AND asin=?", (marketplace, asin)).fetchone()[0]
+            content_count = conn.execute("SELECT COUNT(*) FROM content_module WHERE marketplace=? AND asin=?", (marketplace, asin)).fetchone()[0]
+            status = state["status"] if state is not None else "unknown"
+            return {
+                "schema_version": "amazon-us-collection-v1",
+                "marketplace": marketplace,
+                "asin": asin,
+                "retrieved_at": (product["collected_at"] if product is not None else evidence["retrieved_at"] if evidence is not None else None),
+                "quality_status": "valid" if status in {"product_done", "succeeded"} else status,
+                "source": evidence["source_type"] if evidence is not None else None,
+                "product": _dict_row(product),
+                "task": _dict_row(state),
+                "evidence": _dict_row(evidence),
+                "counts": {"media": media_count, "content_modules": content_count},
+            }
+        finally:
+            conn.close()
+
+    def load_job_status(self) -> dict[str, Any]:
+        conn = self._connection()
+        try:
+            rows = conn.execute("SELECT status, COUNT(*) AS count FROM item_state GROUP BY status ORDER BY status").fetchall()
+            return {
+                "schema_version": "amazon-us-collection-v1",
+                "retrieved_at": _now(),
+                "counts": {row["status"]: row["count"] for row in rows},
+            }
+        finally:
+            conn.close()
