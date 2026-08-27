@@ -20,6 +20,11 @@ def load(name: str):
 
 
 class ParserFixtureTests(unittest.TestCase):
+    def test_price_normalization_collapses_visual_duplicates(self):
+        worker = load("amazon_us_worker")
+        self.assertEqual(worker._normalize_price("$23.99 $ 23 . 99"), "$23.99")
+        self.assertEqual(worker._normalize_price("HKD235.11 HKD 235 . 11"), "HKD235.11")
+
     def test_description_does_not_absorb_following_modules_when_container_empty(self):
         worker = load("amazon_us_worker")
         html = '<div id="productDescription"><!-- empty --></div><div id="buybox">Buy Box text must not be description</div>'
@@ -34,6 +39,7 @@ class ParserFixtureTests(unittest.TestCase):
         self.assertEqual(result["availability"], "Currently unavailable")
         self.assertEqual(result["title"], "Fixture product title")
         self.assertEqual(result["brand"], "Fixture Brand")
+        self.assertEqual(result["price"], "$19.99")
         self.assertEqual(result["reported_ratings"], "1234")
         self.assertEqual(result["bullets"], ["First bullet", "Second bullet"])
         self.assertTrue(result["aplus_present"])

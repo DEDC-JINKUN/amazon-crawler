@@ -24,7 +24,7 @@
 
 ### product_snapshot.csv
 
-包含 `canonical_url`、`availability`、`title`、`brand`、`rating`、`reported_rating_count`、`reported_review_count`、`review_count`、`review_count_source`、`price`、JSON bullets/specs/BuyBox/Top reviews、可分页 review link、可选 `review_section_anchor`、A+ marker 和状态。`review_section_anchor` 仅记录商品页锚点，绝不作为 `next_review_url`。
+包含 `canonical_url`、`availability`、`title`、`brand`、`rating`、`reported_rating_count`、`reported_review_count`、`review_count`、`review_count_source`、`price`、JSON bullets/specs/BuyBox/Top reviews、可分页 review link、可选 `review_section_anchor`、A+ marker 和状态。`price` 保留页面显示币种并归一化重复视觉节点，不做汇率转换。`review_section_anchor` 仅记录商品页锚点，绝不作为 `next_review_url`。
 
 ### media_asset.csv
 

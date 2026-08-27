@@ -631,6 +631,30 @@ def visible_html_text(source_html: str) -> str:
     return " ".join(_visible_text(parser, index) for index, node in enumerate(parser.nodes) if node["parent"] is None)
 
 
+def _price_text(parser: _DOMParser) -> str:
+    """Prefer Amazon's accessible off-screen price over duplicated visual spans."""
+    roots = _find(parser, id_value="corePrice_feature_div") + _find(parser, id_value="priceblock_ourprice")
+    for root in roots:
+        value = _first_text_under(parser, root, [{"class_name": "a-offscreen"}])
+        if value:
+            return _normalize_price(value)
+    return _normalize_price(_first_text(parser, [{"id_value": "corePrice_feature_div"}, {"id_value": "priceblock_ourprice"}, {"class_name": "a-price"}]))
+
+
+def _normalize_price(value: str) -> str:
+    """Collapse duplicated visual price spans while preserving displayed currency."""
+    text = _clean(value)
+    if not text:
+        return ""
+    currency = re.search(r"(?:\$|USD|HKD|CAD|AUD|GBP|EUR|JPY|CNY)", text, flags=re.IGNORECASE)
+    amount = re.search(r"\d[\d,]*(?:\s*\.\s*\d{1,2})?", text)
+    if not currency or not amount:
+        return text
+    symbol = currency.group(0).upper() if currency.group(0).isalpha() else currency.group(0)
+    number = re.sub(r"\s+", "", amount.group(0))
+    return f"{symbol}{number}"
+
+
 def parse_product_html(source_html: str, page_url: str = "") -> dict[str, Any]:
     parser = _DOMParser()
     parser.feed(source_html)
@@ -678,7 +702,7 @@ def parse_product_html(source_html: str, page_url: str = "") -> dict[str, Any]:
         "title": title, "brand": _first_text(parser, [{"id_value": "bylineInfo"}, {"id_value": "brand"}]),
         "rating": reported_rating_text, "reported_ratings": _count_from_text(review_summary_text), "reported_rating_count": reported_rating_count,
         "reported_review_count": reported_review_count, "review_count": review_summary_text,
-        "review_count_source": review_count_source, "price": _first_text(parser, [{"id_value": "corePrice_feature_div"}, {"id_value": "priceblock_ourprice"}, {"class_name": "a-price"}]),
+        "review_count_source": review_count_source, "price": _price_text(parser),
         "bullets": _parse_bullets(parser), "product_description": description, "specs": specs,
         "buy_box": {"text": _first_text(parser, [{"id_value": "desktop_buybox"}, {"id_value": "buybox"}])},
         "top_reviews": [_node_text(parser, index) for index in _find(parser, attr=("data-hook", "review"))],
