@@ -26,6 +26,9 @@ def discover(input_paths: list[Path], *, source_type: str, source_query: str, so
     records: dict[str, dict[str, str]] = {}
     for path in input_paths:
         html = path.read_text(encoding="utf-8", errors="replace")
+        for raw_asin in re.findall(r"data-asin=[\"']([A-Za-z0-9]{10})[\"']", html, flags=re.IGNORECASE):
+            asin = raw_asin.upper()
+            records.setdefault(asin, {"asin": asin, "marketplace": "US", "source_type": source_type, "source_query": source_query, "source_url": source_url, "discovered_at": _now(), "status": "candidate"})
         for raw in re.findall(r"(?:href|data-url)=[\"']([^\"']+)[\"']", html, flags=re.IGNORECASE):
             absolute = urljoin(source_url or "https://www.amazon.com/", raw)
             parts = urlsplit(absolute)
