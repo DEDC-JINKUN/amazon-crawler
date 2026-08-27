@@ -159,6 +159,17 @@ class CollectionApiTests(unittest.TestCase):
                 count = conn.execute("SELECT COUNT(*) FROM refresh_request").fetchone()[0]
                 conn.close()
                 self.assertEqual(count, 1)
+
+                class Adapter:
+                    def fetch(self, url):
+                        return (FIXTURES / "product_unavailable_video_aplus.html").read_text(encoding="utf-8"), 200
+
+                conn = worker.init_db(db)
+                config = dict(worker.DEFAULTS)
+                config.update({"max_actions_per_run": 1, "output_dir": root / "out", "raw_html_dir": root / "raw"})
+                worker.run_actions(conn, Adapter(), config, limit=1)
+                self.assertEqual(conn.execute("SELECT status FROM refresh_request").fetchone()[0], "completed")
+                conn.close()
             finally:
                 server.shutdown()
                 server.server_close()

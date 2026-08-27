@@ -8,7 +8,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-TABLES = ("item_state", "state_history", "collection_evidence", "product_snapshot", "media_asset", "content_module", "review_summary", "review_record")
+TABLES = ("item_state", "state_history", "collection_evidence", "product_snapshot", "media_asset", "content_module", "review_summary", "review_record", "refresh_request")
 
 
 def _json_value(value: Any, fallback: Any) -> Any:
@@ -26,7 +26,8 @@ def read_sqlite(sqlite_path: Path) -> dict[str, list[dict[str, Any]]]:
     conn = sqlite3.connect(str(sqlite_path), timeout=2)
     conn.row_factory = sqlite3.Row
     try:
-        return {table: [dict(row) for row in conn.execute(f"SELECT * FROM {table}")] for table in TABLES}
+        available = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        return {table: [dict(row) for row in conn.execute(f"SELECT * FROM {table}")] if table in available else [] for table in TABLES}
     finally:
         conn.close()
 
@@ -62,6 +63,12 @@ def build_payload(sqlite_path: Path, tenant_id: str = "default", subject_type: s
             if table == "review_record":
                 item["review_images"] = _json_value(item.pop("review_images_json", None), [])
             payload[table].append(item)
+    for row in source["refresh_request"]:
+        payload["refresh_request"].append({
+            "job_id": row["job_id"], "tenant_id": tenant_id, "marketplace": row["marketplace"],
+            "asin": row["asin"], "subject_type": subject_type, "requested_by": row["requested_by"],
+            "reason": row["reason"], "status": row["status"], "requested_at": row["requested_at"],
+        })
     return payload
 
 

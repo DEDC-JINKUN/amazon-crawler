@@ -36,11 +36,11 @@ ALLOWED_TRANSITIONS: dict[str | None, set[str]] = {
     None: {"pending"},
     "pending": {"pending", "running", "failed"},
     "running": {"pending", "running", "product_done", "reviews_pending", "succeeded", "blocked", "failed"},
-    "product_done": {"product_done", "reviews_pending", "succeeded", "failed"},
-    "reviews_pending": {"reviews_pending", "running", "succeeded", "blocked", "failed"},
-    "succeeded": {"succeeded", "running"},
-    "blocked": {"blocked"},
-    "failed": {"failed", "running"},
+    "product_done": {"product_done", "reviews_pending", "succeeded", "failed", "pending"},
+    "reviews_pending": {"reviews_pending", "running", "succeeded", "blocked", "failed", "pending"},
+    "succeeded": {"succeeded", "running", "pending"},
+    "blocked": {"blocked", "pending"},
+    "failed": {"failed", "running", "pending"},
 }
 STOP_STATUSES = {403, 429}
 STOP_PHRASES = (
@@ -1179,8 +1179,33 @@ def _claim_action(conn: sqlite3.Connection, row: sqlite3.Row) -> None:
         raise ValueError(f"不可领取状态: {row['status']}")
 
 
-def _select_actions(conn: sqlite3.Connection, max_actions: int) -> list[sqlite3.Row]:
-    return list(conn.execute("SELECT * FROM item_state WHERE status IN ('pending','reviews_pending') OR (status='failed' AND attempts < max_attempts) ORDER BY asin LIMIT ?", (max_actions,)))
+def _claim_refresh_request(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    request = conn.execute("SELECT * FROM refresh_request WHERE status='queued' ORDER BY requested_at,job_id LIMIT 1").fetchone()
+    if request is None:
+        return None
+    state = conn.execute("SELECT * FROM item_state WHERE marketplace=? AND asin=?", (request["marketplace"], request["asin"])).fetchone()
+    if state is None or state["status"] == "running":
+        return None
+    _set_status(
+        conn, request["marketplace"], request["asin"], "pending", reason="refresh_request_claimed",
+        attempts=0, task_stage="product", resume_status=None, next_review_url=None, next_review_page=None,
+        block_reason=None, last_error=None,
+    )
+    with conn:
+        conn.execute("UPDATE refresh_request SET status='claimed' WHERE job_id=?", (request["job_id"],))
+    return request
+
+
+def _finish_refresh_request(conn: sqlite3.Connection, job_id: str, status: str) -> None:
+    if status not in {"queued", "completed", "failed"}:
+        raise ValueError(f"unknown refresh request status: {status}")
+    with conn:
+        conn.execute("UPDATE refresh_request SET status=? WHERE job_id=?", (status, job_id))
+
+
+def _select_actions(conn: sqlite3.Connection, max_actions: int, exclude_asins: set[str] | None = None) -> list[sqlite3.Row]:
+    rows = list(conn.execute("SELECT * FROM item_state WHERE status IN ('pending','reviews_pending') OR (status='failed' AND attempts < max_attempts) ORDER BY asin LIMIT ?", (max_actions + len(exclude_asins or set()),)))
+    return [row for row in rows if row["asin"] not in (exclude_asins or set())][:max_actions]
 
 
 def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], *, limit: int | None = None, run_id: str | None = None) -> int:
@@ -1190,7 +1215,14 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
     raw_html_dir = Path(raw_html_dir_value) if raw_html_dir_value else None
     actions = 0
     blocked = False
-    for initial in _select_actions(conn, max_actions):
+    refresh_request = _claim_refresh_request(conn)
+    refresh_job_id = refresh_request["job_id"] if refresh_request is not None else None
+    refresh_asin = refresh_request["asin"] if refresh_request is not None else None
+    selected = []
+    if refresh_request is not None:
+        selected.append(conn.execute("SELECT * FROM item_state WHERE marketplace=? AND asin=?", (refresh_request["marketplace"], refresh_request["asin"])).fetchone())
+    selected.extend(_select_actions(conn, max(0, max_actions - len(selected)), {refresh_asin} if refresh_asin else set()))
+    for initial in selected:
         row = conn.execute("SELECT * FROM item_state WHERE marketplace='US' AND asin=?", (initial["asin"],)).fetchone()
         if row["status"] == "failed" and row["attempts"] >= row["max_attempts"]:
             continue
@@ -1202,6 +1234,8 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                 body, response_status = adapter.fetch(url)
             except AdapterFetchError as exc:
                 _record_failure(conn, "US", row["asin"], "review_fetch_error", str(exc))
+                if refresh_job_id and row["asin"] == refresh_asin:
+                    _finish_refresh_request(conn, refresh_job_id, "failed")
                 actions += 1
                 continue
             reason = classify_block(response_status, body)
@@ -1225,6 +1259,8 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                             reason = browser_reason
             source_type = getattr(adapter, "source_type", "selenium_dom")
             _write_review_action(conn, run_id, row, page, url, records, next_url, body, response_status, reason, int(config["review_page_limit"]), source_type, raw_html_dir)
+            if refresh_job_id and row["asin"] == refresh_asin:
+                _finish_refresh_request(conn, refresh_job_id, "queued" if reason == "http_429" else "failed" if reason else "completed")
             blocked = blocked or bool(reason)
             actions += 1
             if blocked and (bool(config["stop_on_block"]) or response_status == 429 or reason == "too_many_requests"):
@@ -1234,6 +1270,8 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
             body, response_status = adapter.fetch(row["url"])
         except AdapterFetchError as exc:
             _record_failure(conn, "US", row["asin"], "fetch_error", str(exc))
+            if refresh_job_id and row["asin"] == refresh_asin:
+                _finish_refresh_request(conn, refresh_job_id, "failed")
             actions += 1
             continue
         reason = classify_block(response_status, body)
@@ -1249,6 +1287,8 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                     body, response_status, data, reason = browser_body, browser_status, parse_product_html(browser_body, row["url"]), browser_reason
         source_type = getattr(adapter, "source_type", "selenium_dom")
         _write_product_action(conn, run_id, row, data, body, response_status, reason, source_type=source_type, raw_html_dir=raw_html_dir)
+        if refresh_job_id and row["asin"] == refresh_asin:
+            _finish_refresh_request(conn, refresh_job_id, "queued" if reason == "http_429" else "failed" if reason else "completed")
         blocked = blocked or bool(reason)
         actions += 1
         if blocked and (bool(config["stop_on_block"]) or response_status == 429 or reason == "too_many_requests"):
