@@ -63,6 +63,12 @@ python scripts/collection_api.py --db state/amazon_us.sqlite3
 python scripts/coverage_report.py --db state/amazon_us.sqlite3 --output data/amazon_us/coverage_report.json
 ```
 
+按字段新鲜度自动入队：
+
+```powershell
+python scripts/schedule_refresh.py --db state/amazon_us.sqlite3 --fields price,availability
+```
+
 SQLite 回放到 PostgreSQL（拿到公司 DSN 后执行）：
 
 ```powershell
