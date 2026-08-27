@@ -1,6 +1,7 @@
 from pathlib import Path
 import importlib.util
 import tempfile
+import hashlib
 
 
 ROOT = Path(__file__).parents[1]
@@ -16,3 +17,5 @@ def test_local_store_writes_deterministic_relative_key_atomically():
         assert result.startswith("US/B00RCPDCQU/run_1-")
         assert result.endswith(".html")
         assert (Path(directory) / result).read_text(encoding="utf-8") == "<html>one</html>"
+        digest = hashlib.sha256((Path(directory) / result).read_bytes()).hexdigest()
+        assert result.rsplit("-", 1)[1][:-5] == digest[:16]

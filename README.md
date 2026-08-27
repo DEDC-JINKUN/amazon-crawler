@@ -2,7 +2,7 @@
 
 面向 Amazon.com 自有 ASIN 和竞品 ASIN 的统一网页采集 MVP。
 
-当前版本：`0.1.55`（修复旧数据 PostgreSQL 迁移兼容性）。
+当前版本：`0.1.56`（保证新 HTML 源文件哈希与 evidence 一致）。
 
 ## 当前开发边界
 

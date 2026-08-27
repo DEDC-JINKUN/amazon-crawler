@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.56 - 2026-08-27
+
+- 原始 HTML 本地存储改用 UTF-8 字节原子写入，确保 evidence SHA-256 与文件内容一致。
+- 健康检查继续报告旧历史文件的真实哈希不一致，不自动覆盖或修正原始证据。
+
 ## 0.1.55 - 2026-08-27
 
 - 修复 SQLite→PostgreSQL 旧 evidence `context_json=NULL` 和子表可空整数空串迁移错误。

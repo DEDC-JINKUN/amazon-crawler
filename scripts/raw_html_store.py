@@ -28,6 +28,6 @@ class LocalRawHtmlStore:
         path = self.root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(f".{path.name}.tmp")
-        temporary.write_text(body, encoding="utf-8")
+        temporary.write_bytes(body.encode("utf-8"))
         temporary.replace(path)
         return relative.as_posix()
