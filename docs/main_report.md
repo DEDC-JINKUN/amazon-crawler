@@ -204,7 +204,7 @@ asin_master
     ↓
 IP 代理池选择（授权出口 / 全局令牌桶 / 熔断状态）
     ↓
-HTTP Worker（httpx/requests.Session）
+HTTP Worker（Python urllib opener，独立请求）
     ↓ 动态字段缺失或页面异常
 Browser Worker（Selenium + Firefox）
     ↓
@@ -636,7 +636,7 @@ flowchart TD
 
 | 问题 | 发生可能性 | 方法 | 处理方案 | 不做的事 |
 |---|---|---|---|---|
-| Cookie、会话过期、CSRF/会话 Token | 中/高 | Cookie Jar；Session Isolation | HTTP 使用独立 Cookie Jar；Firefox 使用隔离的临时浏览器上下文；Cookie 过期则重新打开正常页面获取 | 不复制个人 Cookie，不跨出口共享会话，不伪造 Token |
+| Cookie、会话过期、CSRF/会话 Token | 中/高 | Session Isolation | HTTP 使用不持久化的独立 opener；Firefox 使用隔离的临时浏览器上下文；会话过期则重新打开正常页面获取 | 不复制个人 Cookie，不跨出口共享会话，不伪造 Token |
 | Cookie/请求头过大（431） | 中 | Header Minimization | 只发送必要请求头和当前会话 Cookie；识别 431 后清理过期 Cookie、缩小头部并延期任务 | 不把整套浏览器 Cookie 原样塞进 HTTP 请求 |
 | 页面由 JavaScript 动态渲染 | 高 | HTTP First + Firefox Fallback | 先取 HTML/内嵌 JSON；缺字段时交给 Firefox 执行页面原有脚本，再读取渲染后的 DOM | 不为每个 ASIN 默认启动浏览器，不注入反检测脚本 |
 | 请求参数包含时间戳、Nonce、签名或混淆 | 中 | DOM/HTML Extraction；Parser Versioning | 优先读取最终渲染结果；公开字段在页面 HTML/DOM 中存在时不复刻内部请求；解析失败则冻结写入、记录版本并更新解析器 | 不逆向私有接口签名，不批量破解或伪造签名参数 |

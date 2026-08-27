@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.37 - 2026-08-27
+
+- 修正主报告与实际实现的表述：HTTP worker 使用 Python urllib opener，HTTP 会话不持久化 Cookie Jar。
+
 ## 0.1.36 - 2026-08-27
 
 - 评论备用 `product-reviews` 入口为空时也保存独立 evidence，支持审计两个入口均已尝试。
