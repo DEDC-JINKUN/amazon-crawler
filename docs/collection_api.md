@@ -76,7 +76,7 @@ GET /v1/jobs/status
 
 本机测试验证使用 10 条美国 VPN 测试结果：健康检查通过，任务状态和单 ASIN 查询可读，批量查询 2 条返回正常。测试服务仅绑定 `127.0.0.1`，不作为生产服务暴露。
 
-旧 SQLite 库若尚未执行 `context_json` schema 变更，API 会兼容读取并返回 `context_json: null`；新采集证据会写入实际上下文。升级不要求 API 先写库。
+旧 SQLite 库若尚未执行 `context_json` 或 `transfer_bytes` schema 变更，API 会兼容读取并分别返回 `context_json: null` 或不提供传输字节；新采集证据会写入实际上下文和 HTTP 响应体 `transfer_bytes`。升级不要求 API 先写库。
 
 本机 PostgreSQL 已执行幂等 schema 升级，`collection_evidence.context_json` 为 `jsonb`；公司数据库需在正式迁移窗口执行同一 schema，不能直接假设已完成。
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.77 - 2026-08-27
+
+- Collection API 单 ASIN 和 evidence 查询现在返回新证据的 `transfer_bytes`，与传输流量指标口径一致。
+- 补充旧 SQLite 无 `transfer_bytes` 字段时的 API 兼容说明和回归。
+
 ## 0.1.76 - 2026-08-27
 
 - 在一周 MVP 计划文档中增加“计划不等于已上线”状态标注，并对齐当前实现、实测基线和外部前置。
