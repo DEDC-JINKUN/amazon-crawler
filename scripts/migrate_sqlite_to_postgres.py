@@ -41,7 +41,7 @@ def build_payload(sqlite_path: Path, tenant_id: str = "default", subject_type: s
     for row in states:
         common = {"tenant_id": tenant_id, "marketplace": row["marketplace"], "asin": row["asin"], "subject_type": subject_type}
         payload["asin_master"].append({**common, "source_type": "sqlite_migration", "source_url": row["url"], "priority": 50, "refresh_policy": "standard", "active_status": "active"})
-        payload["item_state"].append({**common, **{key: row.get(key) for key in ("url", "status", "attempts", "max_attempts", "resume_status", "task_stage", "next_review_url", "next_review_page", "review_page_limit", "reported_rating_count", "reported_review_count", "reported_count_source", "fetched_review_count", "review_pages_fetched", "block_reason", "last_error", "updated_at")}})
+        payload["item_state"].append({**common, **{key: row.get(key) for key in ("url", "status", "attempts", "max_attempts", "resume_status", "task_stage", "next_review_url", "next_review_page", "next_retry_at", "review_page_limit", "reported_rating_count", "reported_review_count", "reported_count_source", "fetched_review_count", "review_pages_fetched", "block_reason", "last_error", "updated_at")}})
     for row in source["state_history"]:
         payload["state_history"].append({"tenant_id": tenant_id, "marketplace": row["marketplace"], "asin": row["asin"], "subject_type": subject_type, "from_status": row["from_status"], "to_status": row["to_status"], "reason": row["reason"], "changed_at": row["changed_at"]})
     for row in source["collection_evidence"]:

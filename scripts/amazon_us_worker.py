@@ -22,7 +22,7 @@ import time
 import tomllib
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Iterable
@@ -66,6 +66,7 @@ DEFAULTS: dict[str, Any] = {
     "request_timeout_seconds": 30,
     "http_max_attempts": 2,
     "http_retry_backoff_seconds": 0.5,
+    "rate_limit_cooldown_seconds": 3600,
     "headless": True,
     "max_actions_per_run": 10,
     "max_attempts": 3,
@@ -813,6 +814,7 @@ def init_db(path: Path = DEFAULT_DB, max_attempts: int = 3) -> sqlite3.Connectio
           attempts INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL DEFAULT 3,
           resume_status TEXT, task_stage TEXT NOT NULL DEFAULT 'product', next_review_url TEXT,
           next_review_page INTEGER, review_page_limit INTEGER NOT NULL DEFAULT 0,
+          next_retry_at TEXT,
           reported_rating_count INTEGER, reported_review_count INTEGER,
           reported_count_source TEXT, fetched_review_count INTEGER NOT NULL DEFAULT 0,
           review_pages_fetched INTEGER NOT NULL DEFAULT 0, block_reason TEXT, last_error TEXT,
@@ -882,6 +884,9 @@ def init_db(path: Path = DEFAULT_DB, max_attempts: int = 3) -> sqlite3.Connectio
         conn.execute("ALTER TABLE collection_evidence ADD COLUMN raw_html_path TEXT")
     if "context_json" not in evidence_columns:
         conn.execute("ALTER TABLE collection_evidence ADD COLUMN context_json TEXT")
+    state_columns = {row[1] for row in conn.execute("PRAGMA table_info(item_state)")}
+    if "next_retry_at" not in state_columns:
+        conn.execute("ALTER TABLE item_state ADD COLUMN next_retry_at TEXT")
     recover_running(conn)
     conn.commit()
     return conn
@@ -922,7 +927,7 @@ def _set_status(conn: sqlite3.Connection, marketplace: str, asin: str, status: s
     current = row["status"]
     if status not in ALLOWED_TRANSITIONS.get(current, set()):
         raise ValueError(f"非法状态转移: {current}->{status}")
-    allowed = {"attempts", "max_attempts", "resume_status", "task_stage", "next_review_url", "next_review_page", "review_page_limit", "reported_rating_count", "reported_review_count", "reported_count_source", "fetched_review_count", "review_pages_fetched", "block_reason", "last_error"}
+    allowed = {"attempts", "max_attempts", "resume_status", "task_stage", "next_review_url", "next_review_page", "next_retry_at", "review_page_limit", "reported_rating_count", "reported_review_count", "reported_count_source", "fetched_review_count", "review_pages_fetched", "block_reason", "last_error"}
     unknown = set(fields) - allowed
     if unknown:
         raise ValueError(f"不允许更新状态字段: {sorted(unknown)}")
@@ -944,8 +949,10 @@ def _record_failure(conn: sqlite3.Connection, marketplace: str, asin: str, reaso
     _set_status(conn, marketplace, asin, "failed", reason=reason, attempts=int(row["attempts"]) + 1, last_error=error)
 
 
-def _set_rate_limited(conn: sqlite3.Connection, marketplace: str, asin: str, stage: str) -> None:
+def _set_rate_limited(conn: sqlite3.Connection, marketplace: str, asin: str, stage: str, cooldown_seconds: int | float | None = None) -> None:
     target = "reviews_pending" if stage == "reviews" else "pending"
+    cooldown = max(0, int(DEFAULTS.get("rate_limit_cooldown_seconds", 3600) if cooldown_seconds is None else cooldown_seconds))
+    retry_at = (datetime.now(timezone.utc) + timedelta(seconds=cooldown)).replace(microsecond=0).isoformat()
     _set_status(
         conn,
         marketplace,
@@ -956,6 +963,7 @@ def _set_rate_limited(conn: sqlite3.Connection, marketplace: str, asin: str, sta
         last_error="http_429",
         resume_status=target,
         task_stage=stage,
+        next_retry_at=retry_at,
     )
 
 
@@ -1005,13 +1013,13 @@ def _insert_evidence(conn: sqlite3.Connection, run_id: str, asin: str, url: str,
     return raw_html_path
 
 
-def _write_product_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.Row, data: dict[str, Any], body: str, status: int | None, block_reason: str | None, error_code: str | None = None, source_type: str = "selenium_dom", raw_html_dir: Path | None = None, context: dict[str, Any] | None = None) -> None:
+def _write_product_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.Row, data: dict[str, Any], body: str, status: int | None, block_reason: str | None, error_code: str | None = None, source_type: str = "selenium_dom", raw_html_dir: Path | None = None, context: dict[str, Any] | None = None, cooldown_seconds: int | float | None = None) -> None:
     asin = task["asin"]
     with conn:
         raw_html_path = _insert_evidence(conn, run_id, asin, task["url"], status, body, block_reason, error_code, source_type, raw_html_dir, context=context)
         if block_reason:
             if status == 429 or block_reason == "too_many_requests":
-                _set_rate_limited(conn, "US", asin, "product")
+                _set_rate_limited(conn, "US", asin, "product", cooldown_seconds)
             else:
                 _set_status(conn, "US", asin, "blocked", reason=block_reason, block_reason=block_reason, last_error=block_reason)
             return
@@ -1075,7 +1083,7 @@ def _write_product_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.R
             _set_status(conn, "US", asin, "succeeded", reason="no_paginated_review_link", resume_status=None)
 
 
-def _write_review_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.Row, page: int, url: str, records: list[dict[str, Any]], next_url: str | None, body: str, status: int | None, block_reason: str | None, page_limit: int, source_type: str = "selenium_dom", raw_html_dir: Path | None = None, context: dict[str, Any] | None = None) -> None:
+def _write_review_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.Row, page: int, url: str, records: list[dict[str, Any]], next_url: str | None, body: str, status: int | None, block_reason: str | None, page_limit: int, source_type: str = "selenium_dom", raw_html_dir: Path | None = None, context: dict[str, Any] | None = None, cooldown_seconds: int | float | None = None) -> None:
     asin = task["asin"]
     with conn:
         raw_html_path = _insert_evidence(conn, run_id, asin, url, status, body, block_reason, source_type=source_type, raw_html_dir=raw_html_dir, context=context)
@@ -1083,7 +1091,7 @@ def _write_review_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.Ro
             if status == 429 or block_reason == "too_many_requests":
                 conn.execute("INSERT OR REPLACE INTO review_page_state VALUES(?,?,?,?,?,?,?)", ("US", asin, page, url, "deferred", url, utc_now()))
                 conn.execute("INSERT OR REPLACE INTO review_summary VALUES(?,?,?,?,?,?,?,?,?,?)", ("US", asin, task["reported_rating_count"], task["reported_review_count"], task["reported_count_source"], task["fetched_review_count"], task["review_pages_fetched"], url, "rate_limited", utc_now()))
-                _set_rate_limited(conn, "US", asin, "reviews")
+                _set_rate_limited(conn, "US", asin, "reviews", cooldown_seconds)
             else:
                 conn.execute("INSERT OR REPLACE INTO review_page_state VALUES(?,?,?,?,?,?,?)", ("US", asin, page, url, "blocked", None, utc_now()))
                 _set_status(conn, "US", asin, "blocked", reason=block_reason, block_reason=block_reason, last_error=block_reason)
@@ -1378,7 +1386,7 @@ def materialize_csvs(conn: sqlite3.Connection, output_dir: Path = DEFAULT_OUTPUT
         "content_module": "SELECT * FROM content_module ORDER BY marketplace,asin,position,unique_key",
         "review_summary": "SELECT * FROM review_summary ORDER BY marketplace,asin",
         "review_record": "SELECT * FROM review_record ORDER BY marketplace,asin,page,review_id",
-        "collection_evidence": "SELECT run_id,asin,marketplace,url,http_status,retrieved_at,source_type,content_hash,raw_html_path,block_reason,parser_version,error_code FROM collection_evidence ORDER BY id",
+        "collection_evidence": "SELECT run_id,asin,marketplace,url,http_status,retrieved_at,source_type,content_hash,raw_html_path,block_reason,parser_version,error_code,context_json FROM collection_evidence ORDER BY id",
     }
     for table, query in queries.items():
         filename, headers = OUTPUTS[table]
@@ -1404,7 +1412,7 @@ def _claim_refresh_request(conn: sqlite3.Connection) -> sqlite3.Row | None:
         return None
     _set_status(
         conn, request["marketplace"], request["asin"], "pending", reason="refresh_request_claimed",
-        attempts=0, task_stage="product", resume_status=None, next_review_url=None, next_review_page=None,
+        attempts=0, task_stage="product", resume_status=None, next_review_url=None, next_review_page=None, next_retry_at=None,
         block_reason=None, last_error=None,
     )
     with conn:
@@ -1420,7 +1428,8 @@ def _finish_refresh_request(conn: sqlite3.Connection, job_id: str, status: str) 
 
 
 def _select_actions(conn: sqlite3.Connection, max_actions: int, exclude_asins: set[str] | None = None) -> list[sqlite3.Row]:
-    rows = list(conn.execute("SELECT * FROM item_state WHERE status IN ('pending','reviews_pending') OR (status='failed' AND attempts < max_attempts) ORDER BY asin LIMIT ?", (max_actions + len(exclude_asins or set()),)))
+    now = utc_now()
+    rows = list(conn.execute("SELECT * FROM item_state WHERE ((status IN ('pending','reviews_pending') AND (next_retry_at IS NULL OR next_retry_at <= ?)) OR (status='failed' AND attempts < max_attempts AND (next_retry_at IS NULL OR next_retry_at <= ?))) ORDER BY asin LIMIT ?", (now, now, max_actions + len(exclude_asins or set()))))
     return [row for row in rows if row["asin"] not in (exclude_asins or set())][:max_actions]
 
 
@@ -1489,7 +1498,7 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                             body, response_status, records, next_url = browser_body, browser_status, browser_records, browser_next_url
                             reason = browser_reason
             source_type = getattr(adapter, "source_type", "selenium_dom")
-            _write_review_action(conn, run_id, row, page, url, records, next_url, body, response_status, reason, int(config["review_page_limit"]), source_type, raw_html_dir, config.get("context"))
+            _write_review_action(conn, run_id, row, page, url, records, next_url, body, response_status, reason, int(config["review_page_limit"]), source_type, raw_html_dir, config.get("context"), config.get("rate_limit_cooldown_seconds"))
             if refresh_job_id and row["asin"] == refresh_asin:
                 _finish_refresh_request(conn, refresh_job_id, "queued" if reason == "http_429" else "failed" if reason else "completed")
             blocked = blocked or bool(reason)
@@ -1546,7 +1555,7 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
         else:
             error_code = None
         source_type = getattr(adapter, "source_type", "selenium_dom")
-        _write_product_action(conn, run_id, row, data, body, response_status, reason, error_code=error_code, source_type=source_type, raw_html_dir=raw_html_dir, context=config.get("context"))
+        _write_product_action(conn, run_id, row, data, body, response_status, reason, error_code=error_code, source_type=source_type, raw_html_dir=raw_html_dir, context=config.get("context"), cooldown_seconds=config.get("rate_limit_cooldown_seconds"))
         if refresh_job_id and row["asin"] == refresh_asin:
             _finish_refresh_request(conn, refresh_job_id, "queued" if reason == "http_429" else "failed" if reason else "completed")
         blocked = blocked or bool(reason)

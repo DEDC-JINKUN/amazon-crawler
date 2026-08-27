@@ -14,7 +14,7 @@
 
 `item_state.status` 只允许：`pending`、`running`、`product_done`、`reviews_pending`、`succeeded`、`blocked`、`failed`。状态转换由 worker 的合法转移表校验，验证器同时核对 `state_history` 和当前状态。
 
-`resume_status`、`task_stage`、`next_review_page`、`next_review_url` 是恢复字段。启动会把残留 `running` 恢复到 `reviews_pending` 或 `pending`。
+`resume_status`、`task_stage`、`next_review_page`、`next_review_url`、`next_retry_at` 是恢复字段。启动会把残留 `running` 恢复到 `reviews_pending` 或 `pending`；`next_retry_at` 未到期时任务不会被再次领取。
 
 - `blocked`：403 或明确访问阻断页的终态；不自动重试。
 - `failed`：非阻断错误；`attempts` 是当前 stage 连续失败次数，成功 product/review action 重置为 0，仅在 `< max_attempts` 时重试；达到上限的 failed 会在验收中列为 `exhausted_failed`。

@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS item_state (
     task_stage text NOT NULL DEFAULT 'product',
     next_review_url text,
     next_review_page integer,
+    next_retry_at timestamptz,
     review_page_limit integer NOT NULL DEFAULT 0,
     reported_rating_count integer,
     reported_review_count integer,
@@ -78,6 +79,8 @@ CREATE TABLE IF NOT EXISTS refresh_request (
 );
 
 CREATE INDEX IF NOT EXISTS idx_refresh_request_queue ON refresh_request (tenant_id, marketplace, status, requested_at);
+
+ALTER TABLE item_state ADD COLUMN IF NOT EXISTS next_retry_at timestamptz;
 
 CREATE TABLE IF NOT EXISTS collection_evidence (
     id bigserial PRIMARY KEY,

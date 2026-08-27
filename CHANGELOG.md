@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.65 - 2026-08-27
+
+- 429 限流任务增加 `next_retry_at` 冷却时间，默认 1 小时内不重复领取。
+- 同步 SQLite/PostgreSQL schema、迁移和回归测试，避免限流后紧密重试。
+
 ## 0.1.64 - 2026-08-27
 
 - 增加 worker→raw HTML→evidence→health audit 端到端哈希回归，确认新文件可完整校验。

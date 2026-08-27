@@ -306,6 +306,7 @@ class BatchCheckpointTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             worker, conn, config = self._setup(Path(directory))
+            config["rate_limit_cooldown_seconds"] = 0
             self.assertEqual(worker.run_actions(conn, Product429(), config), -1)
             row = conn.execute("SELECT status,attempts,block_reason FROM item_state").fetchone()
             self.assertEqual(tuple(row), ("pending", 0, "http_429"))
@@ -334,6 +335,19 @@ class BatchCheckpointTests(unittest.TestCase):
             retry = ReviewGood()
             worker.run_actions(conn, retry, config)
             self.assertEqual(retry.url, cursor)
+            conn.close()
+
+    def test_429_cooldown_prevents_immediate_reclaim(self):
+        class Adapter:
+            def fetch(self, url):
+                return "Too many requests", 429
+
+        with tempfile.TemporaryDirectory() as directory:
+            worker, conn, config = self._setup(Path(directory))
+            self.assertEqual(worker.run_actions(conn, Adapter(), config), -1)
+            self.assertEqual(worker._select_actions(conn, 1), [])
+            retry_at = conn.execute("SELECT next_retry_at FROM item_state").fetchone()[0]
+            self.assertTrue(retry_at)
             conn.close()
 
     def test_captcha_stops_batch_and_leaves_unclaimed_tasks_pending(self):
