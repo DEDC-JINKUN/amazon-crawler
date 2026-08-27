@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib.util
-import io
 from pathlib import Path
 
 import pytest
@@ -66,6 +65,19 @@ def test_probe_marks_429_as_blocked():
     assert result["ok"] is False
     assert result["status"] == 429
     assert result["block_reason"] == "http_429"
+
+
+def test_probe_rejects_200_challenge_and_empty_response():
+    module = load_module()
+    challenge = Opener(Response(status=200, body=b"<title>Robot Check</title>"))
+    result = module.probe("http://127.0.0.1:8080", "https://example.test", opener_factory=lambda *handlers: challenge)
+    assert result["ok"] is False
+    assert result["block_reason"] == "robot"
+
+    empty = Opener(Response(status=200, body=b""))
+    result = module.probe("http://127.0.0.1:8080", "https://example.test", opener_factory=lambda *handlers: empty)
+    assert result["ok"] is False
+    assert result["block_reason"] == "empty_response"
 
 
 def test_probe_rejects_embedded_credentials_and_partial_auth():

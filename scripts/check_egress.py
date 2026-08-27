@@ -20,6 +20,22 @@ def _validate_proxy_url(value: str) -> str:
     return value.strip()
 
 
+def _classify_body(status: int, body: bytes) -> str | None:
+    if not body:
+        return "empty_response"
+    text = body[:1_000_000].decode("utf-8", errors="ignore").lower()
+    for phrase, reason in (
+        ("robot check", "robot"),
+        ("captcha", "captcha"),
+        ("automated access", "automated_access"),
+        ("access denied", "access_denied"),
+        ("too many requests", "too_many_requests"),
+    ):
+        if phrase in text:
+            return reason
+    return f"http_{status}" if status in {403, 429} else None
+
+
 def probe(
     proxy_url: str,
     target_url: str,
@@ -70,10 +86,10 @@ def probe(
             "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
             "response_bytes": 0,
         }
-    block_reason = f"http_{status}" if status in {403, 429} else None
+    block_reason = _classify_body(status, body)
     return {
         "schema_version": "amazon-us-egress-probe-v1",
-        "ok": 200 <= status < 300 and not block_reason and bool(body),
+        "ok": 200 <= status < 300 and block_reason is None,
         "status": status,
         "block_reason": block_reason,
         "elapsed_ms": round((time.monotonic() - started) * 1000, 1),

@@ -15,7 +15,8 @@
 探针返回 JSON：
 
 - `ok=true`：2xx 且有非空响应体，可以进入小批量采集；
-- `http_403` / `http_429`：暂停该出口，不把它交给批量任务；
+- `http_403` / `http_429` / `robot` / `captcha` / `automated_access` / `access_denied`：暂停该出口，不把它交给批量任务；
+- `empty_response`：不把空响应当成健康线路；
 - `network_error`：线路或认证不可用，先修复出口；
 - `configuration_error`：代理 URL 或认证变量配置不合法。
 
