@@ -153,6 +153,15 @@ class MigrationTests(unittest.TestCase):
         adapted = migration._adapt_postgres_value({"price": 12.3, "tags": ["a"]})
         self.assertIn("price", str(adapted))
 
+    def test_missing_context_json_migrates_as_empty_object(self):
+        migration = load("migrate_sqlite_to_postgres")
+        adapted = migration._adapt_postgres_value(None, "context_json")
+        self.assertIn("{}", str(adapted))
+
+    def test_empty_nullable_integer_migrates_as_null(self):
+        migration = load("migrate_sqlite_to_postgres")
+        self.assertIsNone(migration._adapt_postgres_value("", "ordinal"))
+
     def test_sqlite_boolean_values_are_adapted(self):
         migration = load("migrate_sqlite_to_postgres")
         self.assertIs(migration._adapt_postgres_value(1, "is_primary"), True)

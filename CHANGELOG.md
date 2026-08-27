@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.55 - 2026-08-27
+
+- 修复 SQLite→PostgreSQL 旧 evidence `context_json=NULL` 和子表可空整数空串迁移错误。
+- 独立本机 PostgreSQL 租户实际迁移 1,892 条任务成功，旧记录上下文以 `{}` 表示未知。
+
 ## 0.1.54 - 2026-08-27
 
 - 在本机 PostgreSQL 17 执行幂等 schema 升级并确认 `collection_evidence.context_json` 为 jsonb。

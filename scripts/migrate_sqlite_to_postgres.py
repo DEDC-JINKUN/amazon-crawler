@@ -90,9 +90,14 @@ def _connect_postgres(dsn: str):
 
 
 BOOLEAN_COLUMNS = {"is_primary", "verified", "body_truncated", "aplus_present"}
+INTEGER_COLUMNS = {"priority", "next_review_page", "review_page_limit", "reported_rating_count", "reported_review_count", "fetched_review_count", "review_pages_fetched", "position", "order_index", "ordinal", "page"}
 
 
 def _adapt_postgres_value(value: Any, column: str | None = None) -> Any:
+    if column in INTEGER_COLUMNS and value == "":
+        return None
+    if column == "context_json" and value in (None, ""):
+        value = {}
     if column in BOOLEAN_COLUMNS:
         return None if value is None else bool(value)
     if not isinstance(value, (dict, list)):

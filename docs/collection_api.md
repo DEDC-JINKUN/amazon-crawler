@@ -80,6 +80,8 @@ GET /v1/jobs/status
 
 本机 PostgreSQL 已执行幂等 schema 升级，`collection_evidence.context_json` 为 `jsonb`；公司数据库需在正式迁移窗口执行同一 schema，不能直接假设已完成。
 
+旧 SQLite evidence 没有上下文时迁移为 JSONB `{}`，表示历史未知；新采集记录应包含实际 ZIP/国家/币种，不应把 `{}` 解读为美国默认区域。
+
 ### 查询刷新任务
 
 ```http
