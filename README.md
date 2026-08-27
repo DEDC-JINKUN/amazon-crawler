@@ -63,6 +63,13 @@ python scripts/collection_api.py --db state/amazon_us.sqlite3
 python scripts/coverage_report.py --db state/amazon_us.sqlite3 --output data/amazon_us/coverage_report.json
 ```
 
+运行前检查：
+
+```powershell
+python scripts/preflight.py
+python scripts/preflight.py --require-live
+```
+
 按字段新鲜度自动入队：
 
 ```powershell

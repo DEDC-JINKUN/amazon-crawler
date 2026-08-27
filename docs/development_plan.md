@@ -19,6 +19,7 @@
 - [x] Collection API 批量查询（单次最多 100 个 ASIN）。
 - [x] 字段级 freshness 策略（价格/可售/Offer/评论/内容分级 TTL）。
 - [x] 按字段 freshness 自动生成刷新请求队列。
+- [x] 运行前 preflight 检查（清单、配置、Python、Firefox/Selenium 和状态目录）。
 
 ## MVP 顺序
 
