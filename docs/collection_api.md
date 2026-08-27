@@ -35,6 +35,8 @@ GET /v1/asin/US/{asin}
 
 返回商品当前快照、任务状态、最近一次采集证据、媒体数量和内容模块数量。响应带有 `schema_version`、`retrieved_at`、`freshness`、`quality_status` 和 `source`；`freshness.age_seconds` 表示数据距当前的秒数，Agent 根据业务策略判断是否过期。
 
+默认 freshness 策略由 [freshness_policy.py](/D:/woring/爬虫/Amazon%20Scraping/scripts/freshness_policy.py) 提供：价格、可售和 Offer 默认 4 小时；评分和评论默认 24 小时；内容和媒体默认 7 天；身份信息默认 30 天。调度器可按业务需要覆盖这些时间，不把它们当作 Amazon 的固定规则。
+
 ### 查询任务汇总
 
 ```http

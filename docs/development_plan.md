@@ -17,6 +17,7 @@
 - [x] SQLite→PostgreSQL 回放工具（真实数据库连接待环境就绪）。
 - [x] 按需刷新队列消费：采集批处理优先处理 queued 请求，完成后更新结果。
 - [x] Collection API 批量查询（单次最多 100 个 ASIN）。
+- [x] 字段级 freshness 策略（价格/可售/Offer/评论/内容分级 TTL）。
 
 ## MVP 顺序
 
