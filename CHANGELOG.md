@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.64 - 2026-08-27
+
+- 增加 worker→raw HTML→evidence→health audit 端到端哈希回归，确认新文件可完整校验。
+
 ## 0.1.63 - 2026-08-27
 
 - 清洗 Buy Box 配送文本，截断 Add to List/Unable to add 等界面噪声。
