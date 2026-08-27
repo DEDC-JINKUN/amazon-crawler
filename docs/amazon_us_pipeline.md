@@ -86,6 +86,8 @@ Windows 每小时任务应调用 `run_scheduled_windows.bat`：它会先运行 `
 
 美国 VPN/90001 的全新 SQLite 10 条小批量已完成：9 条商品页成功、1 条 `asin_mismatch` 拦截；bullets 覆盖率 55.56%，描述覆盖率 44.44%。这批结果支持继续修解析器，但不支持直接扩大到全量 ASIN。
 
+遇到 CAPTCHA、Robot Check 或明确访问拒绝时，worker 立即停止本次批次；当前任务写入 `blocked`，未领取任务保持 `pending`，不会继续换页、换账号或无限更换出口。
+
 可用 `coverage_report.py --raw-html-dir <raw_html 根目录>` 对成功页面做字段容器审计：`present` 表示原始容器有内容，`empty` 表示页面明确没有内容，`uninspectable` 表示证据文件缺失。只有 `present` 但结构化字段为空时，才应作为解析器缺陷处理。
 
 解析器对 `productDescription` 使用原始 HTML 容器提取，避免 Amazon malformed/重复 `div` 导致后续模块文本被误归入 description；空容器会保持空值，不伪造商品描述。

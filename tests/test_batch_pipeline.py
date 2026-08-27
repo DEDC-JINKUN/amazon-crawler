@@ -334,6 +334,31 @@ class BatchCheckpointTests(unittest.TestCase):
             self.assertEqual(retry.url, cursor)
             conn.close()
 
+    def test_captcha_stops_batch_and_leaves_unclaimed_tasks_pending(self):
+        with tempfile.TemporaryDirectory() as directory:
+            worker, conn, config = self._setup(Path(directory))
+            conn.execute(
+                "INSERT INTO item_state(marketplace,asin,url,status,max_attempts,review_page_limit,updated_at) VALUES(?,?,?,?,?,?,?)",
+                ("US", "B00RCPDI50", "https://www.amazon.com/dp/B00RCPDI50", "pending", 3, 0, worker.utc_now()),
+            )
+            conn.commit()
+
+            class Captcha:
+                def __init__(self):
+                    self.calls = []
+
+                def fetch(self, url):
+                    self.calls.append(url)
+                    return "<html><title>Robot Check</title><body>captcha</body></html>", 200
+
+            adapter = Captcha()
+            self.assertEqual(worker.run_actions(conn, adapter, config, limit=2), -1)
+            self.assertEqual(len(adapter.calls), 1)
+            states = dict(conn.execute("SELECT asin,status FROM item_state").fetchall())
+            self.assertEqual(states["B00RCPDCQU"], "blocked")
+            self.assertEqual(states["B00RCPDI50"], "pending")
+            conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()
