@@ -36,6 +36,8 @@
 
 固定字段：`module_type`、`position`、`order_index`、`text`、`image_url`、`link_url`、`status`。模块类型包括逐条 `bullet`、`product_description`、`product_information`、`aplus`、`from_brand`；规格支持 table `tr` 和常见 li/div label-value 结构。
 
+运营字段落点约定：页面显示的 BSR、类目节点、型号和其他商品信息进入 `specs_json`；卖家、Coupon 和配送提示进入 `buy_box_json`（同时保留 `text` 原文）。页面未显示、容器为空或证据不可检查时保持空值，不根据价格、品牌或推荐商品推断。
+
 ### review_summary.csv
 
 同时保留 `reported_rating_count` 与 `reported_review_count`，并以 `reported_count_source` 记录页面来源；页面只有一个 count 时不会伪造另一个字段。只有 review section anchor 或无法分页时，summary 使用 `section_only`/`not_available`，`fetched_count=0`，不会进入 `reviews_pending`。`fetched_count` 是 review ID 去重后的本地数量，`pages_fetched`、`next_page` 和 `status` 表示分页断点；末页状态为 `exhausted`。
