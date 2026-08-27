@@ -20,6 +20,14 @@ def load(name: str):
 
 
 class ParserFixtureTests(unittest.TestCase):
+    def test_buy_box_facts_extract_coupon_and_delivery_without_losing_raw_text(self):
+        worker = load("amazon_us_worker")
+        html = '<div id="desktop_buybox">Sold by Example Store Save $5.00 with coupon FREE delivery Tuesday</div>'
+        result = worker.parse_product_html(html, "https://www.amazon.com/dp/B00RCPDCQU")
+        self.assertEqual(result["buy_box"]["coupon"], "Save $5.00")
+        self.assertIn("FREE delivery", result["buy_box"]["delivery"])
+        self.assertIn("Sold by Example Store", result["buy_box"]["text"])
+
     def test_price_normalization_collapses_visual_duplicates(self):
         worker = load("amazon_us_worker")
         self.assertEqual(worker._normalize_price("$23.99 $ 23 . 99"), "$23.99")

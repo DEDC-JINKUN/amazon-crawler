@@ -655,6 +655,21 @@ def _normalize_price(value: str) -> str:
     return f"{symbol}{number}"
 
 
+def _buy_box_facts(parser: _DOMParser) -> dict[str, str]:
+    text = _first_text(parser, [{"id_value": "desktop_buybox"}, {"id_value": "buybox"}])
+    facts = {"text": text}
+    seller = _first_text(parser, [{"id_value": "sellerProfileTriggerId"}, {"id_value": "sellerName"}])
+    if seller:
+        facts["seller"] = seller
+    coupon = re.search(r"(?:save|coupon|off)[^$%\d]{0,20}(?:\$\s*\d+(?:\.\d{1,2})?|\d+\s*%)", text, flags=re.IGNORECASE)
+    if coupon:
+        facts["coupon"] = _clean(coupon.group(0))
+    delivery = re.search(r"(?:free delivery|get it by|arrives)[^\n]{0,120}", text, flags=re.IGNORECASE)
+    if delivery:
+        facts["delivery"] = _clean(delivery.group(0))
+    return facts
+
+
 def parse_product_html(source_html: str, page_url: str = "") -> dict[str, Any]:
     parser = _DOMParser()
     parser.feed(source_html)
@@ -704,7 +719,7 @@ def parse_product_html(source_html: str, page_url: str = "") -> dict[str, Any]:
         "reported_review_count": reported_review_count, "review_count": review_summary_text,
         "review_count_source": review_count_source, "price": _price_text(parser),
         "bullets": _parse_bullets(parser), "product_description": description, "specs": specs,
-        "buy_box": {"text": _first_text(parser, [{"id_value": "desktop_buybox"}, {"id_value": "buybox"}])},
+        "buy_box": _buy_box_facts(parser),
         "top_reviews": [_node_text(parser, index) for index in _find(parser, attr=("data-hook", "review"))],
         "review_link": review_link, "review_section_anchor": review_section_anchor,
         "aplus_present": any(x["module_type"] == "aplus" for x in content_modules),
