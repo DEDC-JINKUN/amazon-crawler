@@ -19,6 +19,13 @@ python scripts/collection_api.py --api-key-env AMAZON_COLLECTION_API_KEY
 
 API Key 不写入仓库、命令行参数或日志。
 
+生产启动应显式使用 `--require-api-key`；如果 `--api-key-env` 指定的环境变量不存在或为空，服务会拒绝启动：
+
+```powershell
+$env:AMAZON_COLLECTION_API_KEY = "use-secret-manager-value"
+python scripts/collection_api.py --require-api-key
+```
+
 PostgreSQL 环境准备好后，安装可选依赖并切换后端：
 
 ```powershell

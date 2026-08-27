@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.9 - 2026-08-28
+
+- Collection API 新增 `--require-api-key`，生产可强制校验 API Key 环境变量后才启动。
+- 补充缺少 API Key 时的启动失败回归，不影响默认本地开发。
+
 ## 0.2.8 - 2026-08-28
 
 - 实际对账当前 SQLite 与 `amazon_us_qa` 租户：状态和刷新队列一致，20 个 ASIN 样本无差异。

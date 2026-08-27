@@ -271,6 +271,13 @@ def create_repository(backend: str, db_path: Path, dsn: str, tenant_id: str) -> 
     return PostgresCollectionRepository(dsn, tenant_id=tenant_id)
 
 
+def resolve_api_key(environment_name: str, required: bool) -> str:
+    key = os.environ.get(environment_name, "")
+    if required and not key:
+        raise ValueError(f"required API key environment variable is missing: {environment_name}")
+    return key
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, default=Path("state/amazon_us.sqlite3"))
@@ -278,12 +285,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dsn", default="", help="PostgreSQL DSN (required with --backend postgres)")
     parser.add_argument("--tenant-id", default="default", help="PostgreSQL tenant to expose")
     parser.add_argument("--api-key-env", default="AMAZON_COLLECTION_API_KEY", help="Environment variable containing optional API key")
+    parser.add_argument("--require-api-key", action="store_true", help="Fail startup when the API key environment variable is empty")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args(argv)
     try:
         repository = create_repository(args.backend, args.db, args.dsn, args.tenant_id)
-        serve(args.db if args.backend == "sqlite" else None, args.host, args.port, repository, os.environ.get(args.api_key_env, ""))
+        serve(args.db if args.backend == "sqlite" else None, args.host, args.port, repository, resolve_api_key(args.api_key_env, args.require_api_key))
     except (OSError, ValueError) as exc:
         print(f"error: {exc}")
         return 1

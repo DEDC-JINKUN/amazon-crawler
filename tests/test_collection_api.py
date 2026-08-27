@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 import tempfile
@@ -9,6 +10,7 @@ import threading
 import urllib.error
 import urllib.request
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -242,6 +244,12 @@ class CollectionApiTests(unittest.TestCase):
         api = load("collection_api")
         repository = api.create_repository("postgres", Path("unused.sqlite3"), "postgresql://example", "tenant-a")
         self.assertEqual(repository.tenant_id, "tenant-a")
+
+    def test_required_api_key_refuses_missing_environment_value(self):
+        api = load("collection_api")
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(ValueError, "required API key"):
+                api.resolve_api_key("MISSING_KEY", True)
 
     def test_refresh_endpoint_only_enqueues_a_request(self):
         worker = load("amazon_us_worker")
