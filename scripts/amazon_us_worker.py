@@ -64,6 +64,10 @@ DEFAULTS: dict[str, Any] = {
     "geckodriver_path": "/snap/bin/geckodriver",
     "marketplace": "US",
     "proxy_url": "",
+    "global_requests_per_second": 0.0,
+    "egress_requests_per_second": 0.0,
+    "rate_burst": 1,
+    "egress_id": "direct",
 }
 PRODUCT_HEADERS = [
     "asin", "marketplace", "canonical_url", "availability", "title", "brand", "rating",
@@ -1041,6 +1045,11 @@ class HttpFirstAdapter:
     source_type = "http_html"
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
+        try:
+            from amazon_us_throttle import EgressLimiter
+        except ModuleNotFoundError:
+            sys.path.insert(0, str(ROOT / "scripts"))
+            from amazon_us_throttle import EgressLimiter
         self.config = config or DEFAULTS
         self.timeout = int(self.config.get("request_timeout_seconds", 30))
         self.user_agent = str(self.config.get("user_agent") or "")
@@ -1050,6 +1059,12 @@ class HttpFirstAdapter:
             self.opener = urllib.request.build_opener(proxy_handler)
         else:
             self.opener = urllib.request.build_opener()
+        self.egress_id = str(self.config.get("egress_id") or "direct")
+        self.limiter = EgressLimiter(
+            float(self.config.get("global_requests_per_second", 0.0)),
+            float(self.config.get("egress_requests_per_second", 0.0)),
+            int(self.config.get("rate_burst", 1)),
+        )
         self.browser: SeleniumFirefoxAdapter | None = None
 
     @staticmethod
@@ -1064,6 +1079,7 @@ class HttpFirstAdapter:
         return body.decode(charset, errors="replace")
 
     def fetch(self, url: str) -> tuple[str, int | None]:
+        self.limiter.acquire(self.egress_id)
         request = urllib.request.Request(
             url,
             headers={

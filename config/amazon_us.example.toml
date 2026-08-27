@@ -11,6 +11,11 @@ user_agent = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/1
 geckodriver_path = "/snap/bin/geckodriver"
 # Optional production-only approved egress. Leave empty for the Windows POC.
 proxy_url = ""
+# Set these only after an approved live-collection budget is agreed.
+global_requests_per_second = 0
+egress_requests_per_second = 0
+rate_burst = 1
+egress_id = "direct"
 
 [paths]
 manifest = "amazon_us_asin_manifest.csv"
