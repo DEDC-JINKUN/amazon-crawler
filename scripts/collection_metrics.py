@@ -39,11 +39,13 @@ def build_report(db_path: Path, raw_html_dir: Path | None = None, run_id: str | 
     conn = sqlite3.connect(uri, uri=True, timeout=2)
     try:
         conn.row_factory = sqlite3.Row
+        evidence_columns = {row[1] for row in conn.execute("PRAGMA table_info(collection_evidence)")}
+        transfer_select = "transfer_bytes" if "transfer_bytes" in evidence_columns else "NULL AS transfer_bytes"
         if run_id is None:
             row = conn.execute("SELECT run_id FROM collection_evidence ORDER BY id DESC LIMIT 1").fetchone()
             run_id = row["run_id"] if row else None
         evidence = list(conn.execute(
-            "SELECT asin,url,source_type,http_status,retrieved_at,error_code,block_reason,raw_html_path FROM collection_evidence WHERE run_id=? ORDER BY id",
+            f"SELECT id,asin,url,source_type,http_status,{transfer_select},retrieved_at,error_code,block_reason,raw_html_path FROM collection_evidence WHERE run_id=? ORDER BY id",
             (run_id,),
         )) if run_id else []
         asins = sorted({row["asin"] for row in evidence})
@@ -64,6 +66,9 @@ def build_report(db_path: Path, raw_html_dir: Path | None = None, run_id: str | 
     bytes_total = 0
     readable_files = 0
     seen_raw_paths: set[str] = set()
+    transfer_bytes_total = 0
+    transfer_bytes_known = 0
+    transfer_bytes_missing = 0
     if raw_html_dir:
         for row in evidence:
             if not row["raw_html_path"]:
@@ -78,6 +83,11 @@ def build_report(db_path: Path, raw_html_dir: Path | None = None, run_id: str | 
                 readable_files += 1
             except OSError:
                 pass
+            if row["transfer_bytes"] is not None:
+                transfer_bytes_total += max(0, int(row["transfer_bytes"]))
+                transfer_bytes_known += 1
+            else:
+                transfer_bytes_missing += 1
     page_count = len(evidence)
     successful_evidence = [
         row for row in evidence
@@ -107,6 +117,9 @@ def build_report(db_path: Path, raw_html_dir: Path | None = None, run_id: str | 
         "table_counts": table_counts,
         "bytes_total": bytes_total,
         "raw_files_read": readable_files,
+        "transfer_bytes_total": transfer_bytes_total,
+        "transfer_bytes_known_count": transfer_bytes_known,
+        "transfer_bytes_missing_count": transfer_bytes_missing,
         "elapsed_seconds": elapsed,
         "pages_per_second": round(page_count / elapsed, 4) if elapsed and elapsed > 0 else None,
         "successful_pages_per_second": round(success_pages / elapsed, 4) if elapsed and elapsed > 0 else None,

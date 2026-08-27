@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.67 - 2026-08-27
+
+- HTTP 请求默认协商 gzip，解压后仍保持原始 HTML 和哈希可验证。
+- evidence 新增 `transfer_bytes`，记录压缩后 HTTP 响应体字节，同步 CSV、SQLite 升级、PostgreSQL 回放和 API 查询。
+- 流量报告同时输出保存体积与已知传输体积，旧 evidence 无传输字节时显示未知。
+
 ## 0.1.66 - 2026-08-27
 
 - 429 响应优先采用数字秒数或 HTTP-date 形式 `Retry-After`，上限 24 小时；无效、过期或缺失时继续使用配置冷却时间。

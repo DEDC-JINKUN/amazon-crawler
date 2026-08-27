@@ -3,6 +3,8 @@
 request_timeout_seconds = 30
 http_max_attempts = 2
 http_retry_backoff_seconds = 0.5
+# gzip lowers proxy bandwidth; set to identity only for an A/B baseline.
+http_accept_encoding = "gzip"
 headless = true
 max_actions_per_run = 10
 max_attempts = 3

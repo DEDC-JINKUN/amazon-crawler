@@ -4,7 +4,7 @@
 
 当前输入是 `amazon_us_asin_manifest.csv`，来自领星 FBA 补货建议导出，不是 Listing 全量。US manifest 当前为 1,892 个 unique `(marketplace, asin)`，仅作为首轮一次性补全的输入范围。
 
-默认命令只做离线初始化或 CSV 物化，不访问 Amazon。live 模式必须显式指定 `--live`，先使用 HTTP 获取公开 HTML；只有页面字段不足时才懒加载 Selenium Firefox 的独立临时 profile、默认 headless、可配置 `geckodriver_path`。不会读取 Chrome Profile、自动登录、Cookie、Token 或其他凭据。当前 POC 不启用代理池；媒体只保存公开 URL 和 DOM 元数据，不下载媒体文件。
+默认命令只做离线初始化或 CSV 物化，不访问 Amazon。live 模式必须显式指定 `--live`，先使用 HTTP 获取公开 HTML，默认请求 gzip 以减少传输流量，解压后进入相同解析链路；只有页面字段不足时才懒加载 Selenium Firefox 的独立临时 profile、默认 headless、可配置 `geckodriver_path`。不会读取 Chrome Profile、自动登录、Cookie、Token 或其他凭据。当前 POC 不启用代理池；媒体只保存公开 URL 和 DOM 元数据，不下载媒体文件。
 
 生产采集配置应填写 `[context]` 的 `expected_country=US`、`expected_currency=USD` 和业务 ZIP。页面出现明显非美国币种或配送地区时，质量门禁会拒绝写入快照并记录 `context_mismatch`。
 

@@ -48,13 +48,14 @@ class BatchCheckpointTests(unittest.TestCase):
             row = conn.execute("SELECT * FROM item_state").fetchone()
             worker._set_status(conn, "US", row["asin"], "running", reason="test")
             data = worker.parse_product_html(html, row["url"])
-            worker._write_product_action(conn, "test-run", conn.execute("SELECT * FROM item_state").fetchone(), data, html, None, None)
+            worker._write_product_action(conn, "test-run", conn.execute("SELECT * FROM item_state").fetchone(), data, html, None, None, transfer_bytes=321)
             state = conn.execute("SELECT status,next_review_url,next_review_page,fetched_review_count FROM item_state").fetchone()
             summary = conn.execute("SELECT next_page,status,fetched_count FROM review_summary").fetchone()
             snapshot = conn.execute("SELECT review_link,review_section_anchor,reported_review_count FROM product_snapshot").fetchone()
             self.assertEqual(tuple(state), ("succeeded", None, None, 0))
             self.assertEqual(tuple(summary), (None, "section_only", 0))
             self.assertEqual(tuple(snapshot), ("", "#averageCustomerReviewsAnchor", 17))
+            self.assertEqual(conn.execute("SELECT transfer_bytes FROM collection_evidence ORDER BY id LIMIT 1").fetchone()[0], 321)
             conn.close()
 
     def test_context_mismatch_retries_in_browser_with_configured_zip(self):

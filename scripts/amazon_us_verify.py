@@ -49,7 +49,7 @@ HEADERS = {
         "locale", "verified", "body_truncated", "review_images_json", "page", "unique_key",
     ],
     "collection_evidence.csv": [
-        "run_id", "asin", "marketplace", "url", "http_status", "retrieved_at", "source_type",
+        "run_id", "asin", "marketplace", "url", "http_status", "transfer_bytes", "retrieved_at", "source_type",
         "content_hash", "raw_html_path", "block_reason", "parser_version", "error_code", "context_json",
     ],
 }

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import csv
 import email.utils
+import gzip
 import hashlib
 import html as html_module
 import http.client
@@ -68,6 +69,7 @@ DEFAULTS: dict[str, Any] = {
     "request_timeout_seconds": 30,
     "http_max_attempts": 2,
     "http_retry_backoff_seconds": 0.5,
+    "http_accept_encoding": "gzip",
     "rate_limit_cooldown_seconds": 3600,
     "headless": True,
     "max_actions_per_run": 10,
@@ -109,7 +111,7 @@ REVIEW_HEADERS = [
     "locale", "verified", "body_truncated", "review_images_json", "page", "unique_key",
 ]
 EVIDENCE_HEADERS = [
-    "run_id", "asin", "marketplace", "url", "http_status", "retrieved_at", "source_type",
+    "run_id", "asin", "marketplace", "url", "http_status", "transfer_bytes", "retrieved_at", "source_type",
     "content_hash", "raw_html_path", "block_reason", "parser_version", "error_code", "context_json",
 ]
 OUTPUTS = {
@@ -892,7 +894,7 @@ def init_db(path: Path = DEFAULT_DB, max_attempts: int = 3) -> sqlite3.Connectio
         );
         CREATE TABLE IF NOT EXISTS collection_evidence (
           id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, marketplace TEXT NOT NULL,
-          asin TEXT NOT NULL, url TEXT NOT NULL, http_status INTEGER, retrieved_at TEXT NOT NULL,
+          asin TEXT NOT NULL, url TEXT NOT NULL, http_status INTEGER, transfer_bytes INTEGER, retrieved_at TEXT NOT NULL,
           source_type TEXT, content_hash TEXT, raw_html_path TEXT, block_reason TEXT, parser_version TEXT, error_code TEXT
         );
         """
@@ -905,6 +907,8 @@ def init_db(path: Path = DEFAULT_DB, max_attempts: int = 3) -> sqlite3.Connectio
         conn.execute("ALTER TABLE collection_evidence ADD COLUMN raw_html_path TEXT")
     if "context_json" not in evidence_columns:
         conn.execute("ALTER TABLE collection_evidence ADD COLUMN context_json TEXT")
+    if "transfer_bytes" not in evidence_columns:
+        conn.execute("ALTER TABLE collection_evidence ADD COLUMN transfer_bytes INTEGER")
     state_columns = {row[1] for row in conn.execute("PRAGMA table_info(item_state)")}
     if "next_retry_at" not in state_columns:
         conn.execute("ALTER TABLE item_state ADD COLUMN next_retry_at TEXT")
@@ -1026,18 +1030,18 @@ def _persist_raw_html(raw_html_dir: Path | None, run_id: str, asin: str, body: s
     return LocalRawHtmlStore(raw_html_dir).put(run_id, asin, body)
 
 
-def _insert_evidence(conn: sqlite3.Connection, run_id: str, asin: str, url: str, status: int | None, body: str, block_reason: str | None, error_code: str | None = None, source_type: str = "selenium_dom", raw_html_dir: Path | None = None, raw_html_path: str | None = None, context: dict[str, Any] | None = None) -> str | None:
+def _insert_evidence(conn: sqlite3.Connection, run_id: str, asin: str, url: str, status: int | None, body: str, block_reason: str | None, error_code: str | None = None, source_type: str = "selenium_dom", raw_html_dir: Path | None = None, raw_html_path: str | None = None, context: dict[str, Any] | None = None, transfer_bytes: int | None = None) -> str | None:
     if raw_html_path is None:
         raw_html_path = _persist_raw_html(raw_html_dir, run_id, asin, body)
     context_json = _json(context or {})
-    conn.execute("INSERT INTO collection_evidence(run_id,marketplace,asin,url,http_status,retrieved_at,source_type,content_hash,raw_html_path,block_reason,parser_version,error_code,context_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (run_id, "US", asin, url, status, utc_now(), source_type, hashlib.sha256(body.encode()).hexdigest(), raw_html_path, block_reason, PARSER_VERSION, error_code, context_json))
+    conn.execute("INSERT INTO collection_evidence(run_id,marketplace,asin,url,http_status,transfer_bytes,retrieved_at,source_type,content_hash,raw_html_path,block_reason,parser_version,error_code,context_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (run_id, "US", asin, url, status, transfer_bytes, utc_now(), source_type, hashlib.sha256(body.encode()).hexdigest(), raw_html_path, block_reason, PARSER_VERSION, error_code, context_json))
     return raw_html_path
 
 
-def _write_product_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.Row, data: dict[str, Any], body: str, status: int | None, block_reason: str | None, error_code: str | None = None, source_type: str = "selenium_dom", raw_html_dir: Path | None = None, context: dict[str, Any] | None = None, cooldown_seconds: int | float | None = None) -> None:
+def _write_product_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.Row, data: dict[str, Any], body: str, status: int | None, block_reason: str | None, error_code: str | None = None, source_type: str = "selenium_dom", raw_html_dir: Path | None = None, context: dict[str, Any] | None = None, cooldown_seconds: int | float | None = None, transfer_bytes: int | None = None) -> None:
     asin = task["asin"]
     with conn:
-        raw_html_path = _insert_evidence(conn, run_id, asin, task["url"], status, body, block_reason, error_code, source_type, raw_html_dir, context=context)
+        raw_html_path = _insert_evidence(conn, run_id, asin, task["url"], status, body, block_reason, error_code, source_type, raw_html_dir, context=context, transfer_bytes=transfer_bytes)
         if block_reason:
             if status == 429 or block_reason == "too_many_requests":
                 _set_rate_limited(conn, "US", asin, "product", cooldown_seconds)
@@ -1059,7 +1063,7 @@ def _write_product_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.R
             or not path_match
             or path_match.group(1).upper() != asin
         ):
-            _insert_evidence(conn, run_id, asin, task["url"], status, body, None, "asin_mismatch", source_type, raw_html_dir, raw_html_path, context)
+            _insert_evidence(conn, run_id, asin, task["url"], status, body, None, "asin_mismatch", source_type, raw_html_dir, raw_html_path, context, transfer_bytes)
             _record_failure(conn, "US", asin, "asin_mismatch", "asin_mismatch")
             return
         now = utc_now()
@@ -1104,10 +1108,10 @@ def _write_product_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.R
             _set_status(conn, "US", asin, "succeeded", reason="no_paginated_review_link", resume_status=None)
 
 
-def _write_review_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.Row, page: int, url: str, records: list[dict[str, Any]], next_url: str | None, body: str, status: int | None, block_reason: str | None, page_limit: int, source_type: str = "selenium_dom", raw_html_dir: Path | None = None, context: dict[str, Any] | None = None, cooldown_seconds: int | float | None = None) -> None:
+def _write_review_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.Row, page: int, url: str, records: list[dict[str, Any]], next_url: str | None, body: str, status: int | None, block_reason: str | None, page_limit: int, source_type: str = "selenium_dom", raw_html_dir: Path | None = None, context: dict[str, Any] | None = None, cooldown_seconds: int | float | None = None, transfer_bytes: int | None = None) -> None:
     asin = task["asin"]
     with conn:
-        raw_html_path = _insert_evidence(conn, run_id, asin, url, status, body, block_reason, source_type=source_type, raw_html_dir=raw_html_dir, context=context)
+        raw_html_path = _insert_evidence(conn, run_id, asin, url, status, body, block_reason, source_type=source_type, raw_html_dir=raw_html_dir, context=context, transfer_bytes=transfer_bytes)
         if block_reason:
             if status == 429 or block_reason == "too_many_requests":
                 conn.execute("INSERT OR REPLACE INTO review_page_state VALUES(?,?,?,?,?,?,?)", ("US", asin, page, url, "deferred", url, utc_now()))
@@ -1124,7 +1128,7 @@ def _write_review_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.Ro
             cols = REVIEW_HEADERS
             conn.execute(f"INSERT OR REPLACE INTO review_record({','.join(cols)}) VALUES({','.join('?' for _ in cols)})", [values.get(c, "") for c in cols])
         if not records and int(task["reported_review_count"] or 0) > 0:
-            _insert_evidence(conn, run_id, asin, url, status, body, None, "empty_review_page", source_type, raw_html_dir, raw_html_path, context)
+            _insert_evidence(conn, run_id, asin, url, status, body, None, "empty_review_page", source_type, raw_html_dir, raw_html_path, context, transfer_bytes)
             conn.execute(
                 "INSERT OR REPLACE INTO review_page_state VALUES(?,?,?,?,?,?,?)",
                 ("US", asin, page, url, "failed", url, utc_now()),
@@ -1328,6 +1332,7 @@ class HttpFirstAdapter:
         )
         self.browser: SeleniumFirefoxAdapter | None = None
         self.last_retry_after_seconds: int | None = None
+        self.last_transfer_bytes: int | None = None
 
     @staticmethod
     def _decode(response: Any, body: bytes) -> str:
@@ -1342,6 +1347,7 @@ class HttpFirstAdapter:
 
     def fetch(self, url: str) -> tuple[str, int | None]:
         self.last_retry_after_seconds = None
+        self.last_transfer_bytes = None
         max_attempts = max(1, min(int(self.config.get("http_max_attempts", 2)), 3))
         backoff = max(0.0, min(float(self.config.get("http_retry_backoff_seconds", 0.5)), 5.0))
         last_error: Exception | None = None
@@ -1351,7 +1357,7 @@ class HttpFirstAdapter:
                 url,
                 headers={
                     "Accept": "text/html,application/xhtml+xml",
-                    "Accept-Encoding": "identity",
+                    "Accept-Encoding": str(self.config.get("http_accept_encoding") or "identity"),
                     "Connection": "close",
                     "User-Agent": self.user_agent,
                 },
@@ -1359,16 +1365,20 @@ class HttpFirstAdapter:
             )
             try:
                 with self.opener.open(request, timeout=self.timeout) as response:
-                    body = response.read()
+                    encoded_body = response.read()
+                    self.last_transfer_bytes = len(encoded_body)
+                    body = self._decode_content(response, encoded_body)
                     self.source_type = "http_html"
                     return self._decode(response, body), int(response.getcode() or 200)
             except urllib.error.HTTPError as exc:
                 if int(exc.code) == 429:
                     self.last_retry_after_seconds = _retry_after_seconds(exc.headers.get("Retry-After") if exc.headers else None)
                 try:
-                    body = exc.read()
+                    encoded_body = exc.read()
                 except http.client.IncompleteRead as partial:
-                    body = partial.partial or b""
+                    encoded_body = partial.partial or b""
+                self.last_transfer_bytes = len(encoded_body)
+                body = self._decode_content(exc, encoded_body)
                 self.source_type = "http_html"
                 return self._decode(exc, body), int(exc.code)
             except (urllib.error.URLError, http.client.IncompleteRead, ConnectionResetError, TimeoutError, OSError) as exc:
@@ -1376,6 +1386,19 @@ class HttpFirstAdapter:
                 if attempt < max_attempts and backoff:
                     time.sleep(backoff * attempt)
         raise AdapterFetchError(f"{last_error} after {max_attempts} HTTP attempts") from last_error
+
+    @staticmethod
+    def _decode_content(response: Any, body: bytes) -> bytes:
+        try:
+            encoding = str(response.headers.get("Content-Encoding", "")).lower()
+        except AttributeError:
+            encoding = ""
+        if "gzip" in encoding:
+            try:
+                return gzip.decompress(body)
+            except (OSError, EOFError) as exc:
+                raise AdapterFetchError("invalid gzip HTTP response") from exc
+        return body
 
     def needs_browser_fallback(self, data: dict[str, Any]) -> bool:
         # A page without these anchors cannot be safely accepted as a product page.
@@ -1388,6 +1411,7 @@ class HttpFirstAdapter:
             except (RuntimeError, OSError) as exc:
                 raise AdapterFetchError(str(exc)) from exc
         self.source_type = "selenium_dom"
+        self.last_transfer_bytes = None
         return self.browser.fetch(url)
 
     def close(self) -> None:
@@ -1412,7 +1436,7 @@ def materialize_csvs(conn: sqlite3.Connection, output_dir: Path = DEFAULT_OUTPUT
         "content_module": "SELECT * FROM content_module ORDER BY marketplace,asin,position,unique_key",
         "review_summary": "SELECT * FROM review_summary ORDER BY marketplace,asin",
         "review_record": "SELECT * FROM review_record ORDER BY marketplace,asin,page,review_id",
-        "collection_evidence": "SELECT run_id,asin,marketplace,url,http_status,retrieved_at,source_type,content_hash,raw_html_path,block_reason,parser_version,error_code,context_json FROM collection_evidence ORDER BY id",
+        "collection_evidence": "SELECT run_id,asin,marketplace,url,http_status,transfer_bytes,retrieved_at,source_type,content_hash,raw_html_path,block_reason,parser_version,error_code,context_json FROM collection_evidence ORDER BY id",
     }
     for table, query in queries.items():
         filename, headers = OUTPUTS[table]
@@ -1507,7 +1531,7 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                     else:
                         # Keep the empty fallback page as evidence before the
                         # primary portal result is recorded below.
-                        _insert_evidence(conn, run_id, row["asin"], alternate_url, alternate_status, alternate_body, None, "empty_review_page", getattr(adapter, "source_type", "http_html"), raw_html_dir, context=config.get("context"))
+                        _insert_evidence(conn, run_id, row["asin"], alternate_url, alternate_status, alternate_body, None, "empty_review_page", getattr(adapter, "source_type", "http_html"), raw_html_dir, context=config.get("context"), transfer_bytes=getattr(adapter, "last_transfer_bytes", None))
             if (
                 not reason
                 and not records
@@ -1529,8 +1553,9 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                             reason = browser_reason
             source_type = getattr(adapter, "source_type", "selenium_dom")
             retry_after = getattr(adapter, "last_retry_after_seconds", None)
+            transfer_bytes = getattr(adapter, "last_transfer_bytes", None)
             cooldown = retry_after if retry_after is not None else config.get("rate_limit_cooldown_seconds")
-            _write_review_action(conn, run_id, row, page, url, records, next_url, body, response_status, reason, int(config["review_page_limit"]), source_type, raw_html_dir, config.get("context"), cooldown)
+            _write_review_action(conn, run_id, row, page, url, records, next_url, body, response_status, reason, int(config["review_page_limit"]), source_type, raw_html_dir, config.get("context"), cooldown, transfer_bytes)
             if refresh_job_id and row["asin"] == refresh_asin:
                 _finish_refresh_request(conn, refresh_job_id, "queued" if reason == "http_429" else "failed" if reason else "completed")
             blocked = blocked or bool(reason)
@@ -1592,8 +1617,9 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
             error_code = None
         source_type = getattr(adapter, "source_type", "selenium_dom")
         retry_after = getattr(adapter, "last_retry_after_seconds", None)
+        transfer_bytes = getattr(adapter, "last_transfer_bytes", None)
         cooldown = retry_after if retry_after is not None else config.get("rate_limit_cooldown_seconds")
-        _write_product_action(conn, run_id, row, data, body, response_status, reason, error_code=error_code, source_type=source_type, raw_html_dir=raw_html_dir, context=config.get("context"), cooldown_seconds=cooldown)
+        _write_product_action(conn, run_id, row, data, body, response_status, reason, error_code=error_code, source_type=source_type, raw_html_dir=raw_html_dir, context=config.get("context"), cooldown_seconds=cooldown, transfer_bytes=transfer_bytes)
         if refresh_job_id and row["asin"] == refresh_asin:
             _finish_refresh_request(conn, refresh_job_id, "queued" if reason == "http_429" else "failed" if reason else "completed")
         blocked = blocked or bool(reason)

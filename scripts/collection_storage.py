@@ -68,7 +68,10 @@ class SQLiteCollectionRepository:
     @staticmethod
     def _evidence_select(conn: sqlite3.Connection) -> str:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(collection_evidence)")}
-        base = "run_id, url, http_status, retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code"
+        base = "run_id, url, http_status"
+        if "transfer_bytes" in columns:
+            base += ", transfer_bytes"
+        base += ", retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code"
         return base + (", context_json" if "context_json" in columns else "")
 
     @staticmethod
@@ -228,7 +231,7 @@ class PostgresCollectionRepository:
                     return None
                 subject_type = (product or state).get("subject_type", "own")
                 cursor.execute(
-                    "SELECT run_id, url, http_status, retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code, context_json "
+                    "SELECT run_id, url, http_status, transfer_bytes, retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code, context_json "
                     "FROM amazon_us.collection_evidence WHERE marketplace=%s AND asin=%s AND subject_type=%s "
                     "ORDER BY id DESC LIMIT 1",
                     (marketplace, asin, subject_type),
@@ -279,7 +282,7 @@ class PostgresCollectionRepository:
         with self._connect_factory() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(
-                    "SELECT run_id, url, http_status, retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code, context_json "
+                    "SELECT run_id, url, http_status, transfer_bytes, retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code, context_json "
                     "FROM amazon_us.collection_evidence WHERE marketplace=%s AND asin=%s ORDER BY id DESC LIMIT %s",
                     (marketplace, asin, limit),
                 )

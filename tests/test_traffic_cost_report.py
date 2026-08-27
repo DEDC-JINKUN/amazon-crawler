@@ -20,7 +20,7 @@ def load_module():
 
 def test_build_cost_report_uses_proxy_dashboard_delta() -> None:
     report = load_module().build_cost_report(
-        {"run_id": "run-1", "success_page_count": 90, "unique_asin_count": 100, "unique_successful_asin_count": 90, "bytes_total": 150_000_000},
+        {"run_id": "run-1", "success_page_count": 90, "unique_asin_count": 100, "unique_successful_asin_count": 90, "bytes_total": 150_000_000, "transfer_bytes_total": 200_000_000},
         target_asins=5800,
         budget_cny=200,
         proxy_usage_before_bytes=10_000_000_000,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import gzip
 import http.client
 import io
 import sys
@@ -23,16 +24,23 @@ def load_worker():
 
 
 class _Headers:
+    def __init__(self, values=None):
+        self.values = values or {}
+
     def get_content_charset(self):
         return "utf-8"
+
+    def get(self, name, default=None):
+        return self.values.get(name, default)
 
 
 class _Response:
     headers = _Headers()
 
-    def __init__(self, body: bytes, status: int = 200):
+    def __init__(self, body: bytes, status: int = 200, headers=None):
         self.body = body
         self.status = status
+        self.headers = headers or _Headers()
 
     def read(self):
         return self.body
@@ -71,6 +79,21 @@ class _SequenceOpener:
 
 
 class HttpAdapterTests(unittest.TestCase):
+    def test_http_gzip_response_is_decoded_and_transfer_bytes_are_compressed(self):
+        worker = load_worker()
+        plain = b"<html><title>ok</title>" + (b"product text " * 100)
+        compressed = gzip.compress(plain)
+        opener = _Opener(_Response(compressed, headers=_Headers({"Content-Encoding": "gzip"})))
+        config = {**worker.DEFAULTS, "user_agent": "Agent/test-agent", "http_accept_encoding": "gzip"}
+        with patch.object(worker.urllib.request, "build_opener", return_value=opener):
+            adapter = worker.HttpFirstAdapter(config)
+            body, status = adapter.fetch("https://example.test")
+        self.assertEqual((body.encode(), status), (plain, 200))
+        self.assertEqual(opener.request.get_header("Accept-encoding"), "gzip")
+        self.assertEqual(adapter.last_transfer_bytes, len(compressed))
+        self.assertLess(adapter.last_transfer_bytes, len(plain))
+        adapter.close()
+
     def test_firefox_adapter_keeps_config_for_delivery_context(self):
         worker = load_worker()
 

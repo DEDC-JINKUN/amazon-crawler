@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS collection_evidence (
     run_id text NOT NULL,
     url text NOT NULL,
     http_status integer,
+    transfer_bytes bigint,
     retrieved_at timestamptz NOT NULL DEFAULT now(),
     source_type text,
     content_hash char(64),
@@ -102,6 +103,7 @@ CREATE TABLE IF NOT EXISTS collection_evidence (
 );
 
 ALTER TABLE collection_evidence ADD COLUMN IF NOT EXISTS context_json jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE collection_evidence ADD COLUMN IF NOT EXISTS transfer_bytes bigint;
 
 CREATE TABLE IF NOT EXISTS product_snapshot (
     snapshot_id bigserial PRIMARY KEY,

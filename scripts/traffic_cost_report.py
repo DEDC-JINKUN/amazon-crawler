@@ -51,6 +51,7 @@ def build_cost_report(
     unique_asins = int(collection.get("unique_asin_count") or 0)
     successful_asins = int(collection["unique_successful_asin_count"]) if "unique_successful_asin_count" in collection else min(unique_asins, successful_pages)
     saved_body_bytes = int(collection.get("bytes_total") or 0)
+    transfer_bytes = int(collection.get("transfer_bytes_total") or 0)
     denominator = successful_asins
     result: dict[str, Any] = {
         "schema_version": "amazon-us-traffic-cost-v1",
@@ -69,6 +70,10 @@ def build_cost_report(
             "mib_per_unique_asin": round(saved_body_bytes / unique_asins / MIB_BYTES, 4) if unique_asins else None,
             "mib_per_successful_asin": round(saved_body_bytes / successful_asins / MIB_BYTES, 4) if successful_asins else None,
             "projected_gib_for_target_asins": round(saved_body_bytes / denominator * target_asins / (1024 ** 3), 4) if denominator else None,
+            "known_transfer_bytes": transfer_bytes,
+            "known_transfer_gib": round(transfer_bytes / (1024 ** 3), 4) if transfer_bytes else None,
+            "projected_transfer_gib_for_target_asins": round(transfer_bytes / denominator * target_asins / (1024 ** 3), 4) if transfer_bytes and denominator else None,
+            "transfer_bytes_missing_count": int(collection.get("transfer_bytes_missing_count") or 0),
             "is_proxy_bill": False,
         },
         "proxy_bill_measurement": None,

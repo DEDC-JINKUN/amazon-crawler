@@ -45,7 +45,7 @@ def build_payload(sqlite_path: Path, tenant_id: str = "default", subject_type: s
     for row in source["state_history"]:
         payload["state_history"].append({"tenant_id": tenant_id, "marketplace": row["marketplace"], "asin": row["asin"], "subject_type": subject_type, "from_status": row["from_status"], "to_status": row["to_status"], "reason": row["reason"], "changed_at": row["changed_at"]})
     for row in source["collection_evidence"]:
-        payload["collection_evidence"].append({"tenant_id": tenant_id, "marketplace": row["marketplace"], "asin": row["asin"], "subject_type": subject_type, **{key: row.get(key) for key in ("run_id", "url", "http_status", "retrieved_at", "source_type", "content_hash", "raw_html_path", "block_reason", "parser_version", "error_code", "context_json")}})
+        payload["collection_evidence"].append({"tenant_id": tenant_id, "marketplace": row["marketplace"], "asin": row["asin"], "subject_type": subject_type, **{key: row.get(key) for key in ("run_id", "url", "http_status", "transfer_bytes", "retrieved_at", "source_type", "content_hash", "raw_html_path", "block_reason", "parser_version", "error_code", "context_json")}})
     for row in source["product_snapshot"]:
         payload["product_snapshot"].append({
             "tenant_id": tenant_id, "marketplace": row["marketplace"], "asin": row["asin"], "subject_type": subject_type,
@@ -90,7 +90,7 @@ def _connect_postgres(dsn: str):
 
 
 BOOLEAN_COLUMNS = {"is_primary", "verified", "body_truncated", "aplus_present"}
-INTEGER_COLUMNS = {"priority", "next_review_page", "review_page_limit", "reported_rating_count", "reported_review_count", "fetched_review_count", "review_pages_fetched", "position", "order_index", "ordinal", "page"}
+INTEGER_COLUMNS = {"priority", "next_review_page", "review_page_limit", "reported_rating_count", "reported_review_count", "fetched_review_count", "review_pages_fetched", "position", "order_index", "ordinal", "page", "transfer_bytes"}
 
 
 def _adapt_postgres_value(value: Any, column: str | None = None) -> Any:
