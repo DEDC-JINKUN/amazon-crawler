@@ -69,6 +69,17 @@ def build_report(db_path: Path, raw_html_dir: Path | None = None, run_id: str | 
     transfer_bytes_total = 0
     transfer_bytes_known = 0
     transfer_bytes_missing = 0
+    seen_transfer_keys: set[str] = set()
+    for row in evidence:
+        transfer_key = str(row["raw_html_path"] or f"evidence:{row['id']}")
+        if transfer_key in seen_transfer_keys:
+            continue
+        seen_transfer_keys.add(transfer_key)
+        if row["transfer_bytes"] is not None:
+            transfer_bytes_total += max(0, int(row["transfer_bytes"]))
+            transfer_bytes_known += 1
+        else:
+            transfer_bytes_missing += 1
     if raw_html_dir:
         for row in evidence:
             if not row["raw_html_path"]:
@@ -83,11 +94,6 @@ def build_report(db_path: Path, raw_html_dir: Path | None = None, run_id: str | 
                 readable_files += 1
             except OSError:
                 pass
-            if row["transfer_bytes"] is not None:
-                transfer_bytes_total += max(0, int(row["transfer_bytes"]))
-                transfer_bytes_known += 1
-            else:
-                transfer_bytes_missing += 1
     page_count = len(evidence)
     successful_evidence = [
         row for row in evidence

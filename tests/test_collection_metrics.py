@@ -75,3 +75,25 @@ def test_successful_asins_require_clean_product_page_and_dedupe_raw_path():
         assert result["unique_successful_asin_count"] == 1
         assert result["bytes_total"] == 30
         assert result["raw_files_read"] == 3
+
+
+def test_transfer_bytes_are_reported_without_raw_html_directory():
+    with tempfile.TemporaryDirectory() as directory:
+        db = Path(directory) / "state.sqlite3"
+        conn = sqlite3.connect(db)
+        conn.executescript("""
+        CREATE TABLE collection_evidence (id INTEGER PRIMARY KEY,run_id TEXT,asin TEXT,marketplace TEXT,url TEXT,http_status INTEGER,transfer_bytes INTEGER,retrieved_at TEXT,source_type TEXT,error_code TEXT,block_reason TEXT,raw_html_path TEXT);
+        CREATE TABLE item_state (asin TEXT,marketplace TEXT,status TEXT);
+        CREATE TABLE product_snapshot (asin TEXT,marketplace TEXT);
+        CREATE TABLE media_asset (asin TEXT,marketplace TEXT);
+        CREATE TABLE content_module (asin TEXT,marketplace TEXT);
+        CREATE TABLE review_summary (asin TEXT,marketplace TEXT);
+        CREATE TABLE review_record (asin TEXT,marketplace TEXT);
+        INSERT INTO collection_evidence VALUES(1,'run-1','B000000001','US','https://www.amazon.com/dp/B000000001',200,1234,'2026-01-01T00:00:00+00:00','http_html',NULL,NULL,NULL);
+        """)
+        conn.commit()
+        conn.close()
+
+        result = metrics.build_report(db, run_id="run-1")
+        assert result["transfer_bytes_total"] == 1234
+        assert result["transfer_bytes_known_count"] == 1

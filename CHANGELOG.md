@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.69 - 2026-08-27
+
+- `collection_metrics.py` 不再要求 raw HTML 目录才统计 `transfer_bytes`，网络传输量与本地证据体积独立报告。
+- 增加无 raw HTML 目录时的传输字节回归测试，保证旧 evidence 和新 evidence 可分别识别。
+
 ## 0.1.68 - 2026-08-27
 
 - HTTP 单次 fetch 累计多次传输字节，包含可重试响应的部分内容，避免重试请求使流量被低估。
