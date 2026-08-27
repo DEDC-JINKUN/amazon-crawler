@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.10 - 2026-08-28
+
+- 实际验证 `--require-api-key`：无 Key 拒绝启动，有 Key 时健康路由 200、业务路由未授权 401、授权请求 200。
+- 补充 Collection API 安全验收记录。
+
 ## 0.2.9 - 2026-08-28
 
 - Collection API 新增 `--require-api-key`，生产可强制校验 API Key 环境变量后才启动。

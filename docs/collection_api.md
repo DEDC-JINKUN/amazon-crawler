@@ -26,6 +26,8 @@ $env:AMAZON_COLLECTION_API_KEY = "use-secret-manager-value"
 python scripts/collection_api.py --require-api-key
 ```
 
+本机 QA 实测结果：缺少 Key 时启动退出码为 1；有 Key 时 `/healthz` 返回 200，未携带 Key 的业务路由返回 401，携带正确 Key 返回 200。
+
 PostgreSQL 环境准备好后，安装可选依赖并切换后端：
 
 ```powershell
