@@ -42,3 +42,12 @@ def test_compose_receipt_marks_verification_errors():
     receipt = load_module().compose_receipt({"ok": False}, ["bad evidence"], {}, None)
     assert receipt["verification"]["ok"] is False
     assert receipt["verification"]["errors"] == ["bad evidence"]
+
+
+def test_write_atomic_replaces_target_without_leaving_temp_file(tmp_path):
+    module = load_module()
+    target = tmp_path / "receipt.json"
+    target.write_text("old", encoding="utf-8")
+    module._write_atomic(target, "new")
+    assert target.read_text(encoding="utf-8") == "new"
+    assert not (tmp_path / ".receipt.json.tmp").exists()

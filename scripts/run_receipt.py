@@ -5,11 +5,20 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(text, encoding="utf-8")
+    temporary.replace(path)
 
 
 def _load(name: str, path: Path):
@@ -70,27 +79,30 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--business-units", type=int)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
-    verifier = _load("run_receipt_verifier", ROOT / "scripts" / "amazon_us_verify.py")
-    metrics_module = _load("run_receipt_metrics", ROOT / "scripts" / "collection_metrics.py")
-    cost_module = _load("run_receipt_cost", ROOT / "scripts" / "traffic_cost_report.py")
-    verification, verification_errors = verifier.verify(args.manifest, args.state, args.output_dir, args.expected_count)
-    collection = metrics_module.build_report(args.state, args.raw_html_dir, args.run_id)
-    cost = cost_module.build_cost_report(
-        collection,
-        target_asins=args.target_asins,
-        budget_cny=args.budget_cny,
-        proxy_usage_before_bytes=args.proxy_usage_before_bytes,
-        proxy_usage_after_bytes=args.proxy_usage_after_bytes,
-        proxy_price_cny_per_gb=args.proxy_price_cny_per_gb,
-        proxy_charge_cny=args.proxy_charge_cny,
-        allocated_fixed_cost_cny=args.allocated_fixed_cost_cny,
-        business_units=args.business_units,
-    )
-    receipt = compose_receipt(verification, verification_errors, collection, cost)
+    try:
+        verifier = _load("run_receipt_verifier", ROOT / "scripts" / "amazon_us_verify.py")
+        metrics_module = _load("run_receipt_metrics", ROOT / "scripts" / "collection_metrics.py")
+        cost_module = _load("run_receipt_cost", ROOT / "scripts" / "traffic_cost_report.py")
+        verification, verification_errors = verifier.verify(args.manifest, args.state, args.output_dir, args.expected_count)
+        collection = metrics_module.build_report(args.state, args.raw_html_dir, args.run_id)
+        cost = cost_module.build_cost_report(
+            collection,
+            target_asins=args.target_asins,
+            budget_cny=args.budget_cny,
+            proxy_usage_before_bytes=args.proxy_usage_before_bytes,
+            proxy_usage_after_bytes=args.proxy_usage_after_bytes,
+            proxy_price_cny_per_gb=args.proxy_price_cny_per_gb,
+            proxy_charge_cny=args.proxy_charge_cny,
+            allocated_fixed_cost_cny=args.allocated_fixed_cost_cny,
+            business_units=args.business_units,
+        )
+        receipt = compose_receipt(verification, verification_errors, collection, cost)
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        print(f"run receipt failed: {exc}", file=sys.stderr)
+        return 2
     encoded = json.dumps(receipt, ensure_ascii=False, indent=2) + "\n"
     if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(encoded, encoding="utf-8")
+        _write_atomic(args.output, encoded)
     print(encoded, end="")
     return 0 if receipt["verification"]["ok"] else 1
 
