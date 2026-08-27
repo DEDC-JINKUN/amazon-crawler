@@ -2,7 +2,7 @@
 
 面向 Amazon.com 自有 ASIN 和竞品 ASIN 的统一网页采集 MVP。
 
-当前版本：`0.1.1`（单机 MVP，已完成单 ASIN 真实页面探针）。
+当前版本：`0.1.2`（单机 MVP，已完成单 ASIN 真实页面探针和运行环境验证）。
 
 ## 当前开发边界
 
@@ -33,6 +33,8 @@ amazon-scraping/
 python -m pytest tests -q
 ```
 
+`setup_windows.bat` 会同时安装 `requirements-dev.txt`，保证测试不依赖系统 Python 的全局包。
+
 首次运行 `setup_windows.bat` 时，如果根目录没有业务清单，会自动复制两条记录的 `amazon_us_asin_manifest.example.csv` 作为离线开发样例。接入真实采集前，必须用经过确认的业务清单替换 `amazon_us_asin_manifest.csv`；真实清单不会提交到 Git。
 
 ## 下一步
@@ -51,6 +53,12 @@ docker compose ps
 ```
 
 数据库只绑定本机 `127.0.0.1:5433`，schema 会在首次创建数据卷时自动执行。`.env` 仅用于本机开发并被 Git 忽略；切换公司数据库时只替换 DSN 和凭据，不提交 `.env`。
+
+本机已有 PostgreSQL 服务时，可交互式执行 schema（密码不会写入项目）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\bootstrap_postgres.ps1
+```
 
 本地只读 Collection API：
 

@@ -28,6 +28,8 @@ python scripts/collection_api.py --backend postgres --dsn "postgresql://user:pas
 
 DSN 不写入仓库、日志或配置提交；生产环境通过受控环境变量或密钥管理注入。
 
+本机 PostgreSQL 已安装但不知道 CLI 密码时，可先运行 `scripts\bootstrap_postgres.ps1`，交互输入密码执行 schema；脚本默认连接 `127.0.0.1:5432/postgres`，不保存密码。
+
 ## 路由
 
 ### 健康检查

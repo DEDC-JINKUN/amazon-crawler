@@ -16,6 +16,9 @@ if not exist ".venv\Scripts\python.exe" (
 )
 call .venv\Scripts\activate.bat
 python -m pip install -r requirements.txt || exit /b 1
+if exist "requirements-dev.txt" (
+  python -m pip install -r requirements-dev.txt || exit /b 1
+)
 if not exist "amazon_us_asin_manifest.csv" (
   if not exist "amazon_us_asin_manifest.example.csv" (
     echo Missing amazon_us_asin_manifest.csv and example manifest.

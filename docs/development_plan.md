@@ -11,6 +11,7 @@
 - [x] Collection API 与 SQLite 查询层解耦，后续可替换为 PostgreSQL repository。
 - [x] PostgreSQL repository 和可选驱动入口（未连接真实数据库）。
 - [ ] 本机 PostgreSQL 容器建库、schema 执行和 SQLite→PostgreSQL 回放。
+- [x] 本机 PostgreSQL 交互式 schema 初始化脚本（实际执行待输入密码）。
 - [x] 清单缺失时使用开发样例，真实清单保持本地忽略。
 - [x] 回归测试 43 项通过。
 - [x] 采集覆盖率、来源和阻断原因报告。
@@ -21,6 +22,7 @@
 - [x] 按字段 freshness 自动生成刷新请求队列。
 - [x] 运行前 preflight 检查（清单、配置、Python、Firefox/Selenium 和状态目录）。
 - [x] 单 ASIN 真实页面探针（HTTP 成功、原始 HTML 和字段输出可追溯）。
+- [x] 开发依赖独立锁定（venv 内 pytest，不依赖系统全局包）。
 
 ## MVP 顺序
 
