@@ -24,7 +24,7 @@
 
 ### product_snapshot.csv
 
-包含 `canonical_url`、`availability`、`title`、`brand`、`rating`、`reported_rating_count`、`reported_review_count`、`review_count`、`review_count_source`、`price`、JSON bullets/specs/BuyBox/Top reviews、可分页 review link、可选 `review_section_anchor`、A+ marker 和状态。`price` 保留页面显示币种并归一化重复视觉节点，不做汇率转换。Buy Box JSON 保留 `text`，并按页面显示情况提供 `seller`、`coupon`、`delivery`；缺失字段保持为空，不推断优惠。`review_section_anchor` 仅记录商品页锚点，绝不作为 `next_review_url`。
+包含 `canonical_url`、`availability`、`title`、`brand`、`rating`、`reported_rating_count`、`reported_review_count`、`review_count`、`review_count_source`、`price`、JSON bullets/specs/BuyBox/Top reviews、可分页 review link、可选 `review_section_anchor`、A+ marker 和状态。`brand` 去除 Amazon 的 `Visit the <brand> Store` 展示包装，但不改写品牌本身。`price` 保留页面显示币种并归一化重复视觉节点，不做汇率转换。Buy Box JSON 保留 `text`，并按页面显示情况提供 `seller`、`coupon`、`delivery`；缺失字段保持为空，不推断优惠。`review_section_anchor` 仅记录商品页锚点，绝不作为 `next_review_url`。
 
 ### media_asset.csv
 

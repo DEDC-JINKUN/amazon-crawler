@@ -655,6 +655,13 @@ def _normalize_price(value: str) -> str:
     return f"{symbol}{number}"
 
 
+def _normalize_brand(value: str) -> str:
+    """Remove Amazon's store CTA wrapper while preserving the brand text."""
+    text = _clean(value)
+    match = re.fullmatch(r"visit\s+the\s+(.+?)\s+store", text, flags=re.IGNORECASE)
+    return _clean(match.group(1)) if match else text
+
+
 def _buy_box_facts(parser: _DOMParser) -> dict[str, str]:
     text = _first_text(parser, [{"id_value": "desktop_buybox"}, {"id_value": "buybox"}])
     facts = {"text": text}
@@ -714,7 +721,7 @@ def parse_product_html(source_html: str, page_url: str = "") -> dict[str, Any]:
     return {
         "asin": asin.upper(), "marketplace": "US", "canonical_url": canonical,
         "availability": _first_text(parser, [{"id_value": "availability"}, {"id_value": "outOfStock"}]),
-        "title": title, "brand": _first_text(parser, [{"id_value": "bylineInfo"}, {"id_value": "brand"}]),
+        "title": title, "brand": _normalize_brand(_first_text(parser, [{"id_value": "bylineInfo"}, {"id_value": "brand"}])),
         "rating": reported_rating_text, "reported_ratings": _count_from_text(review_summary_text), "reported_rating_count": reported_rating_count,
         "reported_review_count": reported_review_count, "review_count": review_summary_text,
         "review_count_source": review_count_source, "price": _price_text(parser),

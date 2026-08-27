@@ -20,6 +20,11 @@ def load(name: str):
 
 
 class ParserFixtureTests(unittest.TestCase):
+    def test_brand_normalization_removes_store_call_to_action(self):
+        worker = load("amazon_us_worker")
+        self.assertEqual(worker._normalize_brand("Visit the Eyourlife Store"), "Eyourlife")
+        self.assertEqual(worker._normalize_brand("Fixture Brand"), "Fixture Brand")
+
     def test_buy_box_facts_extract_coupon_and_delivery_without_losing_raw_text(self):
         worker = load("amazon_us_worker")
         html = '<div id="desktop_buybox">Sold by Example Store Save $5.00 with coupon FREE delivery Tuesday</div>'

@@ -49,6 +49,7 @@
 - [x] 运营批准竞品 ASIN 后安全转换为正式 manifest。
 - [x] 价格显示归一化，避免视觉节点重复且不转换汇率。
 - [x] Buy Box 原文及可选 seller/coupon/delivery 结构化字段。
+- [x] 品牌字段 CTA 归一化并完成真实 HTML 回归。
 - [x] 竞品候选发现支持 `data-asin` 搜索卡片属性。
 - [x] 审计并明确 BSR/类目与卖家/Coupon/配送字段落点。
 - [x] evidence 保存 ZIP/国家/币种上下文并同步迁移链路。
