@@ -2,7 +2,7 @@
 
 面向 Amazon.com 自有 ASIN 和竞品 ASIN 的统一网页采集 MVP。
 
-当前版本：`0.1.41`（完成 SQLite 测试结果 Collection API 验证）。
+当前版本：`0.1.42`（重入队工具增加 dry-run 预览）。
 
 ## 当前开发边界
 

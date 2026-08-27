@@ -90,6 +90,8 @@ Windows 每小时任务应调用 `run_scheduled_windows.bat`：它会先运行 `
 
 人工确认出口/会话恢复后，使用 `scripts/requeue_tasks.py --db <state> --asin <ASIN> --reason <说明>` 重入队；`blocked` 任务必须额外加 `--include-blocked`。工具只重置任务状态并写入历史，不删除 evidence 或旧快照。
 
+正式执行前可加 `--dry-run` 预览 eligible ASIN；输出 `selected_count/updated_count`，dry-run 不修改状态、历史或 evidence。
+
 可用 `coverage_report.py --raw-html-dir <raw_html 根目录>` 对成功页面做字段容器审计：`present` 表示原始容器有内容，`empty` 表示页面明确没有内容，`uninspectable` 表示证据文件缺失。只有 `present` 但结构化字段为空时，才应作为解析器缺陷处理。
 
 解析器对 `productDescription` 使用原始 HTML 容器提取，避免 Amazon malformed/重复 `div` 导致后续模块文本被误归入 description；空容器会保持空值，不伪造商品描述。

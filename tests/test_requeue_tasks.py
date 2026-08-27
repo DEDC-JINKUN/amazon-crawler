@@ -42,3 +42,16 @@ def test_blocked_requires_explicit_flag():
         _db(db)
         assert requeue_tasks.requeue(db, asin="A2", reason="captcha_cleared")["updated_count"] == 0
         assert requeue_tasks.requeue(db, asin="A2", reason="captcha_cleared", include_blocked=True)["updated_count"] == 1
+
+
+def test_dry_run_does_not_change_blocked_task():
+    with tempfile.TemporaryDirectory() as directory:
+        db = Path(directory) / "state.sqlite3"
+        _db(db)
+        result = requeue_tasks.requeue(db, asin="A2", reason="review_only", include_blocked=True, dry_run=True)
+        assert result["dry_run"] is True
+        assert result["selected_count"] == 1
+        conn = sqlite3.connect(db)
+        assert conn.execute("SELECT status FROM item_state WHERE asin='A2'").fetchone()[0] == "blocked"
+        assert conn.execute("SELECT COUNT(*) FROM state_history").fetchone()[0] == 0
+        conn.close()
