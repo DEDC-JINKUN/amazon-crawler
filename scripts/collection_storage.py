@@ -79,3 +79,90 @@ class SQLiteCollectionRepository:
             }
         finally:
             conn.close()
+
+
+class PostgresCollectionRepository:
+    """Read-only repository for the PostgreSQL schema in ``schema/``.
+
+    ``psycopg`` is imported only when this repository is used, so the SQLite
+    POC remains dependency-free. Tests may inject a DB-API connection factory.
+    """
+
+    def __init__(self, dsn: str, connect=None):
+        if not dsn.strip():
+            raise ValueError("PostgreSQL DSN must not be empty")
+        self.dsn = dsn
+        self._connect_factory = connect or self._connect
+
+    def _connect(self):
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:
+            raise RuntimeError("PostgreSQL backend requires optional dependency psycopg") from exc
+        return psycopg.connect(self.dsn, row_factory=dict_row)
+
+    @staticmethod
+    def _first(cursor):
+        row = cursor.fetchone()
+        return dict(row) if row is not None else None
+
+    def load_product(self, marketplace: str, asin: str) -> dict[str, Any] | None:
+        with self._connect_factory() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT * FROM amazon_us.product_latest WHERE marketplace=%s AND asin=%s "
+                    "ORDER BY CASE subject_type WHEN 'own' THEN 0 WHEN 'competitor' THEN 1 ELSE 2 END LIMIT 1",
+                    (marketplace, asin),
+                )
+                product = self._first(cursor)
+                cursor.execute(
+                    "SELECT * FROM amazon_us.item_state WHERE marketplace=%s AND asin=%s "
+                    "ORDER BY CASE subject_type WHEN 'own' THEN 0 WHEN 'competitor' THEN 1 ELSE 2 END LIMIT 1",
+                    (marketplace, asin),
+                )
+                state = self._first(cursor)
+                if product is None and state is None:
+                    return None
+                subject_type = (product or state).get("subject_type", "own")
+                cursor.execute(
+                    "SELECT run_id, url, http_status, retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code "
+                    "FROM amazon_us.collection_evidence WHERE marketplace=%s AND asin=%s AND subject_type=%s "
+                    "ORDER BY id DESC LIMIT 1",
+                    (marketplace, asin, subject_type),
+                )
+                evidence = self._first(cursor)
+                cursor.execute(
+                    "SELECT COUNT(*) AS count FROM amazon_us.media_asset WHERE marketplace=%s AND asin=%s AND subject_type=%s",
+                    (marketplace, asin, subject_type),
+                )
+                media_count = cursor.fetchone()["count"]
+                cursor.execute(
+                    "SELECT COUNT(*) AS count FROM amazon_us.content_module WHERE marketplace=%s AND asin=%s AND subject_type=%s",
+                    (marketplace, asin, subject_type),
+                )
+                content_count = cursor.fetchone()["count"]
+                status = state.get("status") if state is not None else "unknown"
+                return {
+                    "schema_version": "amazon-us-collection-v1",
+                    "marketplace": marketplace,
+                    "asin": asin,
+                    "retrieved_at": (product or {}).get("collected_at") or (evidence or {}).get("retrieved_at"),
+                    "quality_status": "valid" if status in {"product_done", "succeeded"} else status,
+                    "source": (evidence or {}).get("source_type"),
+                    "product": product,
+                    "task": state,
+                    "evidence": evidence,
+                    "counts": {"media": media_count, "content_modules": content_count},
+                }
+
+    def load_job_status(self) -> dict[str, Any]:
+        with self._connect_factory() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT status, COUNT(*) AS count FROM amazon_us.item_state GROUP BY status ORDER BY status")
+                rows = cursor.fetchall()
+                return {
+                    "schema_version": "amazon-us-collection-v1",
+                    "retrieved_at": _now(),
+                    "counts": {row["status"]: row["count"] for row in rows},
+                }

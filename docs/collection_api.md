@@ -10,6 +10,15 @@ python scripts/collection_api.py --db state/amazon_us.sqlite3 --host 127.0.0.1 -
 
 默认只监听回环地址 `127.0.0.1`。如需部署到其他机器，必须先增加认证、网络隔离和权限控制，不能直接修改 host 绕过限制。
 
+PostgreSQL 环境准备好后，安装可选依赖并切换后端：
+
+```powershell
+python -m pip install -r requirements-postgres.txt
+python scripts/collection_api.py --backend postgres --dsn "postgresql://user:password@host:5432/dbname"
+```
+
+DSN 不写入仓库、日志或配置提交；生产环境通过受控环境变量或密钥管理注入。
+
 ## 路由
 
 ### 健康检查

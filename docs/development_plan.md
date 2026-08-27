@@ -9,8 +9,9 @@
 - [x] 本地只读 Collection API（快照、任务状态、最近证据）。
 - [x] PostgreSQL 初版 schema（生产迁移目标，不影响当前 SQLite POC）。
 - [x] Collection API 与 SQLite 查询层解耦，后续可替换为 PostgreSQL repository。
+- [x] PostgreSQL repository 和可选驱动入口（未连接真实数据库）。
 - [x] 清单缺失时使用开发样例，真实清单保持本地忽略。
-- [x] 回归测试 29 项通过。
+- [x] 回归测试 36 项通过。
 
 ## MVP 顺序
 

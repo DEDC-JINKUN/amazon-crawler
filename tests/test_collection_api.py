@@ -74,6 +74,59 @@ class CollectionApiTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=2)
 
+    def test_postgres_repository_uses_same_response_contract(self):
+        storage = load("collection_storage")
+
+        class Cursor:
+            def __init__(self):
+                self.rows = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def execute(self, sql, params=()):
+                if "product_latest" in sql:
+                    self.rows = [{"asin": "B00RCPDCQU", "subject_type": "own", "collected_at": "2026-01-01T00:00:00+00:00"}]
+                elif "item_state" in sql and "GROUP BY" not in sql:
+                    self.rows = [{"status": "succeeded", "subject_type": "own"}]
+                elif "collection_evidence" in sql:
+                    self.rows = [{"run_id": "run-1", "source_type": "http_html", "retrieved_at": "2026-01-01T00:00:00+00:00"}]
+                elif "media_asset" in sql:
+                    self.rows = [{"count": 2}]
+                elif "content_module" in sql:
+                    self.rows = [{"count": 3}]
+                else:
+                    self.rows = [{"status": "succeeded", "count": 1}]
+
+            def fetchone(self):
+                return self.rows[0] if self.rows else None
+
+            def fetchall(self):
+                return self.rows
+
+        class Connection:
+            def __init__(self):
+                self.cursor_instance = Cursor()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def cursor(self):
+                return self.cursor_instance
+
+        repository = storage.PostgresCollectionRepository("postgresql://example", connect=Connection)
+        payload = repository.load_product("US", "B00RCPDCQU")
+        self.assertEqual(payload["asin"], "B00RCPDCQU")
+        self.assertEqual(payload["source"], "http_html")
+        self.assertEqual(payload["counts"], {"media": 2, "content_modules": 3})
+        self.assertEqual(repository.load_job_status()["counts"], {"succeeded": 1})
+
 
 if __name__ == "__main__":
     unittest.main()

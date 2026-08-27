@@ -13,11 +13,11 @@ from typing import Any
 from urllib.parse import urlsplit
 
 try:
-    from collection_storage import SQLiteCollectionRepository
+    from collection_storage import CollectionRepository, PostgresCollectionRepository, SQLiteCollectionRepository
 except ModuleNotFoundError:
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from collection_storage import SQLiteCollectionRepository
+    from collection_storage import CollectionRepository, PostgresCollectionRepository, SQLiteCollectionRepository
 
 API_SCHEMA_VERSION = "amazon-us-collection-v1"
 ASIN_PATH = re.compile(r"^/v1/asin/([A-Za-z]{2})/([A-Za-z0-9]{10})$")
@@ -52,16 +52,16 @@ class CollectionHandler(BaseHTTPRequestHandler):
             return
         if path == "/v1/jobs/status":
             try:
-                self._send_json(HTTPStatus.OK, load_job_status(self.server.db_path))
-            except (OSError, sqlite3.Error) as exc:
+                self._send_json(HTTPStatus.OK, self.server.repository.load_job_status())
+            except (OSError, RuntimeError, sqlite3.Error) as exc:
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable", "detail": str(exc)})
             return
         match = ASIN_PATH.fullmatch(path)
         if match:
             marketplace, asin = match.group(1).upper(), match.group(2).upper()
             try:
-                payload = load_product(self.server.db_path, marketplace, asin)
-            except (OSError, sqlite3.Error) as exc:
+                payload = self.server.repository.load_product(marketplace, asin)
+            except (OSError, RuntimeError, sqlite3.Error) as exc:
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable", "detail": str(exc)})
                 return
             if payload is None:
@@ -76,17 +76,21 @@ class CollectionHandler(BaseHTTPRequestHandler):
 
 
 class CollectionServer(ThreadingHTTPServer):
-    def __init__(self, address: tuple[str, int], db_path: Path):
+    def __init__(self, address: tuple[str, int], db_path: Path | None = None, repository: CollectionRepository | None = None):
         if address[0] not in LOOPBACK_HOSTS:
             raise ValueError("Collection API only allows loopback host by default")
+        if repository is None:
+            if db_path is None:
+                raise ValueError("db_path or repository is required")
+            repository = SQLiteCollectionRepository(db_path)
         super().__init__(address, CollectionHandler)
-        self.db_path = db_path
+        self.repository = repository
 
 
-def serve(db_path: Path, host: str = "127.0.0.1", port: int = 8765) -> None:
+def serve(db_path: Path | None = None, host: str = "127.0.0.1", port: int = 8765, repository: CollectionRepository | None = None) -> None:
     if host not in LOOPBACK_HOSTS:
         raise ValueError("Collection API only allows loopback host by default")
-    server = CollectionServer((host, port), db_path)
+    server = CollectionServer((host, port), db_path, repository)
     try:
         print(f"Collection API listening on http://{host}:{server.server_port}")
         server.serve_forever()
@@ -99,11 +103,14 @@ def serve(db_path: Path, host: str = "127.0.0.1", port: int = 8765) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, default=Path("state/amazon_us.sqlite3"))
+    parser.add_argument("--backend", choices=("sqlite", "postgres"), default="sqlite")
+    parser.add_argument("--dsn", default="", help="PostgreSQL DSN (required with --backend postgres)")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args(argv)
     try:
-        serve(args.db, args.host, args.port)
+        repository = SQLiteCollectionRepository(args.db) if args.backend == "sqlite" else PostgresCollectionRepository(args.dsn)
+        serve(args.db if args.backend == "sqlite" else None, args.host, args.port, repository)
     except (OSError, ValueError) as exc:
         print(f"error: {exc}")
         return 1
