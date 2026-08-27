@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import tempfile
 from pathlib import Path
 
 
@@ -44,10 +46,41 @@ def test_compose_receipt_marks_verification_errors():
     assert receipt["verification"]["errors"] == ["bad evidence"]
 
 
-def test_write_atomic_replaces_target_without_leaving_temp_file(tmp_path):
+def test_write_atomic_replaces_target_without_leaving_temp_file():
     module = load_module()
-    target = tmp_path / "receipt.json"
-    target.write_text("old", encoding="utf-8")
-    module._write_atomic(target, "new")
-    assert target.read_text(encoding="utf-8") == "new"
-    assert not (tmp_path / ".receipt.json.tmp").exists()
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        target = root / "receipt.json"
+        target.write_text("old", encoding="utf-8")
+        module._write_atomic(target, "new")
+        assert target.read_text(encoding="utf-8") == "new"
+        assert not (root / ".receipt.json.tmp").exists()
+
+
+def test_main_builds_receipt_from_fresh_offline_database(capsys):
+    receipt = load_module()
+    worker_spec = importlib.util.spec_from_file_location("run_receipt_worker_test", ROOT / "scripts" / "amazon_us_worker.py")
+    worker = importlib.util.module_from_spec(worker_spec)
+    assert worker_spec.loader is not None
+    worker_spec.loader.exec_module(worker)
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        manifest = root / "manifest.csv"
+        manifest.write_text("asin,url,marketplace,source_site_label,source_workbook\nB00RCPDCQU,https://www.amazon.com/dp/B00RCPDCQU,US,test,fixture.csv\n", encoding="utf-8")
+        db = root / "state.sqlite3"
+        output = root / "output"
+        conn = worker.init_db(db)
+        worker.initialize_manifest(conn, manifest, worker.DEFAULTS)
+        worker.materialize_csvs(conn, output)
+        conn.close()
+        result_path = output / "run_receipt.json"
+
+        assert receipt.main([
+            "--manifest", str(manifest), "--state", str(db), "--output-dir", str(output),
+            "--raw-html-dir", str(root / "raw"), "--output", str(result_path),
+        ]) == 0
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+        assert payload["verification"]["ok"] is True
+        assert payload["verification"]["collection_phase"] == "not_collected"
+        assert payload["collection_metrics"]["run_id"] is None
+        assert capsys.readouterr().out
