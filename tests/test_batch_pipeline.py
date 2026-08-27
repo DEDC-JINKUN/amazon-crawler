@@ -56,6 +56,36 @@ class BatchCheckpointTests(unittest.TestCase):
             self.assertEqual(tuple(snapshot), ("", "#averageCustomerReviewsAnchor", 17))
             conn.close()
 
+    def test_context_mismatch_retries_in_browser_with_configured_zip(self):
+        worker_html = (FIXTURES / "product_unavailable_video_aplus.html").read_text()
+        hkd_html = worker_html.replace("$19.99", "HKD19.99").replace("Currently unavailable", "Deliver to Hong Kong")
+
+        class Adapter:
+            source_type = "http_html"
+
+            def __init__(self):
+                self.calls = []
+
+            def fetch(self, url):
+                self.calls.append(("http", url))
+                return hkd_html, 200
+
+            def fetch_browser(self, url):
+                self.calls.append(("browser", url))
+                self.source_type = "selenium_dom"
+                return worker_html, 200
+
+        with tempfile.TemporaryDirectory() as directory:
+            worker, conn, config = self._setup(Path(directory))
+            config["context"] = {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"}
+            adapter = Adapter()
+            self.assertEqual(worker.run_actions(conn, adapter, config, limit=1), 1)
+            snapshot = conn.execute("SELECT price FROM product_snapshot WHERE asin='B00RCPDCQU'").fetchone()
+            self.assertIsNotNone(snapshot)
+            self.assertEqual(snapshot[0], "$19.99")
+            self.assertEqual([kind for kind, _ in adapter.calls], ["http", "browser"])
+            conn.close()
+
         worker_html = (FIXTURES / "product_unavailable_video_aplus.html").read_text()
         page1 = (FIXTURES / "reviews_page_1.html").read_text()
         page2 = (FIXTURES / "reviews_page_2.html").read_text()
