@@ -33,7 +33,7 @@ GET /healthz
 GET /v1/asin/US/{asin}
 ```
 
-返回商品当前快照、任务状态、最近一次采集证据、媒体数量和内容模块数量。响应带有 `schema_version`、`retrieved_at`、`quality_status` 和 `source`。
+返回商品当前快照、任务状态、最近一次采集证据、媒体数量和内容模块数量。响应带有 `schema_version`、`retrieved_at`、`freshness`、`quality_status` 和 `source`；`freshness.age_seconds` 表示数据距当前的秒数，Agent 根据业务策略判断是否过期。
 
 ### 查询任务汇总
 

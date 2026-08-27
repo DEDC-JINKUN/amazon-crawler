@@ -27,6 +27,19 @@ def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def _freshness(captured_at: Any) -> dict[str, Any]:
+    if not captured_at:
+        return {"captured_at": None, "age_seconds": None}
+    try:
+        value = datetime.fromisoformat(str(captured_at).replace("Z", "+00:00"))
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        age_seconds = max(0, int((datetime.now(timezone.utc) - value).total_seconds()))
+    except (TypeError, ValueError):
+        age_seconds = None
+    return {"captured_at": captured_at, "age_seconds": age_seconds}
+
+
 class SQLiteCollectionRepository:
     """Read-only-by-convention repository over the local SQLite snapshot."""
 
@@ -56,11 +69,13 @@ class SQLiteCollectionRepository:
             media_count = conn.execute("SELECT COUNT(*) FROM media_asset WHERE marketplace=? AND asin=?", (marketplace, asin)).fetchone()[0]
             content_count = conn.execute("SELECT COUNT(*) FROM content_module WHERE marketplace=? AND asin=?", (marketplace, asin)).fetchone()[0]
             status = state["status"] if state is not None else "unknown"
+            retrieved_at = product["collected_at"] if product is not None else evidence["retrieved_at"] if evidence is not None else None
             return {
                 "schema_version": "amazon-us-collection-v1",
                 "marketplace": marketplace,
                 "asin": asin,
-                "retrieved_at": (product["collected_at"] if product is not None else evidence["retrieved_at"] if evidence is not None else None),
+                "retrieved_at": retrieved_at,
+                "freshness": _freshness(retrieved_at),
                 "quality_status": "valid" if status in {"product_done", "succeeded"} else status,
                 "source": evidence["source_type"] if evidence is not None else None,
                 "product": _dict_row(product),
@@ -159,11 +174,13 @@ class PostgresCollectionRepository:
                 )
                 content_count = cursor.fetchone()["count"]
                 status = state.get("status") if state is not None else "unknown"
+                retrieved_at = (product or {}).get("collected_at") or (evidence or {}).get("retrieved_at")
                 return {
                     "schema_version": "amazon-us-collection-v1",
                     "marketplace": marketplace,
                     "asin": asin,
-                    "retrieved_at": (product or {}).get("collected_at") or (evidence or {}).get("retrieved_at"),
+                    "retrieved_at": retrieved_at,
+                    "freshness": _freshness(retrieved_at),
                     "quality_status": "valid" if status in {"product_done", "succeeded"} else status,
                     "source": (evidence or {}).get("source_type"),
                     "product": product,

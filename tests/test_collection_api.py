@@ -47,6 +47,7 @@ class CollectionApiTests(unittest.TestCase):
                 payload = api.load_product(db, "US", "B00RCPDCQU")
                 self.assertEqual(payload["asin"], "B00RCPDCQU")
                 self.assertEqual(payload["source"], "selenium_dom")
+                self.assertIsNotNone(payload["freshness"]["age_seconds"])
                 self.assertTrue(payload["evidence"]["raw_html_path"])
                 self.assertEqual(len(api.load_evidence(db, "US", "B00RCPDCQU")), 1)
                 self.assertEqual(api.load_job_status(db)["counts"]["reviews_pending"], 1)
@@ -125,6 +126,7 @@ class CollectionApiTests(unittest.TestCase):
         payload = repository.load_product("US", "B00RCPDCQU")
         self.assertEqual(payload["asin"], "B00RCPDCQU")
         self.assertEqual(payload["source"], "http_html")
+        self.assertIsNotNone(payload["freshness"]["age_seconds"])
         self.assertEqual(payload["counts"], {"media": 2, "content_modules": 3})
         self.assertEqual(repository.load_job_status()["counts"], {"succeeded": 1})
 
