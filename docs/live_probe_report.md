@@ -53,3 +53,11 @@ Firefox/Selenium 运行依赖已经具备；此前失败的原因是 Selenium Ma
 ### 全新 30 条容量测试
 
 使用 `amazon_us.test_west_batch30.toml` 初始化全新 SQLite 状态库后启动 30 个商品 action。第 1 个 ASIN 的 HTTP 200 页面被识别为 `captcha`，worker 按 `stop_on_block=true` 立即停止，耗时约 1.34 秒；任务状态为 `blocked`，没有继续请求后续 ASIN，也未尝试绕过验证码。该结果说明容量测试必须把挑战页和出口冷却作为一等指标，不能按理论并发线性外推。
+
+### 后续版本状态（2026-08-27）
+
+- 受控 HTTP 重试、`Retry-After` 冷却、gzip 解压和 `transfer_bytes` 已实现，最新实现为 v0.1.81；
+- 按严格成功口径，10 个 HTTP 2xx 页面中 9 个 ASIN 通过商品页校验，去重后响应体 15,543,610 bytes，5,800 个商品页线性外推约 9.33 GiB；
+- 付费出口仍需通过 `check_egress.py` 和 `preflight --require-live`；配置 `proxy_url` 后 preflight 会自动探针；
+- 定时和手动入口均会生成 `run_receipt.json`，但过去测试副本的旧 CSV 可能缺少 `transfer_bytes`，需重新物化后再做最终验收；
+- 公司代理账单、真实 ASIN 清单和正式 PostgreSQL/Weknora 接入仍是外部前置，不能仅凭本地 POC 宣称生产通过。
