@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.5 - 2026-08-27
+
+- 修复媒体、内容、评论等子表回放时 `marketplace/asin` 主键字段丢失的问题。
+- 完成 1,892 条补货 ASIN 到本机 PostgreSQL 的实际回放和 repository 查询验证。
+
 ## 0.1.4 - 2026-08-27
 
 - 修复 SQLite→PostgreSQL 回放时 JSONB 字段无法适配 psycopg `%s` 参数的问题。

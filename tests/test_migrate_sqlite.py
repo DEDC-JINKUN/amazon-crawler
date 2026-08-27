@@ -34,6 +34,23 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(payload["item_state"][0]["tenant_id"], "tenant-a")
             self.assertEqual(payload["collection_evidence"], [])
 
+    def test_child_table_mapping_keeps_marketplace_and_asin(self):
+        worker = load("amazon_us_worker")
+        migration = load("migrate_sqlite_to_postgres")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = root / "state.sqlite3"
+            conn = worker.init_db(db)
+            manifest = root / "manifest.csv"
+            manifest.write_text("asin,url,marketplace,source_site_label,source_workbook\nB00RCPDCQU,https://www.amazon.com/dp/B00RCPDCQU,US,test,fixture.csv\n", encoding="utf-8")
+            worker.initialize_manifest(conn, manifest, worker.DEFAULTS)
+            conn.execute("INSERT INTO media_asset(marketplace,asin,placement,unique_key) VALUES('US','B00RCPDCQU','gallery','key-1')")
+            conn.commit()
+            conn.close()
+            payload = migration.build_payload(db, "tenant-a", "candidate")
+            self.assertEqual(payload["media_asset"][0]["marketplace"], "US")
+            self.assertEqual(payload["media_asset"][0]["asin"], "B00RCPDCQU")
+
     def test_dry_run_does_not_require_postgres_dsn(self):
         migration = load("migrate_sqlite_to_postgres")
         with tempfile.TemporaryDirectory() as directory:
@@ -103,6 +120,11 @@ class MigrationTests(unittest.TestCase):
         migration = load("migrate_sqlite_to_postgres")
         adapted = migration._adapt_postgres_value({"price": 12.3, "tags": ["a"]})
         self.assertIn("price", str(adapted))
+
+    def test_sqlite_boolean_values_are_adapted(self):
+        migration = load("migrate_sqlite_to_postgres")
+        self.assertIs(migration._adapt_postgres_value(1, "is_primary"), True)
+        self.assertIs(migration._adapt_postgres_value(0, "verified"), False)
 
 
 if __name__ == "__main__":

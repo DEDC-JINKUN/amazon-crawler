@@ -57,9 +57,7 @@ def build_payload(sqlite_path: Path, tenant_id: str = "default", subject_type: s
     for table in ("media_asset", "content_module", "review_summary", "review_record"):
         for row in source[table]:
             item = {"tenant_id": tenant_id, "marketplace": row["marketplace"], "asin": row["asin"], "subject_type": subject_type}
-            item.update(row)
-            item.pop("marketplace", None)
-            item.pop("asin", None)
+            item.update({key: value for key, value in row.items() if key not in {"marketplace", "asin"}})
             if table == "review_record":
                 item["review_images"] = _json_value(item.pop("review_images_json", None), [])
             payload[table].append(item)
@@ -80,7 +78,12 @@ def _connect_postgres(dsn: str):
     return psycopg.connect(dsn)
 
 
-def _adapt_postgres_value(value: Any) -> Any:
+BOOLEAN_COLUMNS = {"is_primary", "verified", "body_truncated", "aplus_present"}
+
+
+def _adapt_postgres_value(value: Any, column: str | None = None) -> Any:
+    if column in BOOLEAN_COLUMNS:
+        return None if value is None else bool(value)
     if not isinstance(value, (dict, list)):
         return value
     try:
@@ -104,7 +107,7 @@ def migrate(sqlite_path: Path, dsn: str, schema_path: Path | None = None, tenant
                 columns = list(rows[0])
                 placeholders = ",".join(["%s"] * len(columns))
                 sql = f"INSERT INTO amazon_us.{table} ({','.join(columns)}) VALUES ({placeholders}) ON CONFLICT DO NOTHING"
-                cursor.executemany(sql, [[_adapt_postgres_value(row.get(column)) for column in columns] for row in rows])
+                cursor.executemany(sql, [[_adapt_postgres_value(row.get(column), column) for column in columns] for row in rows])
         connection.commit()
     return {table: len(rows) for table, rows in payload.items()}
 
