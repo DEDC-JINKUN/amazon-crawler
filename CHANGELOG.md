@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.7 - 2026-08-28
+
+- Collection API 业务路由的数据库异常统一返回 `database_unavailable`，不回显回驱动、DSN 或凭证详情。
+- 保留 `invalid_request` 的业务校验提示，仅对后端异常做脱敏处理。
+- 增加业务路由异常脱敏回归。
+
 ## 0.2.6 - 2026-08-28
 
 - PostgreSQL Collection API 的 `/readyz` 成功响应返回 `tenant_id`，便于多 Agent 监控核对；`/healthz` 保持不暴露租户。

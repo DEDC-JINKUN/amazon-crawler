@@ -109,15 +109,15 @@ class CollectionHandler(BaseHTTPRequestHandler):
         if path == "/v1/jobs/status":
             try:
                 self._send_json(HTTPStatus.OK, self.server.repository.load_job_status())
-            except (OSError, RuntimeError, sqlite3.Error) as exc:
-                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable", "detail": str(exc)})
+            except (OSError, RuntimeError, sqlite3.Error, Exception):
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable"})
             return
         job_match = re.fullmatch(r"/v1/jobs/([A-Za-z0-9_-]+)", path)
         if job_match:
             try:
                 job = self.server.repository.load_refresh_request(job_match.group(1))
-            except (OSError, RuntimeError, sqlite3.Error) as exc:
-                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable", "detail": str(exc)})
+            except (OSError, RuntimeError, sqlite3.Error, Exception):
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable"})
                 return
             if job is None:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "job_not_found", "job_id": job_match.group(1)})
@@ -129,8 +129,8 @@ class CollectionHandler(BaseHTTPRequestHandler):
             marketplace, asin = evidence_match.group(1).upper(), evidence_match.group(2).upper()
             try:
                 evidence = self.server.repository.load_evidence(marketplace, asin)
-            except (OSError, RuntimeError, sqlite3.Error) as exc:
-                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable", "detail": str(exc)})
+            except (OSError, RuntimeError, sqlite3.Error, Exception):
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable"})
                 return
             if not evidence:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "evidence_not_found", "asin": asin, "marketplace": marketplace})
@@ -142,8 +142,8 @@ class CollectionHandler(BaseHTTPRequestHandler):
             marketplace, asin = history_match.group(1).upper(), history_match.group(2).upper()
             try:
                 history = self.server.repository.load_history(marketplace, asin)
-            except (OSError, RuntimeError, sqlite3.Error) as exc:
-                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable", "detail": str(exc)})
+            except (OSError, RuntimeError, sqlite3.Error, Exception):
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable"})
                 return
             if not history:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "history_not_found", "asin": asin, "marketplace": marketplace})
@@ -155,8 +155,8 @@ class CollectionHandler(BaseHTTPRequestHandler):
             marketplace, asin = match.group(1).upper(), match.group(2).upper()
             try:
                 payload = self.server.repository.load_product(marketplace, asin)
-            except (OSError, RuntimeError, sqlite3.Error) as exc:
-                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable", "detail": str(exc)})
+            except (OSError, RuntimeError, sqlite3.Error, Exception):
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable"})
                 return
             if payload is None:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "asin_not_found", "asin": asin, "marketplace": marketplace})
@@ -203,8 +203,8 @@ class CollectionHandler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request", "detail": str(exc)})
                 return
-            except (OSError, RuntimeError, sqlite3.Error) as exc:
-                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable", "detail": str(exc)})
+            except Exception:
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable"})
                 return
             self._send_json(HTTPStatus.OK, {"schema_version": API_SCHEMA_VERSION, "marketplace": marketplace, "items": items})
             return
@@ -230,8 +230,8 @@ class CollectionHandler(BaseHTTPRequestHandler):
         except KeyError:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "asin_not_found", "asin": asin, "marketplace": marketplace})
             return
-        except (OSError, RuntimeError, sqlite3.Error) as exc:
-            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable", "detail": str(exc)})
+        except Exception:
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable"})
             return
         self._send_json(HTTPStatus.ACCEPTED, {"schema_version": API_SCHEMA_VERSION, "job": request})
 

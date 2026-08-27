@@ -135,3 +135,4 @@ Content-Type: application/json
 - 直接查询个人 Cookie、Token 或代理凭证。
 
 后续接入 PostgreSQL 时保持相同路由和响应契约，将 SQLite repository 替换为 PostgreSQL repository 即可。
+其他业务路由遇到数据库异常时返回 HTTP 500 `database_unavailable`，不返回底层驱动或连接详情。
