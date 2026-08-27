@@ -27,3 +27,5 @@ try {
 输出中的 `ok: true` 才表示对账通过；`sample_mismatches` 会列出需要排查的 ASIN。它不比较实时采集时间，也不覆盖任何业务数据。
 
 如果两套后端的状态数量或样本证据不一致，不要直接判定爬虫失败。先确认是否使用了同一清单、租户、回放时间和解析器版本；旧租户的历史回放不应与当前 SQLite 直接作生产对账。
+
+本机 QA 回放模板：先新建独立数据库（例如 `amazon_us_qa`），再执行 schema、SQLite 回放和 `verify_postgres.py --asin <ASIN>`。本次回放结果为 `pending=1891`、`reviews_pending=1`，单 ASIN 来源为 `http_html`，`transfer_bytes` 可正常返回；旧默认数据库的历史数据不应覆盖或直接当作当前基线。
