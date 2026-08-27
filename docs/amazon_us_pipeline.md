@@ -111,4 +111,6 @@ python3 scripts/verify_agent_review.py
 
 验证脚本只读 manifest、SQLite 和 CSV，写入 `data/amazon_us/verification/latest_verification.json`。检查包括：悬挂 running、状态/history 一致、分页连续性与末页终态、exhausted failed、六表 schema、唯一键、summary/state 一致、阻断原因。空初始化会报告 `phase=initialized`、`collection_phase=not_collected`，不会被摘要称为采集完成。验收摘要不输出评论正文、Cookie、Token 或其他秘密。
 
+验收测试副本时必须显式指定 `--manifest`、`--state`、`--output-dir` 和 `--verification`；`ok=true` 表示结构和一致性检查通过，`phase=collecting` 表示仍有 pending/进行中任务，不能解读为全量完成。
+
 解析器修复不会自动重置已有数据。现有 `B00RCPDCQU` 若已保存 fragment 作为 `next_review_url`，必须由运维显式 reset/requeue 后再重新执行商品 action；不得通过代码自动回队或覆盖 live 状态。

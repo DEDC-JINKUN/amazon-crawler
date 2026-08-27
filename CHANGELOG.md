@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.38 - 2026-08-27
+
+- 补充测试副本验收命令：显式传入 manifest、state、output-dir 和 verification，避免默认路径误判。
+- 记录 `ok=true` 与 `phase=collecting` 的区别：结构验收通过不代表全量任务完成。
+
 ## 0.1.37 - 2026-08-27
 
 - 修正主报告与实际实现的表述：HTTP worker 使用 Python urllib opener，HTTP 会话不持久化 Cookie Jar。
