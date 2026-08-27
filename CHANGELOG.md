@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.4 - 2026-08-27
+
+- 修复 SQLite→PostgreSQL 回放时 JSONB 字段无法适配 psycopg `%s` 参数的问题。
+- 增加 JSONB 参数回归测试。
+
 ## 0.1.3 - 2026-08-27
 
 - 增加交互式 SQLite→PostgreSQL 回放脚本和 PostgreSQL repository 验证命令。

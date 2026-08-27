@@ -99,6 +99,11 @@ class MigrationTests(unittest.TestCase):
             self.assertTrue(target.committed)
             self.assertGreaterEqual(len(target.cursor_instance.batches), 2)
 
+    def test_postgres_json_values_are_adapted(self):
+        migration = load("migrate_sqlite_to_postgres")
+        adapted = migration._adapt_postgres_value({"price": 12.3, "tags": ["a"]})
+        self.assertIn("price", str(adapted))
+
 
 if __name__ == "__main__":
     unittest.main()

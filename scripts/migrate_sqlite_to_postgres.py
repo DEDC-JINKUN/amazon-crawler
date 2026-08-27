@@ -80,6 +80,16 @@ def _connect_postgres(dsn: str):
     return psycopg.connect(dsn)
 
 
+def _adapt_postgres_value(value: Any) -> Any:
+    if not isinstance(value, (dict, list)):
+        return value
+    try:
+        from psycopg.types.json import Jsonb
+    except ImportError:
+        return json.dumps(value, ensure_ascii=False)
+    return Jsonb(value)
+
+
 def migrate(sqlite_path: Path, dsn: str, schema_path: Path | None = None, tenant_id: str = "default", subject_type: str = "candidate", connect=None) -> dict[str, int]:
     payload = build_payload(sqlite_path, tenant_id, subject_type)
     schema = schema_path.read_text(encoding="utf-8") if schema_path else ""
@@ -94,7 +104,7 @@ def migrate(sqlite_path: Path, dsn: str, schema_path: Path | None = None, tenant
                 columns = list(rows[0])
                 placeholders = ",".join(["%s"] * len(columns))
                 sql = f"INSERT INTO amazon_us.{table} ({','.join(columns)}) VALUES ({placeholders}) ON CONFLICT DO NOTHING"
-                cursor.executemany(sql, [[row.get(column) for column in columns] for row in rows])
+                cursor.executemany(sql, [[_adapt_postgres_value(row.get(column)) for column in columns] for row in rows])
         connection.commit()
     return {table: len(rows) for table, rows in payload.items()}
 

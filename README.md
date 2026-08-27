@@ -2,7 +2,7 @@
 
 面向 Amazon.com 自有 ASIN 和竞品 ASIN 的统一网页采集 MVP。
 
-当前版本：`0.1.3`（单机 MVP，已完成单 ASIN 真实页面探针和 PostgreSQL 回放脚本）。
+当前版本：`0.1.4`（单机 MVP，修复 PostgreSQL JSONB 回放适配）。
 
 ## 当前开发边界
 
