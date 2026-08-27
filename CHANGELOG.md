@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.59 - 2026-08-27
+
+- 增加竞品候选发现→运营批准→正式 manifest 的端到端离线集成测试。
+
 ## 0.1.58 - 2026-08-27
 
 - README 增加 evidence 健康检查和 collection metrics 的交接命令入口。
