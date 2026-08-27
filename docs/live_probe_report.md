@@ -26,6 +26,10 @@
 
 本机 PostgreSQL 回放后，Collection API 已完成端到端只读验证：健康检查通过，任务汇总返回 1,891 个 pending 和 1 个 reviews_pending，指定 ASIN 查询成功，PostgreSQL 的时间字段可正常转换为 JSON。
 
+### 10 条美西小批量（90001）
+
+在原始 SQLite 只读复制出的测试副本上运行清单前 10 条，使用可见 Firefox 和美国 ZIP `90001`。10 条任务均进入可审计失败路径，未覆盖原有有效快照：1 条 `empty_review_page`，6 条 `context_mismatch`，2 条 `IncompleteRead`（已在 v0.1.19 归类为可重试错误），其余为区域上下文不匹配。该结果说明当前网络/页面变体下，Firefox 的配送 ZIP 在跨 ASIN 页面间不能稳定保持；不能据此宣称批量采集成功。测试副本和输出目录不作为生产数据源。
+
 ## 环境结论
 
 Firefox/Selenium 运行依赖已经具备；此前失败的原因是 Selenium Manager 无法在线下载 geckodriver，以及受限目录无法写 SQLite。固定驱动路径和临时状态库后，单页 HTTP 采集已成功。

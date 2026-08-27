@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.19 - 2026-08-27
+
+- HTTP chunked 响应断片统一归类为可重试的 `AdapterFetchError`，不会再使 worker 进程崩溃。
+- 增加美西 live 小批量测试配置和结果记录；验证失败时保留 evidence，不写入错误区域快照。
+
 ## 0.1.18 - 2026-08-27
 
 - 补齐 v0.1.17 文档对应的 worker 实现：区域上下文不匹配时设置 ZIP 并使用 Firefox 重新采集。

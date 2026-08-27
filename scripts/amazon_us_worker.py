@@ -11,6 +11,7 @@ import argparse
 import csv
 import hashlib
 import html as html_module
+import http.client
 import json
 import os
 import re
@@ -1103,7 +1104,7 @@ class SeleniumFirefoxAdapter:
     def _ensure_delivery_context(self) -> bool:
         """Set the configured ZIP in this isolated browser session once."""
         postal_code = str((self.config.get("context") or {}).get("postal_code") or "").strip()
-        if not postal_code or self._context_initialized:
+        if not postal_code:
             return False
         from selenium.webdriver.common.by import By
         from selenium.webdriver.support import expected_conditions as EC
@@ -1121,21 +1122,29 @@ class SeleniumFirefoxAdapter:
         field.clear()
         field.send_keys(postal_code)
         self.driver.find_element(By.CSS_SELECTOR, "#GLUXZipUpdate input[type='submit']").click()
+        # Amazon may show a second confirmation modal after Apply. The visible
+        # Done button is the commit point; GLUXConfirmClose is only a fallback
+        # for older page variants where that button is rendered as an input.
+        try:
+            done = WebDriverWait(self.driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, "//button[normalize-space()='Done' or normalize-space()='完成']"))
+            )
+            done.click()
+        except Exception:
+            try:
+                self.driver.find_element(By.ID, "GLUXConfirmClose").click()
+            except Exception:
+                pass
         WebDriverWait(self.driver, 10).until(
             lambda driver: postal_code in (driver.find_element(By.ID, "glow-ingress-line2").text or "")
         )
-        try:
-            self.driver.find_element(By.ID, "GLUXConfirmClose").click()
-        except Exception:
-            pass
         self._context_initialized = True
         return True
 
     def fetch(self, url: str) -> tuple[str, int | None]:
         try:
             self.driver.get(url)
-            if self._ensure_delivery_context():
-                self.driver.get(url)
+            self._ensure_delivery_context()
         except Exception as exc:
             raise AdapterFetchError(str(exc)) from exc
         return self.driver.page_source, extract_response_status(self.driver)
@@ -1220,7 +1229,7 @@ class HttpFirstAdapter:
             body = exc.read()
             self.source_type = "http_html"
             return self._decode(exc, body), int(exc.code)
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (urllib.error.URLError, http.client.IncompleteRead, ConnectionResetError, TimeoutError, OSError) as exc:
             raise AdapterFetchError(str(exc)) from exc
 
     def needs_browser_fallback(self, data: dict[str, Any]) -> bool:

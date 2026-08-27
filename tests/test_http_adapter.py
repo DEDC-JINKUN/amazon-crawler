@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import http.client
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -55,6 +56,22 @@ class _Opener:
 
 
 class HttpAdapterTests(unittest.TestCase):
+    def test_incomplete_chunked_response_becomes_retryable_adapter_error(self):
+        worker = load_worker()
+
+        class BrokenResponse(_Response):
+            def read(self):
+                raise http.client.IncompleteRead(b"partial")
+
+        opener = _Opener(BrokenResponse(b""))
+        config = dict(worker.DEFAULTS)
+        config["user_agent"] = "Agent/test-agent"
+        with patch.object(worker.urllib.request, "build_opener", return_value=opener):
+            adapter = worker.HttpFirstAdapter(config)
+            with self.assertRaises(worker.AdapterFetchError):
+                adapter.fetch("https://www.amazon.com/dp/B00RCPDCQU")
+            adapter.close()
+
     def test_firefox_proxy_settings_use_same_explicit_endpoint(self):
         worker = load_worker()
         self.assertEqual(worker._firefox_proxy_settings("http://127.0.0.1:8080"), {"proxyType": "manual", "httpProxy": "127.0.0.1:8080", "sslProxy": "127.0.0.1:8080"})
