@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.53 - 2026-08-27
+
+- SQLite CollectionRepository 兼容旧 evidence schema：缺少 `context_json` 时返回 null，不阻断 API。
+- 增加旧库只读查询回归测试，避免 schema 升级顺序导致服务不可用。
+
 ## 0.1.52 - 2026-08-27
 
 - 增加 Collection API evidence 的 `context_json` 回归断言，确认 Agent 可读取 ZIP/国家/币种上下文。

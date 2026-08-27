@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sqlite3
 from datetime import datetime, timezone
 import tempfile
 import threading
@@ -83,6 +84,17 @@ class CollectionApiTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=2)
+
+    def test_sqlite_repository_reads_legacy_evidence_without_context_column(self):
+        storage = load("collection_storage")
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "legacy.sqlite3"
+            conn = sqlite3.connect(db)
+            conn.execute("CREATE TABLE collection_evidence (id INTEGER PRIMARY KEY,run_id TEXT,url TEXT,http_status INTEGER,retrieved_at TEXT,source_type TEXT,content_hash TEXT,raw_html_path TEXT,block_reason TEXT,parser_version TEXT,error_code TEXT,marketplace TEXT,asin TEXT)")
+            conn.execute("INSERT INTO collection_evidence VALUES(1,'r1','https://example.test',200,'2026-01-01T00:00:00+00:00','http_html','hash','US/A1/x.html',NULL,'v1',NULL,'US','A1')")
+            conn.commit(); conn.close()
+            rows = storage.SQLiteCollectionRepository(db).load_evidence("US", "A1")
+            self.assertEqual(rows[0]["context_json"], None)
 
     def test_optional_api_key_protects_non_health_routes(self):
         api = load("collection_api")

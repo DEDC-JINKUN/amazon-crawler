@@ -65,6 +65,19 @@ class SQLiteCollectionRepository:
         conn.row_factory = sqlite3.Row
         return conn
 
+    @staticmethod
+    def _evidence_select(conn: sqlite3.Connection) -> str:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(collection_evidence)")}
+        base = "run_id, url, http_status, retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code"
+        return base + (", context_json" if "context_json" in columns else "")
+
+    @staticmethod
+    def _with_legacy_context(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        value = _dict_row(row)
+        if value is not None:
+            value.setdefault("context_json", None)
+        return value
+
     def load_product(self, marketplace: str, asin: str) -> dict[str, Any] | None:
         conn = self._connection()
         try:
@@ -72,11 +85,7 @@ class SQLiteCollectionRepository:
             state = conn.execute("SELECT * FROM item_state WHERE marketplace=? AND asin=?", (marketplace, asin)).fetchone()
             if product is None and state is None:
                 return None
-            evidence = conn.execute(
-                "SELECT run_id, url, http_status, retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code, context_json "
-                "FROM collection_evidence WHERE marketplace=? AND asin=? ORDER BY id DESC LIMIT 1",
-                (marketplace, asin),
-            ).fetchone()
+            evidence = conn.execute(f"SELECT {self._evidence_select(conn)} FROM collection_evidence WHERE marketplace=? AND asin=? ORDER BY id DESC LIMIT 1", (marketplace, asin)).fetchone()
             media_count = conn.execute("SELECT COUNT(*) FROM media_asset WHERE marketplace=? AND asin=?", (marketplace, asin)).fetchone()[0]
             content_count = conn.execute("SELECT COUNT(*) FROM content_module WHERE marketplace=? AND asin=?", (marketplace, asin)).fetchone()[0]
             status = state["status"] if state is not None else "unknown"
@@ -91,7 +100,7 @@ class SQLiteCollectionRepository:
                 "source": evidence["source_type"] if evidence is not None else None,
                 "product": _dict_row(product),
                 "task": _dict_row(state),
-                "evidence": _dict_row(evidence),
+                "evidence": self._with_legacy_context(evidence),
                 "counts": {"media": media_count, "content_modules": content_count},
             }
         finally:
@@ -115,12 +124,8 @@ class SQLiteCollectionRepository:
         limit = max(1, min(int(limit), 100))
         conn = self._connection()
         try:
-            rows = conn.execute(
-                "SELECT run_id, url, http_status, retrieved_at, source_type, content_hash, raw_html_path, block_reason, parser_version, error_code, context_json "
-                "FROM collection_evidence WHERE marketplace=? AND asin=? ORDER BY id DESC LIMIT ?",
-                (marketplace, asin, limit),
-            ).fetchall()
-            return [dict(row) for row in rows]
+            rows = conn.execute(f"SELECT {self._evidence_select(conn)} FROM collection_evidence WHERE marketplace=? AND asin=? ORDER BY id DESC LIMIT ?", (marketplace, asin, limit)).fetchall()
+            return [self._with_legacy_context(row) for row in rows]
         finally:
             conn.close()
 

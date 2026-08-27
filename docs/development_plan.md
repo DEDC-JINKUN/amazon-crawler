@@ -55,6 +55,7 @@
 - [x] 区域上下文迁移 payload 回归验证。
 - [x] 原始 HTML `RawHtmlStore` 接口和本地原子存储实现。
 - [x] Collection API evidence 返回区域上下文回归验证。
+- [x] Collection API 兼容旧 SQLite evidence schema。
 - [x] 美国上下文质量门禁（国家/币种不匹配不写入快照）。
 - [x] 美国 ZIP 格式门禁（5 位或 ZIP+4，live 模式必填）。
 - [x] 商品历史快照保存和 `/history` 查询。

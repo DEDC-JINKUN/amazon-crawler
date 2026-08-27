@@ -76,6 +76,8 @@ GET /v1/jobs/status
 
 本机测试验证使用 10 条美国 VPN 测试结果：健康检查通过，任务状态和单 ASIN 查询可读，批量查询 2 条返回正常。测试服务仅绑定 `127.0.0.1`，不作为生产服务暴露。
 
+旧 SQLite 库若尚未执行 `context_json` schema 变更，API 会兼容读取并返回 `context_json: null`；新采集证据会写入实际上下文。升级不要求 API 先写库。
+
 ### 查询刷新任务
 
 ```http
