@@ -269,6 +269,8 @@ class BatchCheckpointTests(unittest.TestCase):
             self.assertEqual(worker.run_actions(conn, adapter, config, limit=1), 1)
             self.assertIn("https://www.amazon.com/product-reviews/B00RCPDCQU", adapter.calls)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM review_record").fetchone()[0], 1)
+            evidence_urls = [row[0] for row in conn.execute("SELECT url FROM collection_evidence ORDER BY id")]
+            self.assertIn("https://www.amazon.com/product-reviews/B00RCPDCQU", evidence_urls)
             conn.close()
 
     def test_continuous_failures_stop_at_max_attempts(self):

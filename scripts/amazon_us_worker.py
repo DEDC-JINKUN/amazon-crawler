@@ -1410,6 +1410,10 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                     alternate_records, alternate_next_url = parse_reviews_html(alternate_body, page, alternate_url) if not alternate_reason else ([], None)
                     if not alternate_reason and (alternate_records or alternate_next_url):
                         body, response_status, url, records, next_url = alternate_body, alternate_status, alternate_url, alternate_records, alternate_next_url
+                    elif not alternate_reason:
+                        # Keep the empty fallback page as evidence before the
+                        # primary portal result is recorded below.
+                        _insert_evidence(conn, run_id, row["asin"], alternate_url, alternate_status, alternate_body, None, "empty_review_page", getattr(adapter, "source_type", "http_html"), raw_html_dir)
             if (
                 not reason
                 and not records
