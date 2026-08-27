@@ -23,3 +23,11 @@
 探针成功不代表 Amazon 后续一定不阻断，只证明此时出口可连通。批量采集仍必须保留 2–3 个 ASIN 低速探测、429 冷却、403/CAPTCHA 熔断和可恢复断点。
 
 探针通过后再运行 `preflight.py --require-live` 和 worker。代理凭证只放在当前进程环境变量中，不写入配置、日志或 Git。
+
+也可以让 preflight 将探针作为上线门禁：
+
+```powershell
+.venv\Scripts\python.exe scripts\preflight.py --require-live --probe-egress
+```
+
+`--probe-egress` 是显式网络操作；默认 `preflight.py` 仍只做本地检查。

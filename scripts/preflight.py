@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import re
 import shutil
 import sys
@@ -48,7 +49,16 @@ def _load_validator():
     return module
 
 
-def run_preflight(manifest: Path, config: Path, db: Path, *, require_live: bool = False) -> dict[str, Any]:
+def _load_egress_probe():
+    path = ROOT / "scripts" / "check_egress.py"
+    spec = importlib.util.spec_from_file_location("preflight_egress_probe", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def run_preflight(manifest: Path, config: Path, db: Path, *, require_live: bool = False, probe_egress: bool = False, probe_target_url: str = "https://www.amazon.com/robots.txt") -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     checks.append(_check("python", sys.version_info >= (3, 11), f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"))
     checks.append(_check("manifest", manifest.exists(), str(manifest)))
@@ -72,6 +82,23 @@ def run_preflight(manifest: Path, config: Path, db: Path, *, require_live: bool 
             username_env = str(loaded.get("proxy_username_env") or "").strip()
             password_env = str(loaded.get("proxy_password_env") or "").strip()
             checks.append(_check("proxy_credential_env", bool(username_env) == bool(password_env), "paired" if username_env and password_env else "not configured" if not username_env else "username/password environment names must be paired"))
+            if probe_egress:
+                if not proxy_ok or not str(loaded.get("proxy_url") or "").strip():
+                    checks.append(_check("proxy_probe", False, "probe requires a configured approved proxy_url"))
+                elif username_env and password_env and (not os.environ.get(username_env) or not os.environ.get(password_env)):
+                    checks.append(_check("proxy_probe", False, "configured proxy credential environment values are missing"))
+                else:
+                    try:
+                        probe_result = _load_egress_probe().probe(
+                            str(loaded["proxy_url"]),
+                            probe_target_url,
+                            timeout_seconds=int(loaded.get("request_timeout_seconds", 30)),
+                            username=os.environ.get(username_env) if username_env else None,
+                            password=os.environ.get(password_env) if password_env else None,
+                        )
+                        checks.append(_check("proxy_probe", bool(probe_result.get("ok")), json.dumps({key: probe_result.get(key) for key in ("status", "block_reason", "elapsed_ms", "response_bytes")}, ensure_ascii=False)))
+                    except (OSError, ValueError) as exc:
+                        checks.append(_check("proxy_probe", False, str(exc)))
             context = loaded.get("context", {})
             postal_code = str(context.get("postal_code") or "").strip()
             is_us = str(context.get("expected_country") or "").upper() == "US"
@@ -108,8 +135,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, default=ROOT / "config" / "amazon_us.windows.toml")
     parser.add_argument("--db", type=Path, default=ROOT / "state" / "amazon_us.sqlite3")
     parser.add_argument("--require-live", action="store_true")
+    parser.add_argument("--probe-egress", action="store_true", help="Probe configured proxy before allowing the run (network access)")
+    parser.add_argument("--probe-target-url", default="https://www.amazon.com/robots.txt")
     args = parser.parse_args(argv)
-    result = run_preflight(args.manifest, args.config, args.db, require_live=args.require_live)
+    result = run_preflight(args.manifest, args.config, args.db, require_live=args.require_live, probe_egress=args.probe_egress, probe_target_url=args.probe_target_url)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result["ok"] else 1
 

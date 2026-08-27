@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,6 +75,45 @@ class PreflightTests(unittest.TestCase):
             result = preflight.run_preflight(manifest, config, root / "state" / "state.sqlite3", require_live=True)
             check = next(item for item in result["checks"] if item["name"] == "us_postal_code")
             self.assertFalse(check["ok"])
+
+    def test_explicit_egress_probe_is_a_preflight_gate(self):
+        preflight = load()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.csv"
+            manifest.write_text("asin,url,marketplace,source_site_label,source_workbook\nB00RCPDCQU,https://www.amazon.com/dp/B00RCPDCQU,US,test,fixture.csv\n", encoding="utf-8")
+            config = root / "config.toml"
+            config.write_text('[worker]\nagent_name="test-agent"\nuser_agent="Agent/test-agent"\nproxy_url="http://127.0.0.1:8080"\n', encoding="utf-8")
+
+            class Probe:
+                @staticmethod
+                def probe(*args, **kwargs):
+                    return {"ok": True, "status": 200, "block_reason": None, "elapsed_ms": 1, "response_bytes": 2}
+
+            with patch.object(preflight, "_load_egress_probe", return_value=Probe):
+                result = preflight.run_preflight(manifest, config, root / "state.sqlite3", probe_egress=True)
+            check = next(item for item in result["checks"] if item["name"] == "proxy_probe")
+            self.assertTrue(check["ok"])
+
+    def test_explicit_egress_probe_failure_blocks_preflight(self):
+        preflight = load()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.csv"
+            manifest.write_text("asin,url,marketplace,source_site_label,source_workbook\nB00RCPDCQU,https://www.amazon.com/dp/B00RCPDCQU,US,test,fixture.csv\n", encoding="utf-8")
+            config = root / "config.toml"
+            config.write_text('[worker]\nagent_name="test-agent"\nuser_agent="Agent/test-agent"\nproxy_url="http://127.0.0.1:8080"\n', encoding="utf-8")
+
+            class Probe:
+                @staticmethod
+                def probe(*args, **kwargs):
+                    return {"ok": False, "status": 429, "block_reason": "http_429", "elapsed_ms": 1, "response_bytes": 2}
+
+            with patch.object(preflight, "_load_egress_probe", return_value=Probe):
+                result = preflight.run_preflight(manifest, config, root / "state.sqlite3", probe_egress=True)
+            check = next(item for item in result["checks"] if item["name"] == "proxy_probe")
+            self.assertFalse(check["ok"])
+            self.assertFalse(result["ok"])
 
 
 if __name__ == "__main__":
