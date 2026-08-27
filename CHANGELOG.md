@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.23 - 2026-08-27
+
+- 覆盖率报告支持 `--raw-html-dir`，区分 bullets/description 在原始 HTML 中为 `present`、`empty` 或 `uninspectable`。
+- 修正字段容器报告的嵌套误判，支持定位页面未提供字段与解析器问题。
+
 ## 0.1.22 - 2026-08-27
 
 - 对齐运营需求：明确竞品 ASIN 的四类来源及运营审核入池流程。

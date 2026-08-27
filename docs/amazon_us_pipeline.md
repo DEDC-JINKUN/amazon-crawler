@@ -86,6 +86,8 @@ Windows 每小时任务应调用 `run_scheduled_windows.bat`：它会先运行 `
 
 美国 VPN/90001 的全新 SQLite 10 条小批量已完成：9 条商品页成功、1 条 `asin_mismatch` 拦截；bullets 覆盖率 55.56%，描述覆盖率 44.44%。这批结果支持继续修解析器，但不支持直接扩大到全量 ASIN。
 
+可用 `coverage_report.py --raw-html-dir <raw_html 根目录>` 对成功页面做字段容器审计：`present` 表示原始容器有内容，`empty` 表示页面明确没有内容，`uninspectable` 表示证据文件缺失。只有 `present` 但结构化字段为空时，才应作为解析器缺陷处理。
+
 `--once` 是一批 action，不是一条商品或一页评论。遇 403/CAPTCHA 阻断返回非零并保留 checkpoint，不再选择；遇 429 返回非零但保留 pending/reviews_pending 游标，下一小时使用同一会话类型重试；非阻断 failed 在达到 `max_attempts` 前继续。
 
 若配置 `user_agent`，必须包含透明标识 `Agent/<agent_name>`；默认配置已使用带 `Agent/amazon-us-worker` 的 Firefox UA，不覆盖为隐藏身份。不存在 Selenium 时 live 模式仅报告清晰依赖错误，不会发出网络请求。

@@ -55,6 +55,15 @@ class CoverageReportTests(unittest.TestCase):
             self.assertEqual(result["evidence_source"]["selenium_dom"], 1)
             self.assertEqual(result["field_coverage"]["identity"]["title"]["observed"], 1)
 
+    def test_report_distinguishes_empty_html_containers(self):
+        report = load("coverage_report")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            html = root / "empty.html"
+            html.write_text('<html><div id="feature-bullets"></div><div id="productDescription"></div></html>', encoding="utf-8")
+            result = report._html_field_state(html)
+            self.assertEqual(result, {"bullets": "empty", "description": "empty"})
+
 
 if __name__ == "__main__":
     unittest.main()
