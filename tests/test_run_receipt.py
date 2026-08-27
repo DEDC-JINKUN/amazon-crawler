@@ -50,6 +50,7 @@ def test_compose_receipt_lists_actionable_asins():
         "blocked_asins": ["B000000001"],
         "failed_asins": ["B000000002"],
         "exhausted_failed_asins": ["B000000003"],
+        "failure_details": [{"asin": "B000000002", "status": "failed"}],
     }
 
 

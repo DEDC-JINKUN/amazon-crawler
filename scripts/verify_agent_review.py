@@ -41,6 +41,7 @@ def summarize(path: Path) -> tuple[dict, list[str]]:
         "missing_state_count": coverage.get("missing_state", 0),
         "extra_state_count": coverage.get("extra_state", 0),
         "blocked_count": len(blocked),
+        "failed_count": len(payload.get("failed", [])),
         "blocked_reasons": sorted({item.get("reason", "") for item in blocked if item.get("reason")}),
         "exhausted_failed_count": len(payload.get("exhausted_failed", [])),
         "output_counts": payload.get("outputs", {}),
