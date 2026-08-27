@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.62 - 2026-08-27
+
+- Buy Box 配送字段增加 `Delivering to` 文案识别，继续保留原文并对缺失字段保持空值。
+
 ## 0.1.61 - 2026-08-27
 
 - 修复品牌字段误取 Amazon 店铺 CTA（如 `Visit the Eyourlife Store`），归一化为真实品牌文本。

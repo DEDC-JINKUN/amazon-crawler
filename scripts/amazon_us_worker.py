@@ -664,14 +664,26 @@ def _normalize_brand(value: str) -> str:
 
 def _buy_box_facts(parser: _DOMParser) -> dict[str, str]:
     text = _first_text(parser, [{"id_value": "desktop_buybox"}, {"id_value": "buybox"}])
+    if not text:
+        fragments = []
+        for node in parser.nodes:
+            identifier = f"{node['attrs'].get('id', '')} {node['attrs'].get('class', '')}".lower()
+            if any(token in identifier for token in ("buybox", "coupon", "promotion", "deliveryblock", "merchantinfo")):
+                value = _node_text(parser, parser.nodes.index(node))
+                if value:
+                    fragments.append(value)
+        text = _clean(" ".join(dict.fromkeys(fragments)))
     facts = {"text": text}
     seller = _first_text(parser, [{"id_value": "sellerProfileTriggerId"}, {"id_value": "sellerName"}])
+    if not seller:
+        seller_match = re.search(r"(?:sold\s+by|ships\s+from)\s+(.{1,100}?)(?=\s+(?:and|fulfilled|get\s+it|free\s+delivery|save|coupon|apply)|$)", text, flags=re.IGNORECASE)
+        seller = _clean(seller_match.group(1)) if seller_match else ""
     if seller:
         facts["seller"] = seller
     coupon = re.search(r"(?:save|coupon|off)[^$%\d]{0,20}(?:\$\s*\d+(?:\.\d{1,2})?|\d+\s*%)", text, flags=re.IGNORECASE)
     if coupon:
         facts["coupon"] = _clean(coupon.group(0))
-    delivery = re.search(r"(?:free delivery|get it by|arrives)[^\n]{0,120}", text, flags=re.IGNORECASE)
+    delivery = re.search(r"(?:free delivery|get it by|arrives|delivering to)[^\n]{0,120}", text, flags=re.IGNORECASE)
     if delivery:
         facts["delivery"] = _clean(delivery.group(0))
     return facts

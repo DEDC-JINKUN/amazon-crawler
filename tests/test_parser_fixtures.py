@@ -31,6 +31,7 @@ class ParserFixtureTests(unittest.TestCase):
         result = worker.parse_product_html(html, "https://www.amazon.com/dp/B00RCPDCQU")
         self.assertEqual(result["buy_box"]["coupon"], "Save $5.00")
         self.assertIn("FREE delivery", result["buy_box"]["delivery"])
+        self.assertEqual(result["buy_box"]["seller"], "Example Store")
         self.assertIn("Sold by Example Store", result["buy_box"]["text"])
 
     def test_price_normalization_collapses_visual_duplicates(self):
