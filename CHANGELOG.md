@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.97 - 2026-08-27
+
+- PostgreSQL schema 契约不完整时停止业务查询，仅输出缺失字段并返回非零，避免后续错误掩盖根因。
+- 保留正常 schema 下的任务和单 ASIN 查询行为。
+
 ## 0.1.96 - 2026-08-27
 
 - `verify_postgres.py` 新增 schema 契约检查，在业务查询前确认 `next_retry_at`、`context_json` 和 `transfer_bytes`。

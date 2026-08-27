@@ -26,8 +26,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         repository = PostgresCollectionRepository(args.dsn)
         contract = repository.load_schema_contract()
-        result = {"schema_version": "amazon-us-postgres-verification-v1", "schema_ok": schema_ok(contract), "schema_contract": contract, "job_status": repository.load_job_status()}
-        if args.asin:
+        contract_ok = schema_ok(contract)
+        result = {"schema_version": "amazon-us-postgres-verification-v1", "schema_ok": contract_ok, "schema_contract": contract}
+        if contract_ok:
+            result["job_status"] = repository.load_job_status()
+        else:
+            result["job_status"] = None
+        if args.asin and contract_ok:
             result["product"] = repository.load_product("US", args.asin.upper())
     except (RuntimeError, ValueError, OSError) as exc:
         print(f"error: {exc}")

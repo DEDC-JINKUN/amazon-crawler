@@ -26,6 +26,8 @@ try {
 
 `verify_postgres.py` 会先返回 `schema_contract` 和 `schema_ok`，检查 `next_retry_at`、`context_json` 和 `transfer_bytes` 是否存在；字段缺失时不进入业务数据对账。
 
+`schema_ok=false` 时脚本不会继续查询任务表或单 ASIN，返回码为 `2`；先按提示执行最新 schema，再重跑验收和对账。
+
 输出中的 `ok: true` 才表示对账通过；`sample_mismatches` 会列出需要排查的 ASIN。它不比较实时采集时间，也不覆盖任何业务数据。
 
 如果两套后端的状态数量或样本证据不一致，不要直接判定爬虫失败。先确认是否使用了同一清单、租户、回放时间和解析器版本；旧租户的历史回放不应与当前 SQLite 直接作生产对账。
