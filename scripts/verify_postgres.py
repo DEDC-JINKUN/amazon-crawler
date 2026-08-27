@@ -37,6 +37,9 @@ def main(argv: list[str] | None = None) -> int:
     except (RuntimeError, ValueError, OSError) as exc:
         print(f"error: {exc}")
         return 1
+    except Exception as exc:  # CLI boundary: psycopg errors are optional and provider-specific.
+        print(f"error: PostgreSQL verification failed ({type(exc).__name__})")
+        return 1
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
     return 0 if result["schema_ok"] else 2
 
