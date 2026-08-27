@@ -12,7 +12,7 @@
 
 1. Windows 10/11。
 2. Python 3.11 或更高版本，安装时勾选 Python Launcher (`py`)。
-3. 正常网络环境。静态页面优先走 HTTP；只有动态字段缺失时才需要 Mozilla Firefox，Selenium Manager 会自动管理 geckodriver。
+3. 正常网络环境。静态页面优先走 HTTP；只有动态字段缺失时才需要 Mozilla Firefox。先运行 `powershell -ExecutionPolicy Bypass -File scripts\install_geckodriver.ps1` 固定安装 geckodriver。
 4. 可以访问 Amazon.com 的正常网络环境；不要使用随机 IP、代理规避、CAPTCHA 处理或浏览器 Profile/Cookie 导出。
 
 ## 首次安装
