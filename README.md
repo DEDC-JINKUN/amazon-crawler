@@ -38,3 +38,11 @@ python -m pytest tests -q
 2. 用少量已授权 ASIN 做真实页面采集。
 3. 根据成功率、字段完整率、阻断率和耗时配置 Token Bucket 限速。
 4. 再决定是否接入授权代理池和多 Worker 扩容。
+
+本地只读 Collection API：
+
+```powershell
+python scripts/collection_api.py --db state/amazon_us.sqlite3
+```
+
+默认只监听 `127.0.0.1`，不提供写入和刷新接口；Agent 后续通过它读取快照、任务状态和最近证据。
