@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.74 - 2026-08-27
+
+- live preflight 在配置付费代理时自动执行出口探针，探针失败则禁止批量启动。
+- 直连 POC 没有 `proxy_url` 时继续跳过网络探针，避免影响离线开发。
+- 增加 live proxy 配置下的自动探针回归测试。
+
 ## 0.1.73 - 2026-08-27
 
 - 出口探针增加 Amazon 另外两种挑战文案识别：`Enter the characters` 和 `Sorry, we just need to make sure you're not a robot`。

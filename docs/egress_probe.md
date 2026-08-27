@@ -30,4 +30,4 @@
 .venv\Scripts\python.exe scripts\preflight.py --require-live --probe-egress
 ```
 
-`--probe-egress` 是显式网络操作；默认 `preflight.py` 仍只做本地检查。
+`--probe-egress` 是显式网络操作；当 `preflight.py` 使用 `--require-live` 且配置了 `proxy_url` 时，也会自动执行探针。默认直连 POC 不配置代理，因此仍只做本地检查。

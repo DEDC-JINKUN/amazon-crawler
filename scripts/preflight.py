@@ -82,7 +82,8 @@ def run_preflight(manifest: Path, config: Path, db: Path, *, require_live: bool 
             username_env = str(loaded.get("proxy_username_env") or "").strip()
             password_env = str(loaded.get("proxy_password_env") or "").strip()
             checks.append(_check("proxy_credential_env", bool(username_env) == bool(password_env), "paired" if username_env and password_env else "not configured" if not username_env else "username/password environment names must be paired"))
-            if probe_egress:
+            should_probe_egress = probe_egress or (require_live and bool(str(loaded.get("proxy_url") or "").strip()))
+            if should_probe_egress:
                 if not proxy_ok or not str(loaded.get("proxy_url") or "").strip():
                     checks.append(_check("proxy_probe", False, "probe requires a configured approved proxy_url"))
                 elif username_env and password_env and (not os.environ.get(username_env) or not os.environ.get(password_env)):

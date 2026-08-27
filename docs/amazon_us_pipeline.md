@@ -70,7 +70,7 @@ live 运行需另行获得网络采集授权，并在依赖已准备后运行：
 env -u APPIMAGE -u __PYVENV_LAUNCHER__ .venv/bin/python scripts/amazon_us_worker.py --live --once --limit 10
 ```
 
-Windows 运行前先执行 `powershell -ExecutionPolicy Bypass -File scripts\install_geckodriver.ps1` 和 `python scripts\preflight.py --require-live`。如已配置付费代理，上线门禁应改为 `python scripts\preflight.py --require-live --probe-egress`。固定驱动版本后再执行 live；真实探针记录见 `docs/live_probe_report.md`。
+Windows 运行前先执行 `powershell -ExecutionPolicy Bypass -File scripts\install_geckodriver.ps1` 和 `python scripts\preflight.py --require-live`。如已配置付费代理，`--require-live` 会自动做出口探针，也可使用 `--probe-egress` 显式执行。固定驱动版本后再执行 live；真实探针记录见 `docs/live_probe_report.md`。
 
 如果配置付费代理，`preflight` 会校验 `proxy_url` 必须是明确的 HTTP(S) 出口，并拒绝把用户名/密码写进 URL；需要认证时只填写 `proxy_username_env` / `proxy_password_env` 两个环境变量名，worker 在运行时读取其值。当前 POC 的 `proxy_url` 为空，表示直连。
 

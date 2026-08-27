@@ -115,6 +115,25 @@ class PreflightTests(unittest.TestCase):
             self.assertFalse(check["ok"])
             self.assertFalse(result["ok"])
 
+    def test_live_preflight_auto_probes_when_proxy_is_configured(self):
+        preflight = load()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.csv"
+            manifest.write_text("asin,url,marketplace,source_site_label,source_workbook\nB00RCPDCQU,https://www.amazon.com/dp/B00RCPDCQU,US,test,fixture.csv\n", encoding="utf-8")
+            config = root / "config.toml"
+            config.write_text('[worker]\nagent_name="test-agent"\nuser_agent="Agent/test-agent"\nproxy_url="http://127.0.0.1:8080"\n', encoding="utf-8")
+
+            class Probe:
+                @staticmethod
+                def probe(*args, **kwargs):
+                    return {"ok": True, "status": 200, "block_reason": None, "elapsed_ms": 1, "response_bytes": 2}
+
+            with patch.object(preflight, "_load_egress_probe", return_value=Probe):
+                result = preflight.run_preflight(manifest, config, root / "state.sqlite3", require_live=True)
+            check = next(item for item in result["checks"] if item["name"] == "proxy_probe")
+            self.assertTrue(check["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()
