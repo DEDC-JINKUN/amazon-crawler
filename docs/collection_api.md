@@ -33,6 +33,7 @@ DSN 不写入仓库、日志或配置提交；生产环境通过受控环境变�
 
 本机 `amazon_us_qa` 已实际启动 tenant-scoped API 验证：`/v1/jobs/status` 返回 `pending=1891`、`reviews_pending=1`，`/v1/asin/US/B00RCPDCQU` 返回 `tenant_id=qa_latest_20260827`。
 使用不存在的租户访问同一 ASIN 时返回 HTTP 404 `asin_not_found`，不会泄露其他租户数据。
+本机 `amazon_us_qa` 的 tenant-scoped API 实际访问 `/readyz` 返回 HTTP 200 `ok=true`，证明数据库和 schema 就绪检查已经过 HTTP 监控路径生效。
 
 schema 初始化后运行 `scripts\replay_postgres.ps1`，可交互输入密码完成 SQLite 回放并调用 PostgreSQL repository 验证；JSONB 字段由迁移工具自动适配，密码仅存在于当前 PowerShell 进程。
 

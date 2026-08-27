@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.5 - 2026-08-28
+
+- 实际访问 QA PostgreSQL tenant-scoped Collection API 的 `/readyz`，返回 HTTP 200 `ok=true`。
+- 补充就绪检查端到端验收记录。
+
 ## 0.2.4 - 2026-08-28
 
 - Collection API 新增 `/readyz`，区分进程存活的 `/healthz` 与数据库/schema 可用的就绪状态。
