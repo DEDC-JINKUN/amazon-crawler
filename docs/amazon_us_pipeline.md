@@ -72,6 +72,8 @@ Windows 运行前先执行 `powershell -ExecutionPolicy Bypass -File scripts\ins
 
 如果配置付费代理，`preflight` 会校验 `proxy_url` 必须是明确的 HTTP(S) 出口，并拒绝把用户名/密码写进 URL；需要认证时只填写 `proxy_username_env` / `proxy_password_env` 两个环境变量名，worker 在运行时读取其值。当前 POC 的 `proxy_url` 为空，表示直连。
 
+HTTP 和 Firefox 兜底共用同一 `proxy_url`。Firefox 可传递无内嵌凭证的 HTTP(S) 代理；代理认证是否被目标供应商和浏览器环境接受，必须在拿到批准出口后做真实测试。
+
 Windows 每小时任务应调用 `run_scheduled_windows.bat`：它会先运行 `preflight --require-live`（包括美国 ZIP 检查），再按字段新鲜度生成刷新队列，随后执行 worker、物化 CSV 和验收。`install_hourly_task_windows.bat` 已指向该脚本；`run_once_windows.bat` 仍用于人工单批运行。
 
 `--once` 是一批 action，不是一条商品或一页评论。遇 403/CAPTCHA 阻断返回非零并保留 checkpoint，不再选择；遇 429 返回非零但保留 pending/reviews_pending 游标，下一小时使用同一会话类型重试；非阻断 failed 在达到 `max_attempts` 前继续。

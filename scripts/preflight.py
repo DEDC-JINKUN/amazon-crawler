@@ -30,6 +30,10 @@ def _validate_proxy_url(value: str) -> tuple[bool, str]:
         return False, "invalid proxy URL"
     if parts.scheme not in {"http", "https"} or not parts.hostname:
         return False, "proxy must be an explicit http(s) URL"
+    try:
+        _ = parts.port
+    except ValueError:
+        return False, "proxy port is invalid"
     if parts.username or parts.password:
         return False, "embedded proxy credentials are not allowed; use approved credential configuration"
     return True, f"configured {parts.scheme} proxy"

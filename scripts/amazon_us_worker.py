@@ -132,6 +132,19 @@ def _number(value: str) -> str:
     return match.group(0).replace(",", "") if match else ""
 
 
+def _firefox_proxy_settings(proxy_url: str) -> dict[str, str] | None:
+    """Translate an explicit unauthenticated HTTP(S) proxy for Firefox."""
+    value = proxy_url.strip()
+    if not value:
+        return None
+    parts = urlsplit(value)
+    if parts.scheme not in {"http", "https"} or not parts.hostname or parts.username or parts.password:
+        raise ValueError("Firefox proxy must be an explicit HTTP(S) URL without embedded credentials")
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    hostport = f"{parts.hostname}:{port}"
+    return {"proxyType": "manual", "httpProxy": hostport, "sslProxy": hostport}
+
+
 def classify_block(status: int | None = None, text: str = "", title: str = "") -> str | None:
     if status in STOP_STATUSES:
         return f"http_{status}"
@@ -1058,6 +1071,7 @@ class SeleniumFirefoxAdapter:
         config = config or DEFAULTS
         try:
             from selenium import webdriver
+            from selenium.webdriver.common.proxy import Proxy
             from selenium.webdriver.firefox.options import Options
             from selenium.webdriver.firefox.service import Service
         except ImportError as exc:
@@ -1070,6 +1084,9 @@ class SeleniumFirefoxAdapter:
         user_agent = str(config.get("user_agent") or "")
         if user_agent:
             options.set_preference("general.useragent.override", user_agent)
+        proxy_settings = _firefox_proxy_settings(str(config.get("proxy_url") or ""))
+        if proxy_settings:
+            options.proxy = Proxy(proxy_settings)
         geckodriver_path = str(config.get("geckodriver_path") or "").strip()
         if geckodriver_path and not Path(geckodriver_path).is_absolute():
             geckodriver_path = str(ROOT / geckodriver_path)

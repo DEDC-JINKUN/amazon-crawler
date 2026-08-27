@@ -55,6 +55,16 @@ class _Opener:
 
 
 class HttpAdapterTests(unittest.TestCase):
+    def test_firefox_proxy_settings_use_same_explicit_endpoint(self):
+        worker = load_worker()
+        self.assertEqual(worker._firefox_proxy_settings("http://127.0.0.1:8080"), {"proxyType": "manual", "httpProxy": "127.0.0.1:8080", "sslProxy": "127.0.0.1:8080"})
+        self.assertIsNone(worker._firefox_proxy_settings(""))
+
+    def test_firefox_proxy_settings_reject_embedded_credentials(self):
+        worker = load_worker()
+        with self.assertRaises(ValueError):
+            worker._firefox_proxy_settings("http://user:pass@127.0.0.1:8080")
+
     def test_http_first_fetch_uses_transparent_headers_and_returns_status(self):
         worker = load_worker()
         opener = _Opener(_Response(b"<html><title>ok</title></html>"))
