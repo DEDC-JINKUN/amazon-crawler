@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.73 - 2026-08-27
+
+- 出口探针增加 Amazon 另外两种挑战文案识别：`Enter the characters` 和 `Sorry, we just need to make sure you're not a robot`。
+- 增加挑战文案探针回归。
+
 ## 0.1.72 - 2026-08-27
 
 - `preflight.py` 新增显式 `--probe-egress` 门禁，可在 live 启动前实际调用出口探针；探针失败时直接拒绝运行。

@@ -27,6 +27,8 @@ def _classify_body(status: int, body: bytes) -> str | None:
     for phrase, reason in (
         ("robot check", "robot"),
         ("captcha", "captcha"),
+        ("enter the characters", "captcha"),
+        ("sorry we just need to make sure you're not a robot", "robot"),
         ("automated access", "automated_access"),
         ("access denied", "access_denied"),
         ("too many requests", "too_many_requests"),

@@ -74,6 +74,11 @@ def test_probe_rejects_200_challenge_and_empty_response():
     assert result["ok"] is False
     assert result["block_reason"] == "robot"
 
+    captcha = Opener(Response(status=200, body=b"Enter the characters you see below"))
+    result = module.probe("http://127.0.0.1:8080", "https://example.test", opener_factory=lambda *handlers: captcha)
+    assert result["ok"] is False
+    assert result["block_reason"] == "captcha"
+
     empty = Opener(Response(status=200, body=b""))
     result = module.probe("http://127.0.0.1:8080", "https://example.test", opener_factory=lambda *handlers: empty)
     assert result["ok"] is False
