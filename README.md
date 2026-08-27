@@ -62,3 +62,9 @@ python scripts/collection_api.py --db state/amazon_us.sqlite3
 ```powershell
 python scripts/coverage_report.py --db state/amazon_us.sqlite3 --output data/amazon_us/coverage_report.json
 ```
+
+SQLite 回放到 PostgreSQL（拿到公司 DSN 后执行）：
+
+```powershell
+python scripts/migrate_sqlite_to_postgres.py --sqlite state/amazon_us.sqlite3 --dsn "$env:AMAZON_POSTGRES_DSN"
+```

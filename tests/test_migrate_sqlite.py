@@ -1,0 +1,52 @@
+from __future__ import annotations
+
+import importlib.util
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load(name: str):
+    spec = importlib.util.spec_from_file_location(name, ROOT / "scripts" / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+class MigrationTests(unittest.TestCase):
+    def test_build_payload_maps_sqlite_rows_to_production_keys(self):
+        worker = load("amazon_us_worker")
+        migration = load("migrate_sqlite_to_postgres")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = root / "state.sqlite3"
+            conn = worker.init_db(db)
+            manifest = root / "manifest.csv"
+            manifest.write_text("asin,url,marketplace,source_site_label,source_workbook\nB00RCPDCQU,https://www.amazon.com/dp/B00RCPDCQU,US,test,fixture.csv\n", encoding="utf-8")
+            worker.initialize_manifest(conn, manifest, worker.DEFAULTS)
+            conn.close()
+            payload = migration.build_payload(db, "tenant-a", "own")
+            self.assertEqual(len(payload["asin_master"]), 1)
+            self.assertEqual(payload["asin_master"][0]["subject_type"], "own")
+            self.assertEqual(payload["item_state"][0]["tenant_id"], "tenant-a")
+            self.assertEqual(payload["collection_evidence"], [])
+
+    def test_dry_run_does_not_require_postgres_dsn(self):
+        migration = load("migrate_sqlite_to_postgres")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            worker = load("amazon_us_worker")
+            db = root / "state.sqlite3"
+            conn = worker.init_db(db)
+            manifest = root / "manifest.csv"
+            manifest.write_text("asin,url,marketplace,source_site_label,source_workbook\nB00RCPDCQU,https://www.amazon.com/dp/B00RCPDCQU,US,test,fixture.csv\n", encoding="utf-8")
+            worker.initialize_manifest(conn, manifest, worker.DEFAULTS)
+            conn.close()
+            self.assertEqual(migration.main(["--sqlite", str(db), "--dry-run"]), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
