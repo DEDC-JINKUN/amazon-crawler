@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1 - 2026-08-28
+
+- 实际启动 PostgreSQL tenant-scoped Collection API，验证状态和单 ASIN HTTP 路由均只返回指定租户数据。
+- 补充本机 `amazon_us_qa` 端到端 API 验证记录。
+
 ## 0.2.0 - 2026-08-28
 
 - PostgreSQL repository 、Collection API、验收和对账链路全部支持显式 `tenant_id`，完成多 Agent/多回放批次的读写隔离。

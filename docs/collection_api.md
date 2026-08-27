@@ -31,6 +31,8 @@ DSN 不写入仓库、日志或配置提交；生产环境通过受控环境变�
 
 本机 PostgreSQL 已安装但不知道 CLI 密码时，可先运行 `scripts\bootstrap_postgres.ps1`，交互输入密码执行 schema；脚本默认连接 `127.0.0.1:5432/postgres`，不保存密码。
 
+本机 `amazon_us_qa` 已实际启动 tenant-scoped API 验证：`/v1/jobs/status` 返回 `pending=1891`、`reviews_pending=1`，`/v1/asin/US/B00RCPDCQU` 返回 `tenant_id=qa_latest_20260827`。
+
 schema 初始化后运行 `scripts\replay_postgres.ps1`，可交互输入密码完成 SQLite 回放并调用 PostgreSQL repository 验证；JSONB 字段由迁移工具自动适配，密码仅存在于当前 PowerShell 进程。
 
 ## 路由
