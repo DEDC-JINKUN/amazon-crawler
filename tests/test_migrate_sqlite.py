@@ -47,6 +47,58 @@ class MigrationTests(unittest.TestCase):
             conn.close()
             self.assertEqual(migration.main(["--sqlite", str(db), "--dry-run"]), 0)
 
+    def test_migrate_uses_transactional_db_api_connection(self):
+        worker = load("amazon_us_worker")
+        migration = load("migrate_sqlite_to_postgres")
+
+        class Cursor:
+            def __init__(self):
+                self.executed = []
+                self.batches = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def execute(self, sql):
+                self.executed.append(sql)
+
+            def executemany(self, sql, rows):
+                self.batches.append((sql, list(rows)))
+
+        class Connection:
+            def __init__(self):
+                self.cursor_instance = Cursor()
+                self.committed = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def cursor(self):
+                return self.cursor_instance
+
+            def commit(self):
+                self.committed = True
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = root / "state.sqlite3"
+            conn = worker.init_db(db)
+            manifest = root / "manifest.csv"
+            manifest.write_text("asin,url,marketplace,source_site_label,source_workbook\nB00RCPDCQU,https://www.amazon.com/dp/B00RCPDCQU,US,test,fixture.csv\n", encoding="utf-8")
+            worker.initialize_manifest(conn, manifest, worker.DEFAULTS)
+            conn.close()
+            target = Connection()
+            counts = migration.migrate(db, "postgresql://test", connect=lambda: target)
+            self.assertEqual(counts["asin_master"], 1)
+            self.assertTrue(target.committed)
+            self.assertGreaterEqual(len(target.cursor_instance.batches), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
