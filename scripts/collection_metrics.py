@@ -32,7 +32,7 @@ def _parse_time(value: Any) -> datetime | None:
         return None
 
 
-def build_report(db_path: Path, raw_html_dir: Path | None = None, run_id: str | None = None) -> dict[str, Any]:
+def build_report(db_path: Path, raw_html_dir: Path | None = None, run_id: str | None = None, all_runs: bool = False) -> dict[str, Any]:
     if not db_path.exists():
         raise FileNotFoundError(f"SQLite database not found: {db_path}")
     uri = f"file:{db_path.resolve().as_posix()}?mode=ro"
@@ -41,23 +41,32 @@ def build_report(db_path: Path, raw_html_dir: Path | None = None, run_id: str | 
         conn.row_factory = sqlite3.Row
         evidence_columns = {row[1] for row in conn.execute("PRAGMA table_info(collection_evidence)")}
         transfer_select = "transfer_bytes" if "transfer_bytes" in evidence_columns else "NULL AS transfer_bytes"
-        if run_id is None:
+        if run_id is None and not all_runs:
             row = conn.execute("SELECT run_id FROM collection_evidence ORDER BY id DESC LIMIT 1").fetchone()
             run_id = row["run_id"] if row else None
-        evidence = list(conn.execute(
-            f"SELECT id,asin,url,source_type,http_status,{transfer_select},retrieved_at,error_code,block_reason,raw_html_path FROM collection_evidence WHERE run_id=? ORDER BY id",
-            (run_id,),
-        )) if run_id else []
+        if all_runs:
+            evidence = list(conn.execute(
+                f"SELECT id,asin,url,source_type,http_status,{transfer_select},retrieved_at,error_code,block_reason,raw_html_path FROM collection_evidence ORDER BY id"
+            ))
+            run_id = "all-runs"
+        else:
+            evidence = list(conn.execute(
+                f"SELECT id,asin,url,source_type,http_status,{transfer_select},retrieved_at,error_code,block_reason,raw_html_path FROM collection_evidence WHERE run_id=? ORDER BY id",
+                (run_id,),
+            )) if run_id else []
         asins = sorted({row["asin"] for row in evidence})
+        snapshot_asins: set[str] = set()
         statuses = Counter()
+        table_counts = {}
         if asins:
             marks = ",".join("?" for _ in asins)
             statuses.update(row["status"] for row in conn.execute(f"SELECT status FROM item_state WHERE marketplace='US' AND asin IN ({marks})", asins))
-        table_counts = {}
         for table in TABLES:
             table_counts[table] = conn.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE marketplace='US' AND asin IN ({','.join('?' for _ in asins)})", asins
-            ).fetchone()[0] if asins else 0
+                ).fetchone()[0] if asins else 0
+        if all_runs and asins:
+            snapshot_asins = {row[0] for row in conn.execute("SELECT DISTINCT asin FROM product_snapshot WHERE marketplace='US'")}
     finally:
         conn.close()
     started = _parse_time(evidence[0]["retrieved_at"]) if evidence else None
@@ -105,10 +114,13 @@ def build_report(db_path: Path, raw_html_dir: Path | None = None, run_id: str | 
         for row in evidence
         if _is_product_page(row["url"], row["asin"]) and (row["error_code"] or row["block_reason"])
     }
-    successful_asins = {
-        row["asin"] for row in successful_evidence
-        if _is_product_page(row["url"], row["asin"]) and (row["asin"], row["url"]) not in failed_product_keys
-    }
+    if all_runs:
+        successful_asins = snapshot_asins & set(asins)
+    else:
+        successful_asins = {
+            row["asin"] for row in successful_evidence
+            if _is_product_page(row["url"], row["asin"]) and (row["asin"], row["url"]) not in failed_product_keys
+        }
     return {
         "schema_version": "amazon-us-collection-metrics-v1",
         "run_id": run_id,
@@ -137,9 +149,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db", type=Path, default=Path("state/amazon_us.sqlite3"))
     parser.add_argument("--raw-html-dir", type=Path)
     parser.add_argument("--run-id")
+    parser.add_argument("--all-runs", action="store_true", help="Aggregate all evidence in the database, including resumed runs")
     args = parser.parse_args(argv)
     try:
-        report = build_report(args.db, args.raw_html_dir, args.run_id)
+        report = build_report(args.db, args.raw_html_dir, args.run_id, args.all_runs)
     except (OSError, sqlite3.Error) as exc:
         print(f"error: {exc}")
         return 1

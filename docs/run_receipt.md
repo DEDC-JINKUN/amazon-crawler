@@ -16,3 +16,4 @@
 
 `run_scheduled_windows.bat`、`run_once_windows.bat` 和 `verify_windows.bat` 会自动写入 `data/amazon_us/run_receipt.json`。回执使用临时文件替换，写入中断不会截断上一份回执；读库失败时不覆盖旧回执。回执生成失败不会覆盖已有验收文件；脚本仍会先返回 worker、物化或验收的原始错误码。
 `action_items.failure_details` 同时包含 ASIN、状态、尝试次数、最后错误和阻断原因，方便运营直接重排队或人工复核。
+续跑全量任务时加 `--all-runs`，回执会合并状态库中的所有 run；不加时只统计指定 `--run-id` 或最新 run。对重新启动后的多轮批次，建议优先使用 `--all-runs` 生成统一回执。

@@ -74,6 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", type=Path, default=ROOT / "data" / "amazon_us")
     parser.add_argument("--raw-html-dir", type=Path, required=True)
     parser.add_argument("--run-id")
+    parser.add_argument("--all-runs", action="store_true", help="Aggregate all resumed runs in the database")
     parser.add_argument("--expected-count", type=int)
     parser.add_argument("--target-asins", type=int, default=5800)
     parser.add_argument("--budget-cny", type=float, default=200.0)
@@ -90,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         metrics_module = _load("run_receipt_metrics", ROOT / "scripts" / "collection_metrics.py")
         cost_module = _load("run_receipt_cost", ROOT / "scripts" / "traffic_cost_report.py")
         verification, verification_errors = verifier.verify(args.manifest, args.state, args.output_dir, args.expected_count)
-        collection = metrics_module.build_report(args.state, args.raw_html_dir, args.run_id)
+        collection = metrics_module.build_report(args.state, args.raw_html_dir, args.run_id, args.all_runs)
         cost = cost_module.build_cost_report(
             collection,
             target_asins=args.target_asins,

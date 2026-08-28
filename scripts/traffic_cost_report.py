@@ -156,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db", type=Path, default=Path("state/amazon_us.sqlite3"))
     parser.add_argument("--raw-html-dir", type=Path, required=True)
     parser.add_argument("--run-id")
+    parser.add_argument("--all-runs", action="store_true", help="Aggregate all resumed runs in the database")
     parser.add_argument("--target-asins", type=int, default=5800)
     parser.add_argument("--budget-cny", type=float, default=200.0)
     parser.add_argument("--proxy-usage-before-bytes", type=int)
@@ -166,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--business-units", type=int, help="Count only after the business definition of one data unit is fixed")
     args = parser.parse_args(argv)
     try:
-        collection = build_collection_report(args.db, args.raw_html_dir, args.run_id)
+        collection = build_collection_report(args.db, args.raw_html_dir, args.run_id, args.all_runs)
         report = build_cost_report(
             collection,
             target_asins=args.target_asins,
