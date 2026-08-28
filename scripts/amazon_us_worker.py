@@ -157,6 +157,9 @@ def _firefox_proxy_settings(proxy_url: str) -> dict[str, str] | None:
 def classify_block(status: int | None = None, text: str = "", title: str = "") -> str | None:
     if status in STOP_STATUSES:
         return f"http_{status}"
+    raw_text = text.lower()
+    if any(marker in raw_text for marker in ("awswafcookiedomainlist", "awswafintegration", "token.awswaf.com")):
+        return "waf_challenge"
     if any(tag in text.lower() for tag in ("<script", "<style", "<noscript")):
         text = visible_html_text(text)
     haystack = f"{title}\n{text}".lower()
@@ -767,7 +770,7 @@ def parse_product_html(source_html: str, page_url: str = "") -> dict[str, Any]:
         "review_link": review_link, "review_section_anchor": review_section_anchor,
         "aplus_present": any(x["module_type"] == "aplus" for x in content_modules),
         "media": _parse_media(parser, page_url), "content_modules": content_modules,
-        "block_reason": classify_block(text=body_text, title=_first_text(parser, [{"tag": "title"}])),
+        "block_reason": classify_block(text=source_html, title=_first_text(parser, [{"tag": "title"}])),
     }
 
 
@@ -1059,7 +1062,7 @@ def _write_product_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.R
         canonical = data.get("canonical_url") or ""
         canonical_parts = urlsplit(canonical)
         canonical_host = (canonical_parts.hostname or "").lower().removeprefix("www.")
-        path_match = re.search(r"/dp/([A-Za-z0-9]{10})(?:/|$)", canonical_parts.path)
+        path_match = re.search(r"/(?:dp|clp)/([A-Za-z0-9]{10})(?:/|$)", canonical_parts.path)
         if (
             parsed_asin != asin
             or canonical_parts.scheme != "https"
@@ -1694,6 +1697,7 @@ def run_postgres_actions(
     run_id: str | None = None,
     worker_id: str = "amazon-us-worker",
     lease_seconds: int = 600,
+    product_only: bool = False,
 ) -> int:
     """Run a bounded production batch using PostgreSQL task leases."""
     run_id = run_id or f"run-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
@@ -1703,9 +1707,13 @@ def run_postgres_actions(
     actions = 0
     blocked = False
     while actions < max_actions:
-        task = storage.claim_refresh_task(worker_id, lease_seconds=lease_seconds) if hasattr(storage, "claim_refresh_task") else None
+        task = storage.claim_refresh_task(worker_id, lease_seconds=lease_seconds) if not product_only and hasattr(storage, "claim_refresh_task") else None
         if task is None:
-            task = storage.claim_task(worker_id, lease_seconds=lease_seconds)
+            task = (
+                storage.claim_task(worker_id, lease_seconds=lease_seconds, task_stage="product")
+                if product_only
+                else storage.claim_task(worker_id, lease_seconds=lease_seconds)
+            )
         if task is None:
             break
         refresh_job_id = task.get("job_id")
@@ -1882,7 +1890,7 @@ def run_postgres_actions(
             actions += 1
             continue
         canonical = urlsplit(data.get("canonical_url") or "")
-        path_match = re.search(r"/dp/([A-Za-z0-9]{10})(?:/|$)", canonical.path)
+        path_match = re.search(r"/(?:dp|clp)/([A-Za-z0-9]{10})(?:/|$)", canonical.path)
         if (
             (data.get("asin") or "").upper() != task["asin"]
             or canonical.scheme != "https"
@@ -1976,6 +1984,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--subject-type", choices=("own", "competitor", "candidate"), default="own")
     parser.add_argument("--worker-id", default=f"amazon-us-worker-{os.getpid()}")
     parser.add_argument("--lease-seconds", type=int, default=600)
+    parser.add_argument("--product-only", action="store_true", help="claim only product-stage PostgreSQL tasks")
     return parser
 
 
@@ -2013,7 +2022,8 @@ def run(args: argparse.Namespace) -> int:
         adapter = HttpFirstAdapter(config)
         try:
             action_result = run_postgres_actions(
-                storage, adapter, config, limit=args.limit, worker_id=args.worker_id, lease_seconds=args.lease_seconds,
+                storage, adapter, config, limit=args.limit, worker_id=args.worker_id,
+                lease_seconds=args.lease_seconds, product_only=args.product_only,
             )
             return 3 if action_result == -1 else 0
         finally:
@@ -2045,6 +2055,11 @@ def run(args: argparse.Namespace) -> int:
     return result
 
 
+def validate_runtime_args(args: argparse.Namespace) -> None:
+    if args.product_only and args.backend != "postgres":
+        raise ValueError("--product-only is supported only with the PostgreSQL backend")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.limit is not None and args.limit < 1:
@@ -2054,6 +2069,7 @@ def main(argv: list[str] | None = None) -> int:
         print("错误: --lease-seconds 必须为正整数", file=sys.stderr)
         return 2
     try:
+        validate_runtime_args(args)
         return run(args)
     except (OSError, csv.Error, sqlite3.Error, ValueError, RuntimeError, KeyError) as exc:
         print(f"错误: {exc}", file=sys.stderr)

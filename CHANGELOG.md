@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- 新增 loopback-only、PostgreSQL只读的 Amazon Collection Console，集中展示批次、任务异常、商品、媒体URL、top reviews、内容模块、evidence和流量；前端5秒刷新不访问Amazon。
+- PostgreSQL Worker新增显式 `--product-only` 阶段过滤；SQLite后端现在拒绝该不兼容参数，不再静默处理评论任务。
+- 商品canonical校验兼容Amazon `/clp/{同ASIN}`，仍拒绝跳转到不同ASIN。
+- 出口探针、Worker和解析器统一识别HTTP 202 AWS WAF挑战页，避免把挑战误报为健康或普通字段缺失。
+
 ## 0.3.0 - 2026-08-28
 
 - 正式 Worker 改为直接使用 PostgreSQL：任务领取采用 `FOR UPDATE SKIP LOCKED`，支持租约令牌、租约过期回收、租户与自有/竞品隔离。

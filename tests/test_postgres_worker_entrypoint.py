@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -133,6 +135,15 @@ class RefreshStorage(Storage):
         self.finished.append((job_id, status))
 
 
+class ProductOnlyStorage(Storage):
+    def claim_refresh_task(self, worker_id, lease_seconds=None):
+        raise AssertionError("product-only batches must not claim refresh tasks")
+
+    def claim_task(self, worker_id, lease_seconds=None, task_stage=None):
+        assert task_stage == "product"
+        return super().claim_task(worker_id, lease_seconds)
+
+
 class PostalFallbackAdapter(Adapter):
     def __init__(self):
         self.calls = []
@@ -165,6 +176,24 @@ class MissingTitleAdapter(Adapter):
         </body></html>
         """, 200
 
+
+class SameAsinClpCanonicalAdapter(Adapter):
+    def fetch(self, url):
+        return """
+        <html><head><link rel="canonical" href="https://www.amazon.com/clp/B00RCPDCQU"></head><body>
+          <input id="ASIN" value="B00RCPDCQU"><span id="productTitle">Example</span>
+        </body></html>
+        """, 200
+
+
+class DifferentAsinCanonicalAdapter(Adapter):
+    def fetch(self, url):
+        return """
+        <html><head><link rel="canonical" href="https://www.amazon.com/example/dp/B00RCPDI50"></head><body>
+          <input id="ASIN" value="B00RCPDCQU"><span id="productTitle">Replacement</span>
+        </body></html>
+        """, 200
+
 def test_postgres_runner_claims_and_persists_a_product_without_sqlite():
     worker = load_worker()
     storage = Storage()
@@ -175,6 +204,26 @@ def test_postgres_runner_claims_and_persists_a_product_without_sqlite():
     assert len(storage.saved) == 1
     assert storage.saved[0]["next_status"] == "succeeded"
     assert storage.saved[0]["evidence"]["transfer_bytes"] == 321
+
+
+def test_postgres_runner_accepts_same_asin_clp_canonical():
+    worker = load_worker()
+    storage = Storage()
+    config = dict(worker.DEFAULTS)
+    config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}})
+
+    assert worker.run_postgres_actions(storage, SameAsinClpCanonicalAdapter(), config, limit=1, worker_id="worker-a") == 1
+    assert storage.saved[0]["next_status"] == "succeeded"
+
+
+def test_postgres_runner_rejects_canonical_for_different_asin():
+    worker = load_worker()
+    storage = Storage()
+    config = dict(worker.DEFAULTS)
+    config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}})
+
+    assert worker.run_postgres_actions(storage, DifferentAsinCanonicalAdapter(), config, limit=1, worker_id="worker-a") == 1
+    assert storage.saved[0]["reason"] == "asin_mismatch"
 
 
 def test_worker_parser_exposes_explicit_postgres_runtime_options():
@@ -190,6 +239,33 @@ def test_worker_parser_exposes_explicit_postgres_runtime_options():
     assert args.worker_id == "worker-a"
     assert args.lease_seconds == 600
     assert worker.build_parser().parse_args([]).backend == "postgres"
+
+
+def test_worker_parser_supports_product_only_batches():
+    worker = load_worker()
+    args = worker.build_parser().parse_args(["--product-only"])
+
+    assert args.product_only is True
+
+
+def test_product_only_rejects_legacy_sqlite_backend():
+    worker = load_worker()
+    args = worker.build_parser().parse_args(["--backend", "sqlite", "--product-only"])
+
+    with pytest.raises(ValueError, match="PostgreSQL"):
+        worker.validate_runtime_args(args)
+
+
+def test_postgres_runner_product_only_claims_only_product_stage():
+    worker = load_worker()
+    storage = ProductOnlyStorage()
+    config = dict(worker.DEFAULTS)
+    config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}})
+
+    assert worker.run_postgres_actions(
+        storage, Adapter(), config, limit=1, worker_id="worker-a", product_only=True
+    ) == 1
+    assert storage.saved[0]["next_status"] == "succeeded"
 
 
 def test_postgres_runner_persists_review_checkpoint_without_sqlite():

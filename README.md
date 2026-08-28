@@ -81,6 +81,16 @@ python scripts/collection_api.py --backend postgres --dsn "$env:AMAZON_US_POSTGR
 
 默认只监听 `127.0.0.1`；Agent 通过它读取快照、任务状态、最近证据并提交按需刷新请求。
 
+本机只读运营控制台：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\run_console_windows.ps1 `
+  -TenantId real_batch_20260828_500_04 `
+  -RawHtmlDir data\postgres_real_batch_20260828_500_04\raw_html
+```
+
+打开 `http://127.0.0.1:8770`。控制台只查询 PostgreSQL 和本地 evidence，不访问 Amazon，也不提供任务修改操作。完整说明见 [`docs/collection_console.md`](docs/collection_console.md)。
+
 正式运行前检查：
 
 ```powershell

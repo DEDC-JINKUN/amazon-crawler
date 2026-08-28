@@ -85,6 +85,25 @@ def test_probe_rejects_200_challenge_and_empty_response():
     assert result["block_reason"] == "empty_response"
 
 
+def test_probe_rejects_202_aws_waf_challenge():
+    module = load_module()
+    body = b"""
+    <script>window.awsWafCookieDomainList = []; AwsWafIntegration.getToken();</script>
+    <script src="https://example.token.awswaf.com/challenge.js"></script>
+    <div id="challenge-container"></div>
+    """
+    opener = Opener(Response(status=202, body=body))
+
+    result = module.probe(
+        "http://127.0.0.1:8080",
+        "https://www.amazon.com/dp/B07KSYGZPD",
+        opener_factory=lambda *handlers: opener,
+    )
+
+    assert result["ok"] is False
+    assert result["block_reason"] == "waf_challenge"
+
+
 def test_probe_rejects_embedded_credentials_and_partial_auth():
     module = load_module()
     with pytest.raises(ValueError, match="without embedded credentials"):

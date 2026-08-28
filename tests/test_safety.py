@@ -37,11 +37,45 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual(evidence[0], "asin_mismatch")
             conn.close()
 
+    def test_same_asin_clp_canonical_is_accepted(self):
+        worker = load("amazon_us_worker")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.csv"
+            manifest.write_text("\ufeffasin,url,marketplace,source_site_label,source_workbook\nB00RCPDCQU,https://www.amazon.com/dp/B00RCPDCQU,US,x,x\n", encoding="utf-8")
+            conn = worker.init_db(root / "state.sqlite3")
+            worker.initialize_manifest(conn, manifest)
+            worker._set_status(conn, "US", "B00RCPDCQU", "running", reason="test")
+            worker._write_product_action(
+                conn,
+                "test-run",
+                conn.execute("SELECT * FROM item_state").fetchone(),
+                {"asin": "B00RCPDCQU", "canonical_url": "https://www.amazon.com/clp/B00RCPDCQU", "title": "Example"},
+                "fixture",
+                200,
+                None,
+            )
+            self.assertEqual(conn.execute("SELECT status FROM item_state").fetchone()[0], "succeeded")
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM product_snapshot").fetchone()[0], 1)
+            conn.close()
+
     def test_block_text_ignores_script_style_noscript(self):
         worker = load("amazon_us_worker")
         html = '<html><head><script>var message = "captcha";</script><style>.captcha{}</style><noscript>captcha</noscript><title>Normal product</title></head><body><input id="ASIN" value="B00RCPDCQU"><link rel="canonical" href="https://www.amazon.com/dp/B00RCPDCQU"><h1 id="productTitle">Normal product</h1></body></html>'
         result = worker.parse_product_html(html, "https://www.amazon.com/dp/B00RCPDCQU")
         self.assertIsNone(result["block_reason"])
+
+    def test_aws_waf_challenge_is_blocked_before_visible_text_filtering(self):
+        worker = load("amazon_us_worker")
+        html = """
+        <html><head>
+          <script>window.awsWafCookieDomainList = []; AwsWafIntegration.getToken();</script>
+          <script src="https://example.token.awswaf.com/challenge.js"></script>
+        </head><body><div id="challenge-container"></div></body></html>
+        """
+
+        self.assertEqual(worker.classify_block(202, html), "waf_challenge")
+        self.assertEqual(worker.parse_product_html(html, "https://www.amazon.com/dp/B07KSYGZPD")["block_reason"], "waf_challenge")
 
     def test_canonical_must_be_amazon_us(self):
         worker = load("amazon_us_worker")

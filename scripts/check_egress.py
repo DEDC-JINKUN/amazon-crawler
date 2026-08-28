@@ -24,6 +24,8 @@ def _classify_body(status: int, body: bytes) -> str | None:
     if not body:
         return "empty_response"
     text = body[:1_000_000].decode("utf-8", errors="ignore").lower()
+    if any(marker in text for marker in ("awswafcookiedomainlist", "awswafintegration", "token.awswaf.com")):
+        return "waf_challenge"
     for phrase, reason in (
         ("robot check", "robot"),
         ("captcha", "captcha"),

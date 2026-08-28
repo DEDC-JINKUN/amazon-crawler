@@ -130,6 +130,21 @@ def test_claim_task_is_atomic_and_returns_lease():
     assert "attempts=s.attempts+1" not in sql.replace(" ", "")
 
 
+def test_claim_task_can_filter_to_product_stage():
+    storage = load_storage()
+    connection = ScriptedConnection([[{"asin": "B00RCPDCQU", "status": "running", "lease_token": "token-1"}]])
+    repository = storage.PostgresWorkerStorage(
+        "postgresql://example", tenant_id="tenant-a", subject_type="own", connect=lambda: connection
+    )
+
+    task = repository.claim_task("worker-1", lease_seconds=120, task_stage="product")
+
+    assert task["asin"] == "B00RCPDCQU"
+    sql, params = connection.cursor_instance.executed[0]
+    assert "s.task_stage=%s" in sql.replace(" ", "")
+    assert "product" in params
+
+
 def test_manifest_transaction_rolls_back_as_one_unit_on_database_failure():
     storage = load_storage()
     connection = FailingConnection()

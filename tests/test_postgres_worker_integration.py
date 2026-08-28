@@ -23,6 +23,16 @@ def load_storage():
     return module
 
 
+def load_console():
+    spec = importlib.util.spec_from_file_location(
+        "collection_console_integration", ROOT / "scripts" / "collection_console.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
 @pytest.mark.skipif(not DSN, reason="AMAZON_TEST_POSTGRES_DSN is not configured")
 def test_two_workers_claim_distinct_tasks_from_real_postgres():
     import psycopg
@@ -159,6 +169,20 @@ def test_two_workers_claim_distinct_tasks_from_real_postgres():
             ).fetchone() == ("queued",)
         assert repository.enqueue_due_refreshes(min_age_hours=1, limit=10) == 1
         assert repository.enqueue_due_refreshes(min_age_hours=1, limit=10) == 0
+
+        console = load_console().PostgresConsoleRepository(DSN, tenant_id)
+        overview = console.load_overview()
+        assert overview["progress"]["total"] == 2
+        assert overview["progress"]["successful_products"] == 1
+        assert overview["table_counts"]["media"] == 1
+        listing = console.list_items(limit=10)
+        assert listing["total"] == 2
+        assert {item["asin"] for item in listing["items"]} == {"B00RCPDCQU", "B00RCPDI50"}
+        detail = console.load_detail("B00RCPDCQU")
+        assert detail["product"]["title"] == "Integration product"
+        assert len(detail["media"]) == 1
+        assert len(detail["content_modules"]) == 1
+        assert detail["evidence"][0]["run_id"] == "integration-run"
     finally:
         with psycopg.connect(DSN) as connection:
             for table in (

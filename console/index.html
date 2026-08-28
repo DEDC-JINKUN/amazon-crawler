@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Amazon Collection Console</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">READ-ONLY · LOCAL POSTGRESQL</p>
+      <h1>Amazon Collection Console</h1>
+      <p id="tenantLabel" class="muted">正在连接指定批次…</p>
+    </div>
+    <div class="topbar-actions">
+      <span id="liveBadge" class="live-badge"><i></i> 实时</span>
+      <button id="apiKeyButton" class="ghost-button" type="button">API Key</button>
+      <button id="refreshButton" class="primary-button" type="button">立即刷新</button>
+    </div>
+  </header>
+
+  <main>
+    <div id="errorBanner" class="error-banner" hidden></div>
+
+    <section class="metric-grid" aria-label="批次指标">
+      <article class="metric-card"><span>进度</span><strong id="progressMetric">—</strong><small id="progressSub">—</small></article>
+      <article class="metric-card success"><span>有效商品</span><strong id="productsMetric">—</strong><small>通过商品质量门</small></article>
+      <article class="metric-card danger"><span>Blocked</span><strong id="blockedMetric">—</strong><small>访问控制事件</small></article>
+      <article class="metric-card warning"><span>Failed</span><strong id="failedMetric">—</strong><small>商品或评论失败</small></article>
+      <article class="metric-card"><span>页面 Action</span><strong id="actionsMetric">—</strong><small>evidence记录</small></article>
+      <article class="metric-card"><span>数据库记录</span><strong id="rowsMetric">—</strong><small>当前标准化记录</small></article>
+      <article class="metric-card"><span>Raw HTML</span><strong id="rawMetric">—</strong><small id="rawSub">—</small></article>
+      <article class="metric-card"><span>已知传输</span><strong id="transferMetric">—</strong><small id="transferSub">—</small></article>
+    </section>
+
+    <section class="overview-grid">
+      <article class="panel">
+        <div class="panel-title"><div><p class="eyebrow">STATE</p><h2>任务状态</h2></div><span id="observedAt" class="muted">—</span></div>
+        <div id="statusList" class="status-list"></div>
+      </article>
+      <article class="panel">
+        <div class="panel-title"><div><p class="eyebrow">SIGNALS</p><h2>错误与阻断</h2></div></div>
+        <div class="signal-columns">
+          <div><h3>错误</h3><div id="errorList" class="chip-list"></div></div>
+          <div><h3>阻断</h3><div id="blockList" class="chip-list"></div></div>
+          <div><h3>来源</h3><div id="sourceList" class="chip-list"></div></div>
+        </div>
+      </article>
+      <article class="panel">
+        <div class="panel-title"><div><p class="eyebrow">RUNS</p><h2>最近运行</h2></div></div>
+        <div id="runList" class="run-list"></div>
+      </article>
+    </section>
+
+    <section class="panel tasks-panel">
+      <div class="panel-title responsive-title">
+        <div><p class="eyebrow">OPERATIONS</p><h2>任务与异常</h2></div>
+        <form id="filterForm" class="filters">
+          <input id="queryInput" type="search" placeholder="ASIN、标题或错误">
+          <select id="statusFilter"><option value="">全部状态</option><option>blocked</option><option>failed</option><option>running</option><option>pending</option><option>reviews_pending</option><option>succeeded</option></select>
+          <select id="stageFilter"><option value="">全部阶段</option><option value="product">product</option><option value="reviews">reviews</option><option value="complete">complete</option></select>
+          <button class="ghost-button" type="submit">筛选</button>
+        </form>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>ASIN</th><th>商品</th><th>状态</th><th>阶段</th><th>来源</th><th>HTTP</th><th>错误</th><th>更新时间</th></tr></thead>
+          <tbody id="taskRows"></tbody>
+        </table>
+      </div>
+      <p id="taskSummary" class="muted table-summary">—</p>
+    </section>
+  </main>
+
+  <aside id="detailDrawer" class="drawer" aria-hidden="true">
+    <div class="drawer-head"><div><p class="eyebrow">ASIN DETAIL</p><h2 id="detailTitle">—</h2></div><button id="closeDrawer" type="button" class="icon-button" aria-label="关闭">×</button></div>
+    <div id="detailBody" class="drawer-body"></div>
+  </aside>
+  <div id="drawerBackdrop" class="backdrop" hidden></div>
+
+  <footer>只读控制台 · 5秒轮询本机数据库 · 不访问Amazon · 不执行原始HTML</footer>
+  <script src="/app.js" defer></script>
+</body>
+</html>

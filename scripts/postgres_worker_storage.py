@@ -127,19 +127,28 @@ class PostgresWorkerStorage:
                 raise
         return count
 
-    def claim_task(self, worker_id: str, *, lease_seconds: int | None = None) -> dict[str, Any] | None:
+    def claim_task(
+        self,
+        worker_id: str,
+        *,
+        lease_seconds: int | None = None,
+        task_stage: str | None = None,
+    ) -> dict[str, Any] | None:
         """Atomically claim one eligible task using row locking and a lease token."""
         if not worker_id or not worker_id.strip():
             raise ValueError("worker_id is required")
         seconds = int(lease_seconds if lease_seconds is not None else self.default_lease_seconds)
         if seconds <= 0:
             raise ValueError("lease_seconds must be positive")
+        stage = task_stage.strip() if task_stage else None
+        if stage not in {None, "product", "reviews"}:
+            raise ValueError("task_stage must be product or reviews")
+        stage_clause = "AND s.task_stage=%s" if stage else ""
         token = uuid.uuid4().hex
         with self._connect_factory() as conn:
             try:
                 with conn.cursor() as cursor:
-                    cursor.execute(
-                        """
+                    sql = f"""
                         WITH candidate AS (
                           SELECT s.tenant_id, s.marketplace, s.asin, s.subject_type
                           FROM amazon_us.item_state s
@@ -149,6 +158,7 @@ class PostgresWorkerStorage:
                             AND ((s.status IN ('pending','reviews_pending'))
                               OR (s.status='failed' AND s.attempts < s.max_attempts))
                             AND (s.next_retry_at IS NULL OR s.next_retry_at <= CURRENT_TIMESTAMP)
+                            {stage_clause}
                           ORDER BY m.priority DESC, s.updated_at, s.asin
                           FOR UPDATE SKIP LOCKED
                           LIMIT 1
@@ -169,9 +179,12 @@ class PostgresWorkerStorage:
                           FROM claimed
                         )
                         SELECT * FROM claimed
-                        """,
-                        (self.tenant_id, self.subject_type, token, worker_id.strip(), seconds),
-                    )
+                        """
+                    params: list[Any] = [self.tenant_id, self.subject_type]
+                    if stage:
+                        params.append(stage)
+                    params.extend([token, worker_id.strip(), seconds])
+                    cursor.execute(sql, tuple(params))
                     task = self._as_dict(cursor.fetchone())
                 conn.commit()
             except Exception:
