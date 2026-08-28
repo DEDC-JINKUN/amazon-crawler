@@ -177,6 +177,7 @@ def test_two_workers_claim_distinct_tasks_from_real_postgres():
         assert repository.enqueue_due_refreshes(min_age_hours=1, limit=10) == 0
 
         console = load_console().PostgresConsoleRepository(DSN, tenant_id)
+        assert console.load_identity() == {"tenant_id": tenant_id, "task_count": 2}
         overview = console.load_overview()
         assert overview["progress"]["total"] == 2
         assert overview["progress"]["successful_products"] == 1

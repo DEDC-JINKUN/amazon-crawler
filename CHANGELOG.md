@@ -8,6 +8,8 @@
 - 出口探针、Worker和解析器统一识别HTTP 202 AWS WAF挑战页，避免把挑战误报为健康或普通字段缺失。
 - 控制台新增按 `run_id` 的“本次运行结果”，区分长期任务与本次action；网络失败也写不可变run evidence，旧缺口以明确的时间推断标记补充。
 - 成功商品事务强制清除历史 `last_error`、`block_reason` 和 `next_retry_at`，避免成功任务继续显示旧错误。
+- 新增Windows统一入口 `crawler.ps1`：probe/run/status/console/stop、显式run_id、preflight、PID+StartTime单实例锁、日志、receipt和大批量确认门禁。
+- 快捷入口使用named mutex消除并发竞态、Windows kill-on-close Job Object托管完整进程树，并通过Console `/readyz`校验tenant/raw目录；preflight诊断持久化到run目录。
 
 ## 0.3.0 - 2026-08-28
 

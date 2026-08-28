@@ -180,6 +180,15 @@ class PostgresConsoleRepository:
             "last_evidence_at": evidence.get("last_evidence_at"),
         }
 
+    def load_identity(self) -> dict[str, Any]:
+        with self._connect() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) AS count FROM amazon_us.item_state WHERE tenant_id=%s",
+                (self.tenant_id,),
+            )
+            task_count = int(cursor.fetchone()["count"])
+        return {"tenant_id": self.tenant_id, "task_count": task_count}
+
     def list_items(
         self,
         *,
@@ -445,6 +454,17 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         if path == "/healthz":
             self._send_json(HTTPStatus.OK, {"ok": True, "schema_version": "amazon-us-console-v1"})
+            return
+        if path == "/readyz":
+            try:
+                identity = self.server.repository.load_identity()
+                raw_html_dir = str(self.server.raw_html_dir.resolve()) if self.server.raw_html_dir else None
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"ok": True, "schema_version": "amazon-us-console-v1", **identity, "raw_html_dir": raw_html_dir},
+                )
+            except Exception:
+                self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "database_unavailable"})
             return
         if not path.startswith("/api/"):
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "route_not_found"})

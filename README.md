@@ -46,6 +46,30 @@ python -m pytest tests -q
 
 完整步骤、环境变量和故障说明见 [`docs/postgres_production_worker.md`](docs/postgres_production_worker.md)。正式入口不会读取 SQLite，也不会把数据库密码写入仓库。
 
+Windows本机推荐使用统一控制入口：
+
+```powershell
+.\crawler.ps1 probe
+.\crawler.ps1 run -Limit 10
+.\crawler.ps1 status
+.\crawler.ps1 console
+.\crawler.ps1 stop
+```
+
+它自动处理隐藏密码、preflight、run_id、单实例锁、日志、receipt和只读控制台。超过100个action需要显式 `-ConfirmLargeBatch`。完整说明见 [`docs/crawler_control.md`](docs/crawler_control.md)。
+
+Windows本机推荐使用统一控制入口：
+
+```powershell
+.\crawler.ps1 probe
+.\crawler.ps1 run -Limit 10
+.\crawler.ps1 status
+.\crawler.ps1 console
+.\crawler.ps1 stop
+```
+
+它自动处理隐藏密码、preflight、run_id、单实例锁、日志、receipt和只读控制台。超过100个action需要显式 `-ConfirmLargeBatch`。完整说明见 [`docs/crawler_control.md`](docs/crawler_control.md)。
+
 ```powershell
 $env:AMAZON_US_POSTGRES_DSN = 'host=127.0.0.1 port=5432 dbname=postgres user=postgres'
 $env:PGPASSWORD = '仅在当前 PowerShell 会话填写'

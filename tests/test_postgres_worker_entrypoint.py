@@ -243,9 +243,10 @@ def test_worker_parser_exposes_explicit_postgres_runtime_options():
 
 def test_worker_parser_supports_product_only_batches():
     worker = load_worker()
-    args = worker.build_parser().parse_args(["--product-only"])
+    args = worker.build_parser().parse_args(["--product-only", "--run-id", "run-control-1"])
 
     assert args.product_only is True
+    assert args.run_id == "run-control-1"
 
 
 def test_product_only_rejects_legacy_sqlite_backend():
@@ -253,6 +254,14 @@ def test_product_only_rejects_legacy_sqlite_backend():
     args = worker.build_parser().parse_args(["--backend", "sqlite", "--product-only"])
 
     with pytest.raises(ValueError, match="PostgreSQL"):
+        worker.validate_runtime_args(args)
+
+
+def test_run_id_rejects_unsafe_characters():
+    worker = load_worker()
+    args = worker.build_parser().parse_args(["--run-id", "run id/unsafe"])
+
+    with pytest.raises(ValueError, match="run-id"):
         worker.validate_runtime_args(args)
 
 

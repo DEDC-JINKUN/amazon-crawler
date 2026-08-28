@@ -36,6 +36,9 @@ class Repository:
             "progress": {"total": 3, "processed": 1},
         }
 
+    def load_identity(self):
+        return {"tenant_id": self.tenant_id, "task_count": 3}
+
     def list_items(self, *, status=None, stage=None, query=None, limit=100, offset=0):
         self.list_args = {
             "status": status,
@@ -110,6 +113,11 @@ def test_console_serves_static_ui_with_security_headers():
             assert response.headers["Cache-Control"] == "no-store"
         with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/app.js", timeout=2) as response:
             assert response.headers["Content-Type"].startswith("text/javascript")
+        with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/readyz", timeout=2) as response:
+            ready = json.loads(response.read())
+            assert ready["ok"] is True
+            assert ready["tenant_id"] == "tenant-console"
+            assert ready["task_count"] == 3
     finally:
         stop_server(server, thread)
 

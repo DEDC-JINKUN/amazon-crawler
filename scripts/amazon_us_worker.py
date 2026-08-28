@@ -1995,6 +1995,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--worker-id", default=f"amazon-us-worker-{os.getpid()}")
     parser.add_argument("--lease-seconds", type=int, default=600)
     parser.add_argument("--product-only", action="store_true", help="claim only product-stage PostgreSQL tasks")
+    parser.add_argument("--run-id", help="explicit run identifier for logs and evidence")
     return parser
 
 
@@ -2033,7 +2034,7 @@ def run(args: argparse.Namespace) -> int:
         try:
             action_result = run_postgres_actions(
                 storage, adapter, config, limit=args.limit, worker_id=args.worker_id,
-                lease_seconds=args.lease_seconds, product_only=args.product_only,
+                lease_seconds=args.lease_seconds, product_only=args.product_only, run_id=args.run_id,
             )
             return 3 if action_result == -1 else 0
         finally:
@@ -2068,6 +2069,10 @@ def run(args: argparse.Namespace) -> int:
 def validate_runtime_args(args: argparse.Namespace) -> None:
     if args.product_only and args.backend != "postgres":
         raise ValueError("--product-only is supported only with the PostgreSQL backend")
+    if args.run_id and args.backend != "postgres":
+        raise ValueError("--run-id is supported only with the PostgreSQL backend")
+    if args.run_id and not re.fullmatch(r"[A-Za-z0-9_-]{1,120}", args.run_id):
+        raise ValueError("--run-id must contain 1-120 letters, digits, underscores, or hyphens")
 
 
 def main(argv: list[str] | None = None) -> int:
