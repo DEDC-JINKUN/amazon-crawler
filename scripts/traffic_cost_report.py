@@ -53,6 +53,18 @@ def build_cost_report(
     saved_body_bytes = int(collection.get("bytes_total") or 0)
     transfer_bytes = int(collection.get("transfer_bytes_total") or 0)
     denominator = successful_asins
+    evidence_pages = int(collection.get("evidence_count") or 0)
+    table_counts = {str(key): int(value or 0) for key, value in (collection.get("table_counts") or {}).items()}
+    normalized_rows = sum(table_counts.values())
+
+    def _scale(observed: int, definition: str) -> dict[str, Any]:
+        return {
+            "definition": definition,
+            "observed": observed,
+            "per_successful_asin": round(observed / denominator, 4) if denominator else None,
+            "projected_for_target_asins": round(observed / denominator * target_asins, 2) if denominator else None,
+        }
+
     result: dict[str, Any] = {
         "schema_version": "amazon-us-traffic-cost-v1",
         "run_id": collection.get("run_id"),
@@ -75,6 +87,21 @@ def build_cost_report(
             "projected_transfer_gib_for_target_asins": round(transfer_bytes / denominator * target_asins / (1024 ** 3), 4) if transfer_bytes and denominator else None,
             "transfer_bytes_missing_count": int(collection.get("transfer_bytes_missing_count") or 0),
             "is_proxy_bill": False,
+        },
+        "scale_estimates": {
+            "pages": _scale(evidence_pages, "evidence/page actions in this run"),
+            "asins": _scale(successful_asins, "ASINs with a validated product page"),
+            "database_rows": _scale(normalized_rows, "current normalized rows for ASINs touched by this run; not a delta log"),
+            "field_values": ({
+                **_scale(int(business_units), "business-defined non-empty field values"),
+                "business_definition_required": True,
+            } if business_units is not None else {
+                "definition": "business-defined non-empty field values",
+                "observed": None,
+                "per_successful_asin": None,
+                "projected_for_target_asins": None,
+                "business_definition_required": True,
+            }),
         },
         "proxy_bill_measurement": None,
     }

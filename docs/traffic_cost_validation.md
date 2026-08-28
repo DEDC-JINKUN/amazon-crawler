@@ -84,3 +84,4 @@ HTTP 组内再分为 gzip 和 identity 两组，只更改 `http_accept_encoding`
 4. 500–1,000 条生产型样本的线性外推与第二批实测误差不超过 20%。
 
 HTTP 压缩、评论页上限、浏览器子资源策略和重试比例应通过 A/B 实测决定，不在没有代理账单证据时宣称已达到目标。
+`traffic_cost_report.py` 的 `scale_estimates` 同时保留四种口径：`pages` 是 evidence/page action，`asins` 是通过商品页校验的 ASIN，`database_rows` 是本批触及 ASIN 的标准化表行总数，`field_values` 只有业务已定义并传入 `--business-units` 时才有值。四种数字都会输出观测值、每个成功 ASIN 平均值和 5,800 个 ASIN 外推值；数据库表行是当前快照行数，不等于变更增量。

@@ -20,7 +20,7 @@ def load_module():
 
 def test_build_cost_report_uses_proxy_dashboard_delta() -> None:
     report = load_module().build_cost_report(
-        {"run_id": "run-1", "success_page_count": 90, "unique_asin_count": 100, "unique_successful_asin_count": 90, "bytes_total": 150_000_000, "transfer_bytes_total": 200_000_000},
+        {"run_id": "run-1", "evidence_count": 100, "success_page_count": 90, "unique_asin_count": 100, "unique_successful_asin_count": 90, "bytes_total": 150_000_000, "transfer_bytes_total": 200_000_000, "table_counts": {"product_snapshot": 90, "media_asset": 180}},
         target_asins=5800,
         budget_cny=200,
         proxy_usage_before_bytes=10_000_000_000,
@@ -37,6 +37,9 @@ def test_build_cost_report_uses_proxy_dashboard_delta() -> None:
     assert proxy["max_asins_with_budget"] == 18_000
     assert proxy["cost_cny_per_million_business_units"] == 50.0
     assert proxy["proxy_to_saved_body_ratio"] == pytest.approx(1.3333)
+    assert report["scale_estimates"]["pages"]["projected_for_target_asins"] == pytest.approx(6444.44)
+    assert report["scale_estimates"]["database_rows"]["observed"] == 270
+    assert report["scale_estimates"]["field_values"]["observed"] == 20_000
 
 
 def test_build_cost_report_requires_complete_usage_pair() -> None:
@@ -56,6 +59,7 @@ def test_local_body_projection_is_not_labeled_as_proxy_bill() -> None:
     assert report["local_body_estimate"]["mib_per_unique_asin"] == 1.0
     assert report["local_body_estimate"]["is_proxy_bill"] is False
     assert report["proxy_bill_measurement"] is None
+    assert report["scale_estimates"]["field_values"]["observed"] is None
 
 
 def test_actual_charge_and_fixed_cost_override_flat_rate_estimate() -> None:
