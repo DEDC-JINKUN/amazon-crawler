@@ -1,4 +1,4 @@
-const state = { overview: null, items: [], timer: null, loading: false };
+const state = { overview: null, items: [], selectedRun: '', timer: null, loading: false };
 const $ = (id) => document.getElementById(id);
 const number = (value) => new Intl.NumberFormat('zh-CN').format(Number(value || 0));
 const dateTime = (value) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
@@ -70,9 +70,51 @@ function renderOverview(data) {
   for (const run of data.recent_runs || []) {
     const node = text('div', '', 'run-item');
     node.append(text('strong', run.run_id), text('small', `${number(run.actions)} actions · ${dateTime(run.ended_at)} · blocked ${number(run.blocked)}`));
+    node.tabIndex = 0; node.addEventListener('click', () => selectRun(run.run_id));
     runs.append(node);
   }
   if (!(data.recent_runs || []).length) runs.append(text('span', '暂无运行', 'muted'));
+}
+
+function renderRun(data) {
+  state.selectedRun = data.run_id;
+  $('runSummary').textContent = `${data.run_id} · ${number(data.items.length)}项（evidence ${number(data.recorded_actions)}，历史推断 ${number(data.inferred_actions)}）· ${dateTime(data.started_at)} → ${dateTime(data.ended_at)} · 已知传输 ${bytes(data.known_transfer_bytes)}`;
+  $('runWarning').textContent = data.inferred_actions ? '⚠ 历史网络失败没有run evidence；黄色归属为按本run时间窗口推断。新运行已永久修复。' : '全部结果均有不可变run evidence。';
+  const body = $('runRows'); clear(body);
+  for (const item of data.items || []) {
+    const row = document.createElement('tr'); row.dataset.asin = item.asin;
+    row.append(taskCell(item.asin, 'asin'));
+    const outcome = document.createElement('td'); outcome.append(text('span', item.outcome, `status-badge ${item.outcome}`)); row.append(outcome);
+    row.append(taskCell(item.title || '—', 'product-cell'), taskCell(item.source_type), taskCell(item.http_status));
+    const runReason = item.error_code || item.block_reason || (item.attribution === 'evidence' ? '' : item.last_error) || '—';
+    row.append(taskCell(runReason, 'product-cell'));
+    const attribution = document.createElement('td'); attribution.append(text('span', item.attribution === 'evidence' ? 'evidence' : '时间推断', `status-badge ${item.attribution === 'evidence' ? '' : 'inferred'}`)); row.append(attribution);
+    row.append(taskCell(dateTime(item.retrieved_at || item.updated_at)));
+    row.addEventListener('click', () => openDetail(item.asin)); body.append(row);
+  }
+}
+
+async function loadRun(runId) {
+  if (!runId) return;
+  renderRun(await request(`/api/runs/${encodeURIComponent(runId)}`));
+}
+
+async function selectRun(runId) {
+  state.selectedRun = runId;
+  $('runSelector').value = runId;
+  try { await loadRun(runId); }
+  catch (error) { $('runWarning').textContent = `运行详情读取失败：${error.message}`; }
+}
+
+async function loadRuns() {
+  const data = await request('/api/runs?limit=20');
+  const selector = $('runSelector');
+  const desired = state.selectedRun || selector.value || data.items?.[0]?.run_id || '';
+  clear(selector); selector.append(new Option('选择 run_id', ''));
+  for (const run of data.items || []) selector.append(new Option(`${run.run_id} · ${run.evidence_actions} evidence`, run.run_id));
+  if (desired && (data.items || []).some((run) => run.run_id === desired)) {
+    selector.value = desired; await loadRun(desired);
+  }
 }
 
 function taskCell(value, className = '') { const td = text('td', value ?? '—', className); return td; }
@@ -141,7 +183,7 @@ async function loadItems() {
 async function refresh() {
   if (state.loading) return; state.loading = true;
   try {
-    const [overview] = await Promise.all([request('/api/overview'), loadItems()]);
+    const [overview] = await Promise.all([request('/api/overview'), loadItems(), loadRuns()]);
     renderOverview(overview); $('errorBanner').hidden = true; $('liveBadge').classList.remove('offline');
   } catch (error) {
     $('errorBanner').textContent = `控制台刷新失败：${error.message}。上一轮数据已保留。`; $('errorBanner').hidden = false; $('liveBadge').classList.add('offline');
@@ -149,6 +191,7 @@ async function refresh() {
 }
 
 $('refreshButton').addEventListener('click', refresh);
+$('runSelector').addEventListener('change', (event) => selectRun(event.target.value));
 $('filterForm').addEventListener('submit', (event) => { event.preventDefault(); loadItems().catch((error) => { $('errorBanner').textContent = error.message; $('errorBanner').hidden = false; }); });
 $('apiKeyButton').addEventListener('click', () => { const value = window.prompt('输入新的本地API Key；留空将清除当前Key。', apiKey()); if (value === null) return; if (value) sessionStorage.setItem('amazonConsoleApiKey', value); else sessionStorage.removeItem('amazonConsoleApiKey'); refresh(); });
 $('closeDrawer').addEventListener('click', closeDetail); $('drawerBackdrop').addEventListener('click', closeDetail);

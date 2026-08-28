@@ -53,6 +53,21 @@
       </article>
     </section>
 
+    <section class="panel run-panel">
+      <div class="panel-title responsive-title">
+        <div><p class="eyebrow">RUN RESULT</p><h2>本次运行结果</h2></div>
+        <select id="runSelector" aria-label="选择一次运行"><option value="">选择 run_id</option></select>
+      </div>
+      <div id="runSummary" class="run-summary muted">选择一个run即可区分本次处理结果；同一ASIN可在不同run中重复出现。</div>
+      <div class="table-wrap compact-table">
+        <table>
+          <thead><tr><th>ASIN</th><th>结果</th><th>商品</th><th>来源</th><th>HTTP</th><th>错误/阻断</th><th>归属依据</th><th>时间</th></tr></thead>
+          <tbody id="runRows"><tr><td colspan="8" class="muted">暂无已选运行</td></tr></tbody>
+        </table>
+      </div>
+      <p id="runWarning" class="muted table-summary"></p>
+    </section>
+
     <section class="panel tasks-panel">
       <div class="panel-title responsive-title">
         <div><p class="eyebrow">OPERATIONS</p><h2>任务与异常</h2></div>

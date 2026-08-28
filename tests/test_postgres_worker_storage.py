@@ -313,6 +313,10 @@ def test_save_product_result_is_one_lease_guarded_transaction():
     assert media_params[9] is None and media_params[10] is True
     assert content_params[4] == 0 and content_params[5] is None
     assert summary_params[3:5] == (None, None)
+    compact_statements = statements.replace(" ", "")
+    assert "last_error=NULL" in compact_statements
+    assert "block_reason=NULL" in compact_statements
+    assert "next_retry_at=NULL" in compact_statements
 
 
 def test_save_failure_increments_attempts_and_releases_lease():

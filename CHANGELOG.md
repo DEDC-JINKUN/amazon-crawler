@@ -6,6 +6,8 @@
 - PostgreSQL Worker新增显式 `--product-only` 阶段过滤；SQLite后端现在拒绝该不兼容参数，不再静默处理评论任务。
 - 商品canonical校验兼容Amazon `/clp/{同ASIN}`，仍拒绝跳转到不同ASIN。
 - 出口探针、Worker和解析器统一识别HTTP 202 AWS WAF挑战页，避免把挑战误报为健康或普通字段缺失。
+- 控制台新增按 `run_id` 的“本次运行结果”，区分长期任务与本次action；网络失败也写不可变run evidence，旧缺口以明确的时间推断标记补充。
+- 成功商品事务强制清除历史 `last_error`、`block_reason` 和 `next_retry_at`，避免成功任务继续显示旧错误。
 
 ## 0.3.0 - 2026-08-28
 

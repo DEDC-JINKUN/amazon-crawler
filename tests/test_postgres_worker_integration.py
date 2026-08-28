@@ -58,6 +58,11 @@ def test_two_workers_claim_distinct_tasks_from_real_postgres():
                 "next_review_url=%s,next_review_page=1,reported_review_count=1 WHERE tenant_id=%s AND asin=%s",
                 ("https://www.amazon.com/product-reviews/B00RCPDI50", tenant_id, "B00RCPDI50"),
             )
+            connection.execute(
+                "UPDATE amazon_us.item_state SET last_error='old_error',block_reason='captcha',"
+                "next_retry_at=CURRENT_TIMESTAMP-INTERVAL '1 second' WHERE tenant_id=%s AND asin='B00RCPDCQU'",
+                (tenant_id,),
+            )
             connection.commit()
         with ThreadPoolExecutor(max_workers=2) as pool:
             claimed = list(pool.map(lambda worker_id: repository.claim_task(worker_id), ("worker-a", "worker-b")))
@@ -87,10 +92,11 @@ def test_two_workers_claim_distinct_tasks_from_real_postgres():
         ) is True
         with psycopg.connect(DSN) as connection:
             state = connection.execute(
-                "SELECT status, lease_token FROM amazon_us.item_state WHERE tenant_id=%s AND asin=%s",
+                "SELECT status,lease_token,last_error,block_reason,next_retry_at FROM amazon_us.item_state "
+                "WHERE tenant_id=%s AND asin=%s",
                 (tenant_id, first["asin"]),
             ).fetchone()
-            assert state == ("succeeded", None)
+            assert state == ("succeeded", None, None, None, None)
             assert connection.execute(
                 "SELECT title FROM amazon_us.product_latest WHERE tenant_id=%s AND asin=%s",
                 (tenant_id, first["asin"]),
@@ -183,6 +189,13 @@ def test_two_workers_claim_distinct_tasks_from_real_postgres():
         assert len(detail["media"]) == 1
         assert len(detail["content_modules"]) == 1
         assert detail["evidence"][0]["run_id"] == "integration-run"
+        runs = console.list_runs()
+        assert runs[0]["run_id"] == "integration-run"
+        assert runs[0]["evidence_actions"] == 2
+        run_detail = console.load_run("integration-run")
+        assert run_detail["recorded_actions"] == 2
+        assert run_detail["inferred_actions"] == 0
+        assert {item["asin"] for item in run_detail["items"]} == {"B00RCPDCQU", "B00RCPDI50"}
     finally:
         with psycopg.connect(DSN) as connection:
             for table in (

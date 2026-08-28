@@ -61,6 +61,23 @@ class Repository:
             "evidence": [{"raw_html_path": "US/B00RCPDCQU/example.html"}],
         }
 
+    def list_runs(self, limit=20):
+        return [{"run_id": "run-1", "evidence_actions": 2, "blocked": 0}]
+
+    def load_run(self, run_id):
+        if run_id != "run-1":
+            return None
+        return {
+            "run_id": run_id,
+            "recorded_actions": 2,
+            "inferred_actions": 1,
+            "items": [
+                {"asin": "B00RCPDCQU", "outcome": "succeeded", "attribution": "evidence"},
+                {"asin": "B01MA232WY", "outcome": "failed", "attribution": "time_window_inference"},
+                {"asin": "B01MSX7DPF", "outcome": "failed", "attribution": "evidence"},
+            ],
+        }
+
 
 def start_server(module, repository=None, api_key=""):
     server = module.ConsoleServer(("127.0.0.1", 0), repository or Repository(), api_key=api_key)
@@ -141,6 +158,24 @@ def test_console_returns_asin_detail_and_404():
             assert payload["media"][0]["asset_url"].startswith("https://")
         with pytest.raises(urllib.error.HTTPError) as raised:
             urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/api/items/B000000000", timeout=2)
+        assert raised.value.code == 404
+    finally:
+        stop_server(server, thread)
+
+
+def test_console_lists_runs_and_returns_one_run_result():
+    module = load_module()
+    server, thread = start_server(module)
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/api/runs", timeout=2) as response:
+            payload = json.loads(response.read())
+        assert payload["items"][0]["run_id"] == "run-1"
+        with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/api/runs/run-1", timeout=2) as response:
+            run = json.loads(response.read())
+        assert len(run["items"]) == 3
+        assert run["items"][1]["attribution"] == "time_window_inference"
+        with pytest.raises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/api/runs/missing", timeout=2)
         assert raised.value.code == 404
     finally:
         stop_server(server, thread)

@@ -1661,7 +1661,7 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
 def _postgres_evidence(
     run_id: str,
     task: dict[str, Any],
-    body: str,
+    body: str | None,
     status: int | None,
     source_type: str,
     raw_html_dir: Path | None,
@@ -1671,7 +1671,7 @@ def _postgres_evidence(
     block_reason: str | None = None,
     error_code: str | None = None,
 ) -> dict[str, Any]:
-    raw_html_path = _persist_raw_html(raw_html_dir, run_id, task["asin"], body)
+    raw_html_path = _persist_raw_html(raw_html_dir, run_id, task["asin"], body) if body is not None else None
     return {
         "run_id": run_id,
         "url": task["url"],
@@ -1679,7 +1679,7 @@ def _postgres_evidence(
         "transfer_bytes": transfer_bytes,
         "retrieved_at": utc_now(),
         "source_type": source_type,
-        "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+        "content_hash": hashlib.sha256(body.encode()).hexdigest() if body is not None else None,
         "raw_html_path": raw_html_path,
         "block_reason": block_reason,
         "parser_version": PARSER_VERSION,
@@ -1725,7 +1725,12 @@ def run_postgres_actions(
             try:
                 body, response_status = adapter.fetch(url)
             except AdapterFetchError as exc:
-                storage.save_failure(task=task, reason="review_fetch_error", error=str(exc))
+                evidence = _postgres_evidence(
+                    run_id, task, None, None, getattr(adapter, "source_type", "http_html"),
+                    raw_html_dir, config.get("context"), getattr(adapter, "last_transfer_bytes", None),
+                    error_code="review_fetch_error",
+                )
+                storage.save_failure(task=task, reason="review_fetch_error", error=str(exc), evidence=evidence)
                 if refresh_job_id:
                     storage.finish_refresh_request(refresh_job_id, "failed")
                 actions += 1
@@ -1826,7 +1831,12 @@ def run_postgres_actions(
         try:
             body, response_status = adapter.fetch(task["url"])
         except AdapterFetchError as exc:
-            storage.save_failure(task=task, reason="fetch_error", error=str(exc))
+            evidence = _postgres_evidence(
+                run_id, task, None, None, getattr(adapter, "source_type", "http_html"),
+                raw_html_dir, config.get("context"), getattr(adapter, "last_transfer_bytes", None),
+                error_code="fetch_error",
+            )
+            storage.save_failure(task=task, reason="fetch_error", error=str(exc), evidence=evidence)
             if refresh_job_id:
                 storage.finish_refresh_request(refresh_job_id, "failed")
             actions += 1

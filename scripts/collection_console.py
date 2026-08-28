@@ -21,6 +21,7 @@ STATIC_ROOT = ROOT / "console"
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 ASIN_RE = re.compile(r"^[A-Z0-9]{10}$")
 ITEM_PATH = re.compile(r"^/api/items/([A-Za-z0-9]{10})$")
+RUN_PATH = re.compile(r"^/api/runs/([A-Za-z0-9_-]+)$")
 STATIC_FILES = {
     "/": "index.html",
     "/index.html": "index.html",
@@ -235,6 +236,82 @@ class PostgresConsoleRepository:
             items = [dict(row) for row in cursor.fetchall()]
         return {"total": total, "limit": limit, "offset": offset, "items": items}
 
+    def list_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 100))
+        with self._connect() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT run_id,COUNT(*) AS evidence_actions,COUNT(DISTINCT asin) AS unique_asins,
+                       COUNT(*) FILTER (WHERE block_reason IS NOT NULL) AS blocked,
+                       COUNT(*) FILTER (WHERE error_code IS NOT NULL) AS failed,
+                       COALESCE(SUM(transfer_bytes),0) AS known_transfer_bytes,
+                       MIN(retrieved_at) AS started_at,MAX(retrieved_at) AS ended_at
+                FROM amazon_us.collection_evidence
+                WHERE tenant_id=%s
+                GROUP BY run_id ORDER BY MAX(retrieved_at) DESC LIMIT %s
+                """,
+                (self.tenant_id, limit),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def load_run(self, run_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT e.id,e.run_id,e.asin,e.subject_type,e.url,e.http_status,e.transfer_bytes,e.retrieved_at,
+                       e.source_type,e.block_reason,e.error_code,e.raw_html_path,e.content_hash,
+                       s.status AS current_status,s.task_stage,s.last_error,s.updated_at,p.title,p.price
+                FROM amazon_us.collection_evidence e
+                LEFT JOIN amazon_us.item_state s ON s.tenant_id=e.tenant_id AND s.marketplace=e.marketplace
+                  AND s.asin=e.asin AND s.subject_type=e.subject_type
+                LEFT JOIN amazon_us.product_latest p ON p.tenant_id=e.tenant_id AND p.marketplace=e.marketplace
+                  AND p.asin=e.asin AND p.subject_type=e.subject_type
+                WHERE e.tenant_id=%s AND e.run_id=%s ORDER BY e.id
+                """,
+                (self.tenant_id, run_id),
+            )
+            evidence_rows = [dict(row) for row in cursor.fetchall()]
+            if not evidence_rows:
+                return None
+            started_at = min(row["retrieved_at"] for row in evidence_rows)
+            ended_at = max(row["retrieved_at"] for row in evidence_rows)
+            evidence_asins = {row["asin"] for row in evidence_rows}
+            items: list[dict[str, Any]] = []
+            for row in evidence_rows:
+                outcome = "blocked" if row.get("block_reason") else "failed" if row.get("error_code") else "completed"
+                items.append({**row, "outcome": outcome, "attribution": "evidence"})
+            cursor.execute(
+                """
+                SELECT s.asin,s.subject_type,s.url,s.status AS current_status,s.task_stage,s.last_error,s.block_reason,
+                       s.updated_at,p.title,p.price
+                FROM amazon_us.item_state s
+                LEFT JOIN amazon_us.product_latest p ON p.tenant_id=s.tenant_id AND p.marketplace=s.marketplace
+                  AND p.asin=s.asin AND p.subject_type=s.subject_type
+                WHERE s.tenant_id=%s AND s.updated_at BETWEEN %s AND %s
+                ORDER BY s.updated_at,s.asin
+                """,
+                (self.tenant_id, started_at, ended_at),
+            )
+            for row_value in cursor.fetchall():
+                row = dict(row_value)
+                if row["asin"] in evidence_asins:
+                    continue
+                outcome = "blocked" if row.get("block_reason") else "failed" if row.get("last_error") else row.get("current_status")
+                items.append({**row, "outcome": outcome, "attribution": "time_window_inference"})
+        items.sort(key=lambda item: (item.get("retrieved_at") or item.get("updated_at"), item["asin"]))
+        return {
+            "schema_version": "amazon-us-console-v1",
+            "tenant_id": self.tenant_id,
+            "run_id": run_id,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "recorded_actions": len(evidence_rows),
+            "inferred_actions": sum(1 for item in items if item["attribution"] == "time_window_inference"),
+            "known_transfer_bytes": sum(int(item.get("transfer_bytes") or 0) for item in evidence_rows),
+            "items": items,
+            "warning": "time_window_inference is legacy fallback; new network failures write run evidence",
+        }
+
     def load_detail(self, asin: str) -> dict[str, Any] | None:
         asin = asin.upper()
         with self._connect() as conn, conn.cursor() as cursor:
@@ -377,6 +454,23 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         try:
             if path == "/api/overview":
                 self._send_json(HTTPStatus.OK, self.server.repository.load_overview(self.server.raw_html_dir))
+                return
+            if path == "/api/runs":
+                query = parse_qs(parsed.query)
+                limit = int(query.get("limit", ["20"])[0])
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"schema_version": "amazon-us-console-v1", "items": self.server.repository.list_runs(limit)},
+                )
+                return
+            run_match = RUN_PATH.fullmatch(path)
+            if run_match:
+                run_id = run_match.group(1)
+                payload = self.server.repository.load_run(run_id)
+                if payload is None:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "run_not_found", "run_id": run_id})
+                    return
+                self._send_json(HTTPStatus.OK, payload)
                 return
             if path == "/api/items":
                 query = parse_qs(parsed.query)

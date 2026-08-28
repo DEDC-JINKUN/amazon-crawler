@@ -623,7 +623,9 @@ class PostgresWorkerStorage:
                             review_summary.get("next_page"), review_summary.get("status"),
                         ),
                     )
-                    assignments = ["status=%s", "attempts=0"]
+                    assignments = [
+                        "status=%s", "attempts=0", "last_error=NULL", "block_reason=NULL", "next_retry_at=NULL"
+                    ]
                     params: list[Any] = [next_status]
                     for name, value in state_fields.items():
                         assignments.append(f"{name}=%s")

@@ -268,6 +268,30 @@ def test_postgres_runner_product_only_claims_only_product_stage():
     assert storage.saved[0]["next_status"] == "succeeded"
 
 
+def test_product_fetch_failure_persists_run_evidence():
+    worker = load_worker()
+
+    class FailingAdapter(Adapter):
+        last_transfer_bytes = 401602
+
+        def fetch(self, url):
+            raise worker.AdapterFetchError("incomplete response")
+
+    storage = Storage()
+    config = dict(worker.DEFAULTS)
+    config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}})
+
+    assert worker.run_postgres_actions(
+        storage, FailingAdapter(), config, limit=1, run_id="run-visible-3", worker_id="worker-a"
+    ) == 1
+    payload = storage.saved[0]
+    assert payload["reason"] == "fetch_error"
+    assert payload["evidence"]["run_id"] == "run-visible-3"
+    assert payload["evidence"]["error_code"] == "fetch_error"
+    assert payload["evidence"]["raw_html_path"] is None
+    assert payload["evidence"]["transfer_bytes"] == 401602
+
+
 def test_postgres_runner_persists_review_checkpoint_without_sqlite():
     worker = load_worker()
     storage = ReviewStorage()

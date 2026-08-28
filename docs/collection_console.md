@@ -46,11 +46,24 @@ $env:AMAZON_COLLECTION_API_KEY = '当前会话的随机值'
 ## 页面
 
 - 批次总览：任务进度、有效商品、blocked/failed、四种规模口径和字节证据；
+- 本次运行：按 `run_id` 选择一次Worker启动，逐项显示ASIN、结果、来源、HTTP、错误和流量；
 - 状态与信号：status、stage、source、error、block、最近 run；
 - 任务表：按状态、阶段、ASIN、标题和错误筛选；
 - ASIN 详情：商品、媒体 URL、top reviews、内容模块、评论摘要、历史和 evidence。
 
 媒体默认只显示 URL。只有用户手动点击链接时浏览器才会访问外部图片地址。raw HTML 只显示相对路径、哈希和时间，不通过控制台提供渲染路由。
+
+## Task、Run 与 Action
+
+- Task：同一个tenant中的长期ASIN任务，当前状态会随重试更新；
+- Run：一次Worker进程启动，对应唯一 `run_id`；
+- Action：该run中对某个ASIN/阶段的一次尝试。
+
+控制台的“本次运行结果”按不可变evidence聚合。网络读取失败也会写没有raw HTML、但包含 `run_id`、`fetch_error` 和已知传输字节的evidence，因此新run不会漏掉失败action。
+
+历史run在修复前可能缺少网络失败evidence。控制台只在该run首末evidence时间范围内补充状态变化，并明确标记为“时间推断”；这类记录不能冒充确定归属。
+
+长期扩展到多Worker/跨进程审计时，可将现有evidence账本提升为独立 `collection_run`/`collection_action` 表，记录requested_limit、配置哈希、退出码和进程心跳；当前MVP不增加该schema。
 
 ## 安全边界
 
