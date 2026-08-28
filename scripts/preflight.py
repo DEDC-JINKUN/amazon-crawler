@@ -58,7 +58,21 @@ def _load_egress_probe():
     return module
 
 
-def run_preflight(manifest: Path, config: Path, db: Path, *, require_live: bool = False, probe_egress: bool = False, probe_target_url: str = "https://www.amazon.com/robots.txt") -> dict[str, Any]:
+def _probe_postgres(dsn: str) -> tuple[bool, str]:
+    try:
+        from collection_storage import PostgresCollectionRepository
+    except ModuleNotFoundError:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from collection_storage import PostgresCollectionRepository
+    contract = PostgresCollectionRepository(dsn, tenant_id="amazon_us_local").load_schema_contract()
+    expected = {
+        "item_state": ["lease_expires_at", "lease_owner", "lease_token", "next_retry_at"],
+        "collection_evidence": ["context_json", "transfer_bytes"],
+    }
+    return contract == expected, "schema ready" if contract == expected else "required worker schema columns are missing"
+
+
+def run_preflight(manifest: Path, config: Path, db: Path, *, require_live: bool = False, probe_egress: bool = False, probe_target_url: str = "https://www.amazon.com/robots.txt", backend: str = "sqlite", dsn: str = "", postgres_probe=None) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     checks.append(_check("python", sys.version_info >= (3, 11), f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"))
     checks.append(_check("manifest", manifest.exists(), str(manifest)))
@@ -124,8 +138,18 @@ def run_preflight(manifest: Path, config: Path, db: Path, *, require_live: bool 
     driver_path = Path(configured_driver) if configured_driver else ROOT / "tools" / "geckodriver-v0.37.1" / "geckodriver.exe"
     checks.append(_check("firefox", bool(firefox_path) or not require_live, firefox_path or "not found (optional until live mode)"))
     checks.append(_check("geckodriver", driver_path.exists() or not require_live, str(driver_path) if driver_path.exists() else "not found (run install_geckodriver.ps1)"))
-    parent_ready = db.parent.exists() or db.parent.parent.exists()
-    checks.append(_check("database_parent", parent_ready, f"{db.parent} (will be created if missing)" if parent_ready and not db.parent.exists() else str(db.parent)))
+    if backend == "postgres":
+        if not dsn.strip():
+            checks.append(_check("postgres", False, "PostgreSQL DSN is not configured"))
+        else:
+            try:
+                ok, detail = (postgres_probe or _probe_postgres)(dsn)
+                checks.append(_check("postgres", ok, detail))
+            except Exception as exc:
+                checks.append(_check("postgres", False, f"PostgreSQL check failed ({type(exc).__name__})"))
+    else:
+        parent_ready = db.parent.exists() or db.parent.parent.exists()
+        checks.append(_check("database_parent", parent_ready, f"{db.parent} (will be created if missing)" if parent_ready and not db.parent.exists() else str(db.parent)))
     result = {"schema_version": "amazon-us-preflight-v1", "require_live": require_live, "ok": all(item["ok"] for item in checks), "checks": checks}
     return result
 
@@ -138,8 +162,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--require-live", action="store_true")
     parser.add_argument("--probe-egress", action="store_true", help="Probe configured proxy before allowing the run (network access)")
     parser.add_argument("--probe-target-url", default="https://www.amazon.com/robots.txt")
+    parser.add_argument("--backend", choices=("postgres", "sqlite"), default="sqlite")
+    parser.add_argument("--dsn-env", default="AMAZON_US_POSTGRES_DSN")
     args = parser.parse_args(argv)
-    result = run_preflight(args.manifest, args.config, args.db, require_live=args.require_live, probe_egress=args.probe_egress, probe_target_url=args.probe_target_url)
+    result = run_preflight(
+        args.manifest, args.config, args.db, require_live=args.require_live,
+        probe_egress=args.probe_egress, probe_target_url=args.probe_target_url,
+        backend=args.backend, dsn=os.environ.get(args.dsn_env, "") if args.backend == "postgres" else "",
+    )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result["ok"] else 1
 

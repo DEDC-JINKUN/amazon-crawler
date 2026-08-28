@@ -148,6 +148,120 @@ class HttpAdapterTests(unittest.TestCase):
         self.assertIs(adapter.config, config)
         adapter.close()
 
+    def test_firefox_fetch_clicks_visible_zip_done_button_and_confirms_header(self):
+        worker = load_worker()
+
+        class Element:
+            def __init__(self, driver, text="", displayed=True, on_click=None):
+                self.driver, self.text, self.displayed, self.on_click = driver, text, displayed, on_click
+
+            def click(self):
+                if self.on_click:
+                    self.on_click()
+
+            def clear(self):
+                pass
+
+            def send_keys(self, value):
+                self.driver.input_value = value
+
+            def is_displayed(self):
+                return self.displayed
+
+            def get_attribute(self, name):
+                return "USD" if name == "value" and self.text == "currency" else None
+
+        class Driver:
+            page_source = "<html>ok</html>"
+            input_value = ""
+            committed = False
+            js_clicked = False
+            refreshed = False
+
+            def get(self, url):
+                pass
+
+            def refresh(self):
+                self.refreshed = True
+
+            def find_element(self, by, value):
+                if value == "glow-ingress-line1":
+                    return Element(self, "Delivering to Los Angeles 90001" if self.committed else "Delivering to Portland 97230")
+                if value == "glow-ingress-line2":
+                    return Element(self, "Update location")
+                if value == "nav-global-location-popover-link":
+                    return Element(self)
+                if value == "GLUXZipUpdateInput":
+                    return Element(self)
+                if value == "#GLUXZipUpdate input[type='submit']":
+                    return Element(self)
+                if value == "currencyOfPreference":
+                    return Element(self, "currency")
+                if value == "//button[normalize-space()='Done' or normalize-space()='完成']":
+                    return Element(self, "Done", displayed=False)
+                raise LookupError(value)
+
+            def find_elements(self, by, value):
+                if value == "button[name='glowDoneButton']":
+                    return [
+                        Element(self, "Done", displayed=False),
+                        Element(self, "Done", displayed=True, on_click=lambda: setattr(self, "committed", True)),
+                    ]
+                return []
+
+            def execute_script(self, script, element):
+                self.js_clicked = True
+                element.click()
+
+        class Wait:
+            def __init__(self, driver, timeout):
+                self.driver = driver
+
+            def until(self, condition):
+                value = condition(self.driver)
+                if not value:
+                    raise TimeoutError("condition not met")
+                return value
+
+        driver = Driver()
+        adapter = object.__new__(worker.SeleniumFirefoxAdapter)
+        adapter.config = {**worker.DEFAULTS, "context": {"postal_code": "90001"}}
+        adapter.driver = driver
+        adapter._context_initialized = False
+
+        import selenium.webdriver.support.expected_conditions as expected_conditions
+        import selenium.webdriver.support.ui as support_ui
+
+        with patch.object(support_ui, "WebDriverWait", Wait), patch.object(
+            expected_conditions, "presence_of_element_located", lambda locator: lambda current: current.find_element(*locator)
+        ), patch.object(
+            expected_conditions, "element_to_be_clickable", lambda locator: lambda current: current.find_element(*locator)
+        ), patch.object(worker.time, "sleep", lambda seconds: None):
+            body, _ = adapter.fetch("https://www.amazon.com/dp/B00RCPDCQU")
+
+        self.assertEqual(body, "<html>ok</html>")
+        self.assertTrue(driver.committed)
+        self.assertTrue(driver.js_clicked)
+        self.assertTrue(driver.refreshed)
+
+    def test_failed_browser_fallback_does_not_relabel_http_body_as_selenium(self):
+        worker = load_worker()
+
+        class Browser:
+            def fetch(self, url):
+                raise worker.AdapterFetchError("zip context failed")
+
+        adapter = object.__new__(worker.HttpFirstAdapter)
+        adapter.browser = Browser()
+        adapter.source_type = "http_html"
+        adapter.last_transfer_bytes = 123
+
+        with self.assertRaises(worker.AdapterFetchError):
+            adapter.fetch_browser("https://www.amazon.com/dp/B00RCPDCQU")
+
+        self.assertEqual(adapter.source_type, "http_html")
+        self.assertEqual(adapter.last_transfer_bytes, 123)
+
     def test_retry_after_parses_bounded_delta_seconds(self):
         worker = load_worker()
         self.assertEqual(worker._retry_after_seconds("120"), 120)

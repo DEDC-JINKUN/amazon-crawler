@@ -36,4 +36,4 @@ save_media = "url_and_metadata_only"
 expected_country = "US"
 expected_currency = "USD"
 # Fill this before formal US collection; leave empty only for parser development.
-postal_code = ""
+postal_code = "90001"

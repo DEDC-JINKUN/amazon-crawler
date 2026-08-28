@@ -19,6 +19,7 @@ def validate_context(data: Mapping[str, Any], context: Mapping[str, Any] | None 
     context = context or {}
     expected_country = str(context.get("expected_country") or "").strip().upper()
     expected_currency = str(context.get("expected_currency") or "").strip().upper()
+    expected_postal = str(context.get("postal_code") or "").strip()
     errors: list[str] = []
     price = _visible_text(data.get("price", "")).upper()
     if expected_currency == "USD":
@@ -31,4 +32,7 @@ def validate_context(data: Mapping[str, Any], context: Mapping[str, Any] | None 
         page_text = " ".join(_visible_text(data.get(key, "")) for key in ("availability", "buy_box", "product_description")).lower()
         if re.search(r"deliver to\s+(hong kong|china|canada|united kingdom|australia)", page_text):
             errors.append("delivery_country_mismatch")
+        observed_postals = set(re.findall(r"(?<!\d)(\d{5})(?:-\d{4})?(?!\d)", page_text))
+        if expected_postal and observed_postals and expected_postal[:5] not in observed_postals:
+            errors.append("delivery_postal_mismatch")
     return errors

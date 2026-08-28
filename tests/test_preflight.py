@@ -76,6 +76,24 @@ class PreflightTests(unittest.TestCase):
             check = next(item for item in result["checks"] if item["name"] == "us_postal_code")
             self.assertFalse(check["ok"])
 
+    def test_postgres_preflight_requires_dsn_and_checks_schema(self):
+        preflight = load()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.csv"
+            manifest.write_text("asin,url,marketplace,source_site_label,source_workbook\nB00RCPDCQU,https://www.amazon.com/dp/B00RCPDCQU,US,test,fixture.csv\n", encoding="utf-8")
+            config = root / "config.toml"
+            config.write_text('[worker]\nagent_name="test-agent"\nuser_agent="Agent/test-agent"\n', encoding="utf-8")
+
+            missing = preflight.run_preflight(manifest, config, root / "unused.sqlite3", backend="postgres")
+            self.assertFalse(next(item for item in missing["checks"] if item["name"] == "postgres") ["ok"])
+
+            ready = preflight.run_preflight(
+                manifest, config, root / "unused.sqlite3", backend="postgres", dsn="postgresql://example",
+                postgres_probe=lambda dsn: (True, "schema ready"),
+            )
+            self.assertTrue(next(item for item in ready["checks"] if item["name"] == "postgres") ["ok"])
+
     def test_explicit_egress_probe_is_a_preflight_gate(self):
         preflight = load()
         with tempfile.TemporaryDirectory() as directory:

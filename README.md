@@ -2,7 +2,7 @@
 
 面向 Amazon.com 自有 ASIN 和竞品 ASIN 的统一网页采集 MVP。
 
-当前版本：`0.2.13`（续跑全量回执与四种口径）。
+当前版本：`0.3.0`（PostgreSQL 正式 Worker）。
 
 本地测试结果可用 `scripts/evidence_health.py` 检查源 HTML 存在性和哈希；用 `scripts/collection_metrics.py` 按 `run_id` 查看请求数、流量和有效吞吐。
 代理流量和成本实测见 [`docs/traffic_cost_validation.md`](docs/traffic_cost_validation.md)，并用 `scripts/traffic_cost_report.py` 结合代理商后台的用量差值出具报告。
@@ -12,9 +12,9 @@
 ## 当前开发边界
 
 - HTTP 优先获取公开 HTML；页面字段不足时再使用 Firefox 渲染。
-- SQLite 保存本地任务状态和断点，CSV 用于导出和人工检查。
+- PostgreSQL 是正式任务、断点、结果和历史的唯一事实源；SQLite 仅保留给历史回放和离线回归测试。
 - 原始 HTML、采集时间、来源和解析器版本必须可追溯。
-- 当前 Windows POC 不启用代理池和多线程扩容；限速和 Worker Pool 代码只作为生产扩展基础。
+- PostgreSQL 使用租约和 `FOR UPDATE SKIP LOCKED` 支持多个 Worker 安全领取；当前 Windows 默认仍以单 Worker 小批量运行。
 - 生产阶段再接入经过批准的 IP 代理池和受控 Worker Pool。
 - 不读取个人浏览器 Profile、Cookie、Token 或密码，不绕过验证码和访问控制。
 
@@ -29,7 +29,7 @@ amazon-scraping/
 ├── schema/               # PostgreSQL 生产库结构
 ├── *.bat                 # Windows 启动、定时和验收脚本
 ├── data/                 # 本地导出（不提交真实数据）
-└── state/                # SQLite 状态（不提交真实数据）
+└── state/                # 历史 SQLite 回放数据（不进入正式运行）
 ```
 
 ## 快速检查
@@ -42,13 +42,21 @@ python -m pytest tests -q
 
 首次运行 `setup_windows.bat` 时，如果根目录没有业务清单，会自动复制两条记录的 `amazon_us_asin_manifest.example.csv` 作为离线开发样例。接入真实采集前，必须用经过确认的业务清单替换 `amazon_us_asin_manifest.csv`；真实清单不会提交到 Git。
 
-## 下一步
+## 正式 PostgreSQL 运行
 
-1. 准备 Windows Python、Firefox 和 Selenium 运行环境。
-2. 安装固定版本 geckodriver：`powershell -ExecutionPolicy Bypass -File scripts\install_geckodriver.ps1`。
-3. 用少量已授权 ASIN 做真实页面采集。
-4. 根据成功率、字段完整率、阻断率和耗时配置 Token Bucket 限速。
-5. 再决定是否接入授权代理池和多 Worker 扩容。
+完整步骤、环境变量和故障说明见 [`docs/postgres_production_worker.md`](docs/postgres_production_worker.md)。正式入口不会读取 SQLite，也不会把数据库密码写入仓库。
+
+```powershell
+$env:AMAZON_US_POSTGRES_DSN = 'host=127.0.0.1 port=5432 dbname=postgres user=postgres'
+$env:PGPASSWORD = '仅在当前 PowerShell 会话填写'
+try {
+  .\run_once_windows.bat
+} finally {
+  Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
+}
+```
+
+定时入口 `run_scheduled_windows.bat` 会先将超过 24 小时的 PostgreSQL 商品快照加入刷新队列，再运行一个受限批次。
 
 本机 PostgreSQL 开发环境：
 
@@ -65,37 +73,34 @@ docker compose ps
 powershell -ExecutionPolicy Bypass -File scripts\bootstrap_postgres.ps1
 ```
 
-schema 初始化后，使用交互式回放脚本迁移本地状态并验证 PostgreSQL：
+PostgreSQL Collection API：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\replay_postgres.ps1
+python scripts/collection_api.py --backend postgres --dsn "$env:AMAZON_US_POSTGRES_DSN" --tenant-id amazon_us_local
 ```
 
-本地只读 Collection API：
+默认只监听 `127.0.0.1`；Agent 通过它读取快照、任务状态、最近证据并提交按需刷新请求。
+
+正式运行前检查：
 
 ```powershell
-python scripts/collection_api.py --db state/amazon_us.sqlite3
-```
-
-默认只监听 `127.0.0.1`，不提供写入和刷新接口；Agent 后续通过它读取快照、任务状态和最近证据。
-
-采集覆盖率报告：
-
-```powershell
-python scripts/coverage_report.py --db state/amazon_us.sqlite3 --output data/amazon_us/coverage_report.json
-```
-
-运行前检查：
-
-```powershell
-python scripts/preflight.py
-python scripts/preflight.py --require-live
+python scripts/preflight.py --require-live --backend postgres --dsn-env AMAZON_US_POSTGRES_DSN
 ```
 
 按字段新鲜度自动入队：
 
 ```powershell
-python scripts/schedule_refresh.py --db state/amazon_us.sqlite3 --fields price,availability
+python scripts/schedule_postgres_refresh.py --dsn-env AMAZON_US_POSTGRES_DSN --tenant-id amazon_us_local --subject-type own --min-age-hours 24
+```
+
+## 历史 SQLite 分析与迁移
+
+以下命令只用于旧 POC 数据分析、迁移和对账，不进入正式 Worker 运行链路。
+
+采集覆盖率报告：
+
+```powershell
+python scripts/coverage_report.py --db state/amazon_us.sqlite3 --output data/amazon_us/coverage_report.json
 ```
 
 后端回放后，用只读对账工具确认 SQLite 与 PostgreSQL 的 API 视图一致（命令和安全的密码传递方式见 [`docs/compare_backends.md`](docs/compare_backends.md)）：

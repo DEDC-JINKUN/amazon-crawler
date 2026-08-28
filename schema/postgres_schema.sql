@@ -46,6 +46,9 @@ CREATE TABLE IF NOT EXISTS item_state (
     review_pages_fetched integer NOT NULL DEFAULT 0,
     block_reason text,
     last_error text,
+    lease_token text,
+    lease_owner text,
+    lease_expires_at timestamptz,
     updated_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, marketplace, asin, subject_type),
     FOREIGN KEY (tenant_id, marketplace, asin, subject_type)
@@ -79,8 +82,27 @@ CREATE TABLE IF NOT EXISTS refresh_request (
 );
 
 CREATE INDEX IF NOT EXISTS idx_refresh_request_queue ON refresh_request (tenant_id, marketplace, status, requested_at);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_refresh_request_active_asin
+    ON refresh_request (tenant_id, marketplace, asin, subject_type)
+    WHERE status IN ('queued', 'claimed');
 
 ALTER TABLE item_state ADD COLUMN IF NOT EXISTS next_retry_at timestamptz;
+ALTER TABLE item_state ADD COLUMN IF NOT EXISTS lease_token text;
+ALTER TABLE item_state ADD COLUMN IF NOT EXISTS lease_owner text;
+ALTER TABLE item_state ADD COLUMN IF NOT EXISTS lease_expires_at timestamptz;
+
+CREATE TABLE IF NOT EXISTS review_page_state (
+    tenant_id text NOT NULL DEFAULT 'default',
+    marketplace text NOT NULL CHECK (marketplace = 'US'),
+    asin varchar(10) NOT NULL,
+    subject_type text NOT NULL CHECK (subject_type IN ('own', 'competitor', 'candidate')),
+    page integer NOT NULL CHECK (page > 0),
+    url text NOT NULL,
+    status text NOT NULL,
+    next_url text,
+    fetched_at timestamptz,
+    PRIMARY KEY (tenant_id, marketplace, asin, subject_type, page)
+);
 
 CREATE TABLE IF NOT EXISTS collection_evidence (
     id bigserial PRIMARY KEY,
@@ -209,9 +231,12 @@ CREATE TABLE IF NOT EXISTS review_record (
 );
 
 CREATE INDEX IF NOT EXISTS idx_item_state_status ON item_state (tenant_id, marketplace, status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_item_state_lease_expiry ON item_state (tenant_id, marketplace, subject_type, lease_expires_at)
+    WHERE lease_expires_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_evidence_asin_time ON collection_evidence (tenant_id, marketplace, asin, retrieved_at DESC);
 CREATE INDEX IF NOT EXISTS idx_snapshot_latest ON product_snapshot (tenant_id, marketplace, asin, subject_type, collected_at DESC);
 CREATE INDEX IF NOT EXISTS idx_history_asin_time ON state_history (tenant_id, marketplace, asin, changed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_review_page_state_asin ON review_page_state (tenant_id, marketplace, asin, subject_type, page);
 
 CREATE OR REPLACE VIEW product_latest AS
 SELECT DISTINCT ON (tenant_id, marketplace, asin, subject_type) *

@@ -218,7 +218,7 @@ class PostgresCollectionRepository:
     def load_schema_contract(self) -> dict[str, list[str]]:
         """Return required schema columns present in the PostgreSQL backend."""
         required = {
-            "item_state": {"next_retry_at"},
+            "item_state": {"next_retry_at", "lease_token", "lease_owner", "lease_expires_at"},
             "collection_evidence": {"context_json", "transfer_bytes"},
         }
         with self._connect_factory() as conn:

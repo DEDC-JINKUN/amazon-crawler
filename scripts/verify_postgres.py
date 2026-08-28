@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -15,17 +16,21 @@ except ModuleNotFoundError:
 
 
 def schema_ok(contract: dict[str, list[str]]) -> bool:
-    return contract.get("item_state") == ["next_retry_at"] and contract.get("collection_evidence") == ["context_json", "transfer_bytes"]
+    return contract.get("item_state") == ["lease_expires_at", "lease_owner", "lease_token", "next_retry_at"] and contract.get("collection_evidence") == ["context_json", "transfer_bytes"]
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dsn", required=True)
+    parser.add_argument("--dsn", default="")
+    parser.add_argument("--dsn-env", default="")
     parser.add_argument("--asin")
     parser.add_argument("--tenant-id", default="default")
     args = parser.parse_args(argv)
     try:
-        repository = PostgresCollectionRepository(args.dsn, tenant_id=args.tenant_id)
+        dsn = args.dsn.strip() or (os.environ.get(args.dsn_env, "").strip() if args.dsn_env else "")
+        if not dsn:
+            raise ValueError("PostgreSQL DSN is required via --dsn or --dsn-env")
+        repository = PostgresCollectionRepository(dsn, tenant_id=args.tenant_id)
         contract = repository.load_schema_contract()
         contract_ok = schema_ok(contract)
         result = {"schema_version": "amazon-us-postgres-verification-v1", "tenant_id": args.tenant_id, "schema_ok": contract_ok, "schema_contract": contract}

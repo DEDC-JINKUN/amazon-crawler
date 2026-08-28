@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Offline-first Amazon US collection worker.
+"""Amazon US collection worker with PostgreSQL production storage.
 
-The SQLite database is the source of truth. HTTP fetches run first and a
-Firefox browser is created lazily only when required fields are missing. All
-durable writes for an action are transactional.
+HTTP fetches run first and a Firefox browser is created lazily only when
+required fields are missing. SQLite remains available only for legacy replay
+and offline regression tests; production actions use PostgreSQL leases.
 """
 from __future__ import annotations
 
@@ -1238,7 +1238,10 @@ class SeleniumFirefoxAdapter:
         from selenium.webdriver.support.ui import WebDriverWait
 
         try:
-            current = self.driver.find_element(By.ID, "glow-ingress-line2").text or ""
+            current = " ".join(
+                (self.driver.find_element(By.ID, element_id).text or "")
+                for element_id in ("glow-ingress-line1", "glow-ingress-line2")
+            )
         except Exception:
             current = ""
         if postal_code in current:
@@ -1253,17 +1256,26 @@ class SeleniumFirefoxAdapter:
         # Done button is the commit point; GLUXConfirmClose is only a fallback
         # for older page variants where that button is rendered as an input.
         try:
-            done = WebDriverWait(self.driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//button[normalize-space()='Done' or normalize-space()='完成']"))
+            visible_done = WebDriverWait(self.driver, 10).until(
+                lambda driver: [
+                    button for button in driver.find_elements(By.CSS_SELECTOR, "button[name='glowDoneButton']")
+                    if button.is_displayed()
+                ]
             )
-            done.click()
+            # Amazon's current location modal renders a visible button whose
+            # native WebDriver click can be acknowledged without firing the
+            # page handler. A DOM click is the observed commit action.
+            self.driver.execute_script("arguments[0].click()", visible_done[-1])
         except Exception:
             try:
                 self.driver.find_element(By.ID, "GLUXConfirmClose").click()
             except Exception:
                 pass
         def context_ready(driver: Any) -> bool:
-            header = driver.find_element(By.ID, "glow-ingress-line2").text or ""
+            header = " ".join(
+                (driver.find_element(By.ID, element_id).text or "")
+                for element_id in ("glow-ingress-line1", "glow-ingress-line2")
+            )
             if postal_code not in header:
                 return False
             try:
@@ -1273,8 +1285,11 @@ class SeleniumFirefoxAdapter:
             return not currency or currency.upper() == "USD"
 
         WebDriverWait(self.driver, 15).until(context_ready)
-        # Let Amazon finish repainting price/availability modules after the
-        # location modal closes before taking page_source.
+        # The modal updates the header before product modules are repainted.
+        # Reload once after the location is committed, then confirm the ZIP
+        # survived the navigation before taking page_source.
+        self.driver.refresh()
+        WebDriverWait(self.driver, 15).until(context_ready)
         time.sleep(0.8)
         self._context_initialized = True
         return True
@@ -1419,9 +1434,10 @@ class HttpFirstAdapter:
                 self.browser = SeleniumFirefoxAdapter(self.config)
             except (RuntimeError, OSError) as exc:
                 raise AdapterFetchError(str(exc)) from exc
+        body, status = self.browser.fetch(url)
         self.source_type = "selenium_dom"
         self.last_transfer_bytes = None
-        return self.browser.fetch(url)
+        return body, status
 
     def close(self) -> None:
         if self.browser is not None:
@@ -1639,6 +1655,297 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
     return -1 if blocked else actions
 
 
+def _postgres_evidence(
+    run_id: str,
+    task: dict[str, Any],
+    body: str,
+    status: int | None,
+    source_type: str,
+    raw_html_dir: Path | None,
+    context: dict[str, Any] | None,
+    transfer_bytes: int | None,
+    *,
+    block_reason: str | None = None,
+    error_code: str | None = None,
+) -> dict[str, Any]:
+    raw_html_path = _persist_raw_html(raw_html_dir, run_id, task["asin"], body)
+    return {
+        "run_id": run_id,
+        "url": task["url"],
+        "http_status": status,
+        "transfer_bytes": transfer_bytes,
+        "retrieved_at": utc_now(),
+        "source_type": source_type,
+        "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+        "raw_html_path": raw_html_path,
+        "block_reason": block_reason,
+        "parser_version": PARSER_VERSION,
+        "error_code": error_code,
+        "context_json": context or {},
+    }
+
+
+def run_postgres_actions(
+    storage: Any,
+    adapter: Any,
+    config: dict[str, Any],
+    *,
+    limit: int | None = None,
+    run_id: str | None = None,
+    worker_id: str = "amazon-us-worker",
+    lease_seconds: int = 600,
+) -> int:
+    """Run a bounded production batch using PostgreSQL task leases."""
+    run_id = run_id or f"run-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
+    max_actions = min(limit, int(config["max_actions_per_run"])) if limit else int(config["max_actions_per_run"])
+    raw_value = config.get("raw_html_dir")
+    raw_html_dir = Path(raw_value) if raw_value else None
+    actions = 0
+    blocked = False
+    while actions < max_actions:
+        task = storage.claim_refresh_task(worker_id, lease_seconds=lease_seconds) if hasattr(storage, "claim_refresh_task") else None
+        if task is None:
+            task = storage.claim_task(worker_id, lease_seconds=lease_seconds)
+        if task is None:
+            break
+        refresh_job_id = task.get("job_id")
+        if task.get("task_stage") == "reviews" and task.get("next_review_url"):
+            page = int(task.get("next_review_page") or 1)
+            url = task["next_review_url"]
+            task = dict(task)
+            task["url"] = url
+            try:
+                body, response_status = adapter.fetch(url)
+            except AdapterFetchError as exc:
+                storage.save_failure(task=task, reason="review_fetch_error", error=str(exc))
+                if refresh_job_id:
+                    storage.finish_refresh_request(refresh_job_id, "failed")
+                actions += 1
+                continue
+            reason = classify_block(response_status, body)
+            records, next_url = parse_reviews_html(body, page, url) if not reason else ([], None)
+            alternate_url = _alternate_review_url(url, task["asin"])
+            if not reason and not records and int(task.get("reported_review_count") or 0) > 0 and alternate_url:
+                try:
+                    alternate_body, alternate_status = adapter.fetch(alternate_url)
+                except AdapterFetchError:
+                    pass
+                else:
+                    alternate_reason = classify_block(alternate_status, alternate_body)
+                    alternate_records, alternate_next_url = parse_reviews_html(alternate_body, page, alternate_url) if not alternate_reason else ([], None)
+                    if alternate_reason:
+                        body, response_status, url, records, next_url, reason = alternate_body, alternate_status, alternate_url, [], None, alternate_reason
+                    elif alternate_records or alternate_next_url:
+                        body, response_status, url, records, next_url = alternate_body, alternate_status, alternate_url, alternate_records, alternate_next_url
+            if not reason and not records and int(task.get("reported_review_count") or 0) > 0 and hasattr(adapter, "fetch_browser"):
+                try:
+                    browser_body, browser_status = adapter.fetch_browser(url)
+                except AdapterFetchError:
+                    pass
+                else:
+                    browser_reason = classify_block(browser_status, browser_body)
+                    browser_records, browser_next_url = parse_reviews_html(browser_body, page, url) if not browser_reason else ([], None)
+                    if browser_reason:
+                        body, response_status, records, next_url, reason = browser_body, browser_status, [], None, browser_reason
+                    elif browser_records or browser_next_url:
+                        body, response_status, records, next_url = browser_body, browser_status, browser_records, browser_next_url
+            task["url"] = url
+            source_type = getattr(adapter, "source_type", "http_html")
+            evidence = _postgres_evidence(
+                run_id, task, body, response_status, source_type, raw_html_dir, config.get("context"),
+                getattr(adapter, "last_transfer_bytes", None), block_reason=reason,
+                error_code="empty_review_page" if not reason and not records and int(task.get("reported_review_count") or 0) > 0 else None,
+            )
+            if reason:
+                cooldown = getattr(adapter, "last_retry_after_seconds", None) or config.get("rate_limit_cooldown_seconds", 3600)
+                deferred = response_status == 429 or reason == "too_many_requests"
+                next_retry = (datetime.now(timezone.utc) + timedelta(seconds=int(cooldown))).replace(microsecond=0).isoformat() if deferred else None
+                storage.save_failure(
+                    task=task, reason=reason, error=reason, evidence=evidence,
+                    next_status="reviews_pending" if deferred else "blocked",
+                    state_fields={"task_stage": "reviews", "resume_status": "reviews_pending", "next_review_url": url, "next_review_page": page, "next_retry_at": next_retry, "block_reason": reason},
+                    increment_attempts=False,
+                )
+                if refresh_job_id:
+                    storage.finish_refresh_request(refresh_job_id, "queued" if deferred else "failed")
+                blocked = True
+            else:
+                empty = not records and int(task.get("reported_review_count") or 0) > 0
+                values = []
+                for record in records:
+                    item = dict(record)
+                    item["unique_key"] = f"US|{task['asin']}|{item['review_id']}"
+                    item["review_images"] = item.pop("review_images", item.pop("review_images_json", []))
+                    values.append(item)
+                fetched = int(task.get("fetched_review_count") or 0) + len(values)
+                next_page = page + 1 if next_url else None
+                page_limit = int(config.get("review_page_limit") or 0)
+                next_status = "failed" if empty else "reviews_pending" if next_url else "succeeded"
+                summary_status = "failed" if empty else "page_limit" if next_url and page_limit and page >= page_limit else "in_progress" if next_url else "exhausted"
+                storage.save_review_result(
+                    task=task,
+                    evidence=evidence,
+                    page={"page": page, "url": url, "status": "failed" if empty else "fetched", "next_url": next_url or (url if empty else None)},
+                    records=values,
+                    summary={
+                        "reported_rating_count": task.get("reported_rating_count"),
+                        "reported_review_count": task.get("reported_review_count"),
+                        "reported_count_source": task.get("reported_count_source"),
+                        "fetched_count": fetched,
+                        "pages_fetched": page,
+                        "next_page": next_url or (url if empty else None),
+                        "status": summary_status,
+                    },
+                    next_status=next_status,
+                    state_fields={
+                        "task_stage": "reviews" if next_url or empty else "complete",
+                        "resume_status": "reviews_pending" if next_url or empty else None,
+                        "next_review_url": next_url or (url if empty else None),
+                        "next_review_page": next_page or (page if empty else None),
+                        "fetched_review_count": fetched,
+                        "review_pages_fetched": page,
+                        "last_error": "empty_review_page" if empty else None,
+                    },
+                    reason="empty_review_page" if empty else "review_page_fetched" if next_url else "reviews_exhausted",
+                    increment_attempts=empty,
+                )
+                if refresh_job_id:
+                    storage.finish_refresh_request(refresh_job_id, "failed" if empty else "completed")
+            actions += 1
+            if blocked and bool(config.get("stop_on_block", True)):
+                break
+            continue
+        try:
+            body, response_status = adapter.fetch(task["url"])
+        except AdapterFetchError as exc:
+            storage.save_failure(task=task, reason="fetch_error", error=str(exc))
+            if refresh_job_id:
+                storage.finish_refresh_request(refresh_job_id, "failed")
+            actions += 1
+            continue
+        reason = classify_block(response_status, body)
+        data = parse_product_html(body, task["url"]) if not reason else {"asin": "", "canonical_url": ""}
+        if not reason and hasattr(adapter, "needs_browser_fallback") and adapter.needs_browser_fallback(data):
+            try:
+                browser_body, browser_status = adapter.fetch_browser(task["url"])
+            except AdapterFetchError:
+                pass
+            else:
+                browser_reason = classify_block(browser_status, browser_body)
+                body, response_status, reason = browser_body, browser_status, browser_reason
+                data = parse_product_html(browser_body, task["url"]) if not browser_reason else {"asin": "", "canonical_url": ""}
+        context_errors = validate_context(data, config.get("context")) if not reason else []
+        if context_errors and hasattr(adapter, "fetch_browser"):
+            try:
+                browser_body, browser_status = adapter.fetch_browser(task["url"])
+            except AdapterFetchError:
+                pass
+            else:
+                browser_reason = classify_block(browser_status, browser_body)
+                browser_data = parse_product_html(browser_body, task["url"]) if not browser_reason else data
+                browser_context_errors = validate_context(browser_data, config.get("context")) if not browser_reason else context_errors
+                if browser_reason:
+                    body, response_status, data, reason, context_errors = browser_body, browser_status, {"asin": "", "canonical_url": ""}, browser_reason, []
+                elif not browser_context_errors:
+                    body, response_status, data, reason, context_errors = browser_body, browser_status, browser_data, browser_reason, []
+        source_type = getattr(adapter, "source_type", "http_html")
+        transfer_bytes = getattr(adapter, "last_transfer_bytes", None)
+        error_code = "context_mismatch:" + ",".join(context_errors) if context_errors else None
+        evidence = _postgres_evidence(
+            run_id, task, body, response_status, source_type, raw_html_dir, config.get("context"), transfer_bytes,
+            block_reason=reason, error_code=error_code,
+        )
+        if reason or context_errors:
+            deferred = response_status == 429 or reason == "too_many_requests"
+            cooldown = getattr(adapter, "last_retry_after_seconds", None) or config.get("rate_limit_cooldown_seconds", 3600)
+            next_retry = (datetime.now(timezone.utc) + timedelta(seconds=int(cooldown))).replace(microsecond=0).isoformat() if deferred else None
+            storage.save_failure(
+                task=task, reason=reason or "context_mismatch", error=reason or error_code or "context_mismatch", evidence=evidence,
+                next_status="pending" if deferred else "blocked" if reason else "failed",
+                state_fields={"task_stage": "product", "resume_status": "pending", "next_retry_at": next_retry, "block_reason": reason},
+                increment_attempts=not bool(reason),
+            )
+            if refresh_job_id:
+                storage.finish_refresh_request(refresh_job_id, "queued" if deferred else "failed")
+            blocked = bool(reason)
+            actions += 1
+            if blocked and bool(config.get("stop_on_block", True)):
+                break
+            continue
+        missing_core = [key for key in ("asin", "canonical_url", "title") if not str(data.get(key) or "").strip()]
+        if missing_core:
+            error = "missing_core_fields:" + ",".join(missing_core)
+            evidence["error_code"] = error
+            storage.save_failure(task=task, reason="missing_core_fields", error=error, evidence=evidence)
+            if refresh_job_id:
+                storage.finish_refresh_request(refresh_job_id, "failed")
+            actions += 1
+            continue
+        canonical = urlsplit(data.get("canonical_url") or "")
+        path_match = re.search(r"/dp/([A-Za-z0-9]{10})(?:/|$)", canonical.path)
+        if (
+            (data.get("asin") or "").upper() != task["asin"]
+            or canonical.scheme != "https"
+            or (canonical.hostname or "").lower().removeprefix("www.") != "amazon.com"
+            or not path_match
+            or path_match.group(1).upper() != task["asin"]
+        ):
+            evidence["error_code"] = "asin_mismatch"
+            storage.save_failure(task=task, reason="asin_mismatch", error="asin_mismatch", evidence=evidence)
+            if refresh_job_id:
+                storage.finish_refresh_request(refresh_job_id, "failed")
+            actions += 1
+            continue
+        review_url = data.get("review_link") or None
+        media = []
+        for item in data.get("media", []):
+            value = dict(item)
+            value["unique_key"] = f"US|{task['asin']}|{value.get('placement','')}|{value.get('entry_type','')}|{value.get('asset_url','')}"
+            media.append(value)
+        content = []
+        for item in data.get("content_modules", []):
+            value = dict(item)
+            value["unique_key"] = f"US|{task['asin']}|{value.get('module_type','')}|{value.get('position',0)}"
+            content.append(value)
+        storage.save_product_result(
+            task=task,
+            evidence=evidence,
+            product={
+                "canonical_url": data.get("canonical_url"), "availability": data.get("availability"),
+                "title": data.get("title"), "brand": data.get("brand"), "rating": data.get("rating"),
+                "reported_rating_count": data.get("reported_rating_count"), "reported_review_count": data.get("reported_review_count"),
+                "review_count": data.get("review_count"), "review_count_source": data.get("review_count_source"),
+                "price": data.get("price"), "bullets": data.get("bullets", []),
+                "product_description": data.get("product_description"), "specs": data.get("specs", {}),
+                "buy_box": data.get("buy_box", {}), "top_reviews": data.get("top_reviews", []),
+                "review_link": data.get("review_link"), "review_section_anchor": data.get("review_section_anchor"),
+                "aplus_present": bool(data.get("aplus_present")), "collected_at": utc_now(), "status": "product_done",
+            },
+            media=media,
+            content_modules=content,
+            review_summary={
+                "reported_rating_count": data.get("reported_rating_count"),
+                "reported_review_count": data.get("reported_review_count"),
+                "reported_count_source": data.get("review_count_source"),
+                "fetched_count": 0, "pages_fetched": 0, "next_page": review_url,
+                "status": "in_progress" if review_url else "section_only" if data.get("review_section_anchor") else "not_available",
+            },
+            next_status="reviews_pending" if review_url else "succeeded",
+            state_fields={
+                "task_stage": "reviews" if review_url else "complete", "resume_status": "reviews_pending" if review_url else None,
+                "next_review_url": review_url, "next_review_page": 1 if review_url else None,
+                "reported_rating_count": data.get("reported_rating_count"),
+                "reported_review_count": data.get("reported_review_count"),
+                "reported_count_source": data.get("review_count_source"),
+            },
+            reason="reviews_required" if review_url else "no_paginated_review_link",
+        )
+        if refresh_job_id:
+            storage.finish_refresh_request(refresh_job_id, "completed")
+        actions += 1
+    return -1 if blocked else actions
+
+
 def _prepare_paths(args: argparse.Namespace, config: dict[str, Any]) -> tuple[Path, Path, Path]:
     paths = config.get("paths", {})
     manifest = resolve_path(args.manifest or paths.get("manifest", DEFAULT_MANIFEST))
@@ -1663,6 +1970,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--visible", action="store_true")
     parser.add_argument("--once", action="store_true", help="运行一个批次后退出")
     parser.add_argument("--limit", type=int, help="覆盖本次 action 数上限")
+    parser.add_argument("--backend", choices=("postgres", "sqlite"), default="postgres")
+    parser.add_argument("--dsn-env", default="AMAZON_US_POSTGRES_DSN")
+    parser.add_argument("--tenant-id", default="amazon_us_local")
+    parser.add_argument("--subject-type", choices=("own", "competitor", "candidate"), default="own")
+    parser.add_argument("--worker-id", default=f"amazon-us-worker-{os.getpid()}")
+    parser.add_argument("--lease-seconds", type=int, default=600)
     return parser
 
 
@@ -1670,6 +1983,41 @@ def run(args: argparse.Namespace) -> int:
     config = load_config(resolve_path(args.config))
     manifest, state, output = _prepare_paths(args, config)
     config["output_dir"] = output
+    if getattr(args, "backend", "sqlite") == "postgres":
+        dsn = os.environ.get(args.dsn_env, "").strip()
+        if not dsn:
+            raise ValueError(f"PostgreSQL DSN environment variable is required: {args.dsn_env}")
+        try:
+            from postgres_worker_storage import PostgresWorkerStorage
+        except ModuleNotFoundError:
+            sys.path.insert(0, str(ROOT / "scripts"))
+            from postgres_worker_storage import PostgresWorkerStorage
+        with manifest.open("r", encoding="utf-8-sig", newline="") as handle:
+            manifest_rows = list(csv.DictReader(handle))
+        storage = PostgresWorkerStorage(
+            dsn, tenant_id=args.tenant_id, subject_type=args.subject_type,
+            default_lease_seconds=args.lease_seconds,
+        )
+        initialized = storage.initialize_manifest(manifest_rows)
+        storage.reclaim_expired_leases()
+        if args.init or args.dry_run:
+            print(f"phase=initialized; manifest={initialized} 条；PostgreSQL；不访问网络。")
+            return 0
+        if args.materialize_only:
+            raise ValueError("PostgreSQL materialization is not implemented; use Collection API or PostgreSQL export")
+        if not args.live:
+            print("错误: 采集必须显式指定 --live；当前未发出网络请求。", file=sys.stderr)
+            return 2
+        if args.visible:
+            config["headless"] = False
+        adapter = HttpFirstAdapter(config)
+        try:
+            action_result = run_postgres_actions(
+                storage, adapter, config, limit=args.limit, worker_id=args.worker_id, lease_seconds=args.lease_seconds,
+            )
+            return 3 if action_result == -1 else 0
+        finally:
+            adapter.close()
     conn = init_db(state, int(config["max_attempts"]))
     initialize_manifest(conn, manifest, config)
     recover_running(conn)
@@ -1701,6 +2049,9 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.limit is not None and args.limit < 1:
         print("错误: --limit 必须为正整数", file=sys.stderr)
+        return 2
+    if args.lease_seconds < 1:
+        print("错误: --lease-seconds 必须为正整数", file=sys.stderr)
         return 2
     try:
         return run(args)

@@ -6,14 +6,13 @@ if not exist ".venv\Scripts\python.exe" (
   exit /b 1
 )
 call .venv\Scripts\activate.bat
-python scripts\amazon_us_worker.py --config config\amazon_us.windows.toml --live --once
+if "%AMAZON_US_POSTGRES_DSN%"=="" (
+  echo Set AMAZON_US_POSTGRES_DSN before running the production worker.
+  exit /b 1
+)
+python scripts\amazon_us_worker.py --config config\amazon_us.windows.toml --backend postgres --tenant-id amazon_us_local --subject-type own --live --once
 set WORKER_EXIT=%ERRORLEVEL%
-python scripts\amazon_us_worker.py --config config\amazon_us.windows.toml --materialize-only
-python scripts\amazon_us_verify.py --once
+python scripts\verify_postgres.py --dsn-env AMAZON_US_POSTGRES_DSN --tenant-id amazon_us_local
 set VERIFY_EXIT=%ERRORLEVEL%
-python scripts\verify_agent_review.py
-python scripts\run_receipt.py --manifest amazon_us_asin_manifest.csv --state state\amazon_us.sqlite3 --output-dir data\amazon_us --raw-html-dir data\amazon_us\raw_html --output data\amazon_us\run_receipt.json
-set RECEIPT_EXIT=%ERRORLEVEL%
 if not "%WORKER_EXIT%"=="0" exit /b %WORKER_EXIT%
-if not "%VERIFY_EXIT%"=="0" exit /b %VERIFY_EXIT%
-exit /b %RECEIPT_EXIT%
+exit /b %VERIFY_EXIT%

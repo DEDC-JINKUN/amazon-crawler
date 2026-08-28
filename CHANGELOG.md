@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0 - 2026-08-28
+
+- 正式 Worker 改为直接使用 PostgreSQL：任务领取采用 `FOR UPDATE SKIP LOCKED`，支持租约令牌、租约过期回收、租户与自有/竞品隔离。
+- 商品 evidence、历史快照、媒体、内容模块、评论摘要、评论记录和任务状态在 PostgreSQL 事务内写入；SQLite 不再进入正式 Windows 运行链路。
+- Collection API 刷新请求可被 Worker 原子领取；新增 PostgreSQL 陈旧快照定时入队并防止重复活跃任务。
+- 正式预检校验 PostgreSQL schema、Firefox、geckodriver 和 ZIP；Windows 正式配置固定使用 `90001`。
+- 修复 PostgreSQL 严格类型下空字符串写 integer、配送 ZIP 弹窗未真正提交、浏览器失败误标来源、空标题伪成功和评论失败丢失断点的问题。
+- 本机 PostgreSQL 17.10 真实验证双 Worker 不重复领取；真实 ASIN 商品页落库得到 5 条 bullets、34 条媒体和 23 个内容模块。
+- Amazon 独立评论页仍可能返回 200 空 DOM；系统保留评论断点并标记 `empty_review_page`，不伪造成功。
+
 ## 0.2.13 - 2026-08-28
 
 - 采集指标和成本报告新增 `--all-runs`，可汇总同一 SQLite 状态库中的多轮续跑，不再只看最新 run。

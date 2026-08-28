@@ -25,6 +25,22 @@ class ContextGuardTests(unittest.TestCase):
         )
         self.assertEqual(errors, ["currency_mismatch", "delivery_country_mismatch"])
 
+    def test_rejects_explicit_delivery_zip_that_differs_from_expected_zip(self):
+        guard = load("context_guard")
+        errors = guard.validate_context(
+            {"price": "$23.99", "buy_box": {"delivery": "Delivering to Portland 97230 - Update location"}},
+            {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
+        )
+        self.assertEqual(errors, ["delivery_postal_mismatch"])
+
+        self.assertEqual(
+            guard.validate_context(
+                {"price": "$23.99", "buy_box": {"delivery": "Delivering to Los Angeles 90001"}},
+                {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
+            ),
+            [],
+        )
+
     def test_context_mismatch_does_not_write_product_snapshot(self):
         worker = load("amazon_us_worker")
         with tempfile.TemporaryDirectory() as directory:
