@@ -161,7 +161,25 @@ Cookie 桥接是商品/评论结果之外的附加动作。导出 Cookie 或 sco
 
 HTTP 请求继续由标准 CookieJar 根据 domain/path/secure/expiry 决定是否发送，代码不手工拼接 `Cookie` header。
 
-### 4.3 HTTP 计量
+### 4.3 可选的 run 启动预热：仅记录，尚未实现
+
+当前正式策略仍是按需预热：每个新 run 创建空的匿名内存 CookieJar，第一个 ASIN 先走 HTTP；只有 HTTP 暴露区域上下文问题时才启动隔离 Firefox、尝试确认 ZIP/US/USD，并在确认后把合规匿名 Cookie 桥接到同 run HTTP 会话。该策略避免美国出口本来可直接返回正确上下文时仍强制产生一次 Firefox 流量。
+
+不得为了减少第一次 Firefox 而读取上一次 run 保存的 Cookie。跨 run 持久化会引入过期、出口国家变化、会话标识泄露、tenant/worker 污染以及旧 Cookie 与新 IP 组合异常等风险，继续明确禁止写磁盘、数据库或日志；个人登录 Cookie 也不在候选方案内。
+
+当真实 100/500-ASIN 批次证明首次 context fallback 对耗时或代理成本有显著影响时，可评估“run 启动匿名会话预热”作为可选配置：启动一次隔离 Firefox，打开 Amazon 轻量公开页面，设置并双重确认 90001/US/USD，把筛选后的匿名 Cookie 仅放入本 run 内存 Jar，再开始领取商品。该方案不会改变 Cookie scope、full/partial 契约或退出销毁规则。
+
+是否实现必须先用相同出口和可比 cohort 做 A/B 验证：
+
+- 不预热与启动预热的 Firefox action/fallback 比例；
+- 供应商 `U1-U0` 总流量，而不是 Raw HTML 或本地 ledger 估算；
+- 首次成功耗时、整批耗时、成功率和 block 率；
+- 匿名 Cookie 在同 run 内的有效持续时间；
+- 预热失败时应停止、降级为按需模式还是继续 partial 的明确运行合同。
+
+默认建议保持：小批次按需预热；大批次只有在真实数据证明净收益后才允许配置启动预热；稳定美国代理先验证是否根本不需要预热。当前没有启动预热配置、实现或验收结论，文档不得把它写成已交付能力。
+
+### 4.4 HTTP 计量
 
 `HttpFirstAdapter.fetch()` 默认发送 `Accept-Encoding: gzip`。`last_transfer_bytes` 是一次 HTTP fetch 的压缩响应体字节；`action_http_transfer_bytes` 累计同一 action 内的全部 HTTP 尝试，包括重试、评论 portal URL 和备用 `/product-reviews/{ASIN}`。
 
