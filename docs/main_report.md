@@ -28,7 +28,7 @@
 
 ### 1.4 当前结论
 
-低流量控制、Cookie 桥接、fallback 去重、nullable 流量和 full/partial 上下文合同已通过离线测试。2026-08-31 的真实小批次已验证 HTTP/Firefox 混合采集、Cookie bridge 与 terminal failure；后续 10-ASIN run 暴露 Firefox 地址弹窗未把 Portland 97230 提交为 90001，本轮已增加 DOM click 与弹窗变体回归，但修复后的真实 Amazon 批次尚未运行。当前进程没有 `AMAZON_TEST_POSTGRES_DSN`，真实 PostgreSQL 集成测试明确跳过，也没有代理供应商后台 `U1-U0` 账单证据；不能从离线结果推断实机 ZIP 成功率或成本承诺。
+低流量控制、Cookie 桥接、fallback 去重、nullable 流量、terminal failure 和 full/partial 上下文合同已通过离线测试，最新完整结果为 `261 passed, 1 skipped`。2026-08-31 修复后的真实 Amazon 阶梯已验证：3-ASIN 为 3/3 completed（1 full、2 partial）；10-ASIN 为 8 full、1 terminal ASIN mismatch、1 旧版 404 顺序回归；顺序修复后直接20-ASIN得到14 full、3 terminal 404、3 terminal ASIN mismatch、0 blocked、stderr 为0。最新20条中仅首个有效上下文需要1次 Firefox full 确认和 Cookie bridge，后续有效商品由HTTP复用同run匿名上下文；6个确定性失败均已写 `attempts=max_attempts` 并释放租约，不会被普通下一run重复领取。当前进程仍没有 `AMAZON_TEST_POSTGRES_DSN`，独立真实 PostgreSQL集成测试明确跳过；也没有代理供应商后台 `U1-U0` 账单证据，不能把本地流量当成代理成本承诺。
 
 ## 2. 系统架构
 
@@ -413,7 +413,7 @@ cost_per_successful_asin = billed_cost / successful_asins
 | `save_media` | `url_and_metadata_only` | 不下载媒体二进制 |
 | `expected_country` | `US` | 地域门禁 |
 | `expected_currency` | `USD` | 币种门禁 |
-| `postal_code` | `90001` | 配送 ZIP 门禁 |
+| `postal_code` | `90001` | 目标配送 ZIP；US/USD为硬门，ZIP为full/partial软门 |
 
 DSN 和密码只通过当前进程环境提供。不得写入 TOML、Git、日志或回执。
 
@@ -517,15 +517,16 @@ Console 只在三项同时成立时复用：`.console.lock.json` 中的 PID+Star
 | 已验证 | BiDi 资源策略与 nullable 计量逻辑 | fake request/event 离线测试 |
 | 已验证 | fallback enum、run/ASIN/reason 去重、阻断/登录/跳转不升级 | 离线 runner 测试 |
 | 已验证 | 商品、评论断点、媒体 URL/A+解析不回归 | fixture/存储测试 |
+| 已验证 | full/partial/invalid 字段级上下文、风险字段与Cookie仅full桥接 | 离线测试；真实3-ASIN为1 full/2 partial，后续10/20实机覆盖full |
+| 已验证 | 404缺ASIN+标题与严格ASIN mismatch终止、释放租约且不普通重领 | 离线PG/SQLite测试；最新20-ASIN真实PostgreSQL状态核对 |
+| 已验证 | 同run匿名Cookie桥接后HTTP复用 | 最新20-ASIN为1条Firefox、19条HTTP，桥接1次 |
 | 目标值 | 商品成功率 | `>= 95%`，待真实批次 |
 | 目标值 | US/USD 硬门正确率 | `100%`，待真实批次 |
-| 目标值 | full/partial 可解释率 | `100%` evidence 与 Console 显示；ZIP full 比例待真实批次 |
-| 目标值 | Firefox action 比例 | `<= 20%`，待真实批次 |
+| 目标值 | full/partial 可解释率 | 最新3/10/20 evidence 与 Console 均可解释；继续扩样验证 |
+| 目标值 | Firefox action 比例 | 最新20-ASIN为`5%`；继续扩样和代理账单验证 |
 | 目标值 | 媒体 URL 与内容模块保留率 | `>= 95%`，待真实双跑 |
 | 目标值 | 代理计费流量 | `<= 4 MB / successful ASIN`，待供应商账单 |
 | 未验证 | Firefox/geckodriver 实机 BiDi bytes 与 fetch_error 事件完整性 | 需获批 Amazon 小样本 |
-| 未验证 | 匿名 ZIP Cookie 桥接后的 Firefox 比例下降 | 需 `3 → 10 → 20` |
-| 未验证 | 修复窗口丢失后的真实 3-ASIN 回归 | 需获准的非受限网络环境；不得在沙箱内绕过 WinError 10013 |
 | 未验证 | 真实 PostgreSQL 集成（当前进程） | `AMAZON_TEST_POSTGRES_DSN` 缺失 |
 | 未验证 | 代理后台计费与本地四类指标对账 | 需最小付费套餐和 `U1-U0` |
 
