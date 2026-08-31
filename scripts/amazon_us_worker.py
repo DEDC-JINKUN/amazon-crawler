@@ -383,6 +383,7 @@ class BrowserNetworkLedger:
             self._unknown_count = {"main": 0, "subresource": 0}
             self._blocked = Counter()
             self._blocked_request_race_count = 0
+            self._continued_request_race_count = 0
 
     @classmethod
     def _is_explicit_ad_or_telemetry(cls, url: str) -> bool:
@@ -425,6 +426,20 @@ class BrowserNetworkLedger:
         with self._lock:
             self._blocked_request_race_count += 1
             self._unknown_count["subresource"] += 1
+
+    def record_continued_request_race(self, request: Any) -> None:
+        url = str(getattr(request, "url", "") or "")
+        with self._lock:
+            self._continued_request_race_count += 1
+            queue = self._request_buckets.get(url)
+            if queue:
+                bucket = queue.pop()
+                if not queue:
+                    self._request_buckets.pop(url, None)
+                self._unknown_count[bucket] += 1
+            else:
+                self._unknown_count["main"] += 1
+                self._unknown_count["subresource"] += 1
 
     @staticmethod
     def _response_payload(event: Any) -> dict[str, Any]:
@@ -506,6 +521,7 @@ class BrowserNetworkLedger:
                 "subresource_unknown_count": sub_unknown,
                 "blocked_resource_counts": dict(sorted(self._blocked.items())),
                 "blocked_request_race_count": self._blocked_request_race_count,
+                "continued_request_race_count": self._continued_request_race_count,
             }
 
 
@@ -1647,8 +1663,11 @@ class SeleniumFirefoxAdapter:
             else:
                 request.continue_request()
         except WebDriverException as exc:
-            if blocked and _is_stale_bidi_fail_request(exc):
-                self._network_ledger.record_blocked_request_race()
+            if _is_stale_bidi_fail_request(exc):
+                if blocked:
+                    self._network_ledger.record_blocked_request_race()
+                else:
+                    self._network_ledger.record_continued_request_race(request)
                 return
             raise
 
@@ -2070,6 +2089,7 @@ def _evidence_context(base_context: dict[str, Any] | None, adapter: Any) -> dict
                 "firefox_subresource_unknown_count": int(browser.get("subresource_unknown_count") or 1),
                 "blocked_resource_counts": dict(browser.get("blocked_resource_counts") or {}),
                 "blocked_request_race_count": int(browser.get("blocked_request_race_count") or 0),
+                "continued_request_race_count": int(browser.get("continued_request_race_count") or 0),
             }
         )
     context["traffic"] = traffic

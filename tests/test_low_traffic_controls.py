@@ -263,16 +263,49 @@ def test_firefox_adapter_installs_selenium_447_high_level_bidi_handlers():
         def continue_request(self):
             raise AssertionError("blocked resources must not continue")
 
+    class StaleAllowedRequest(FakeRequest):
+        def __init__(self, resource_type, url, message, context=None):
+            super().__init__(resource_type, url, context)
+            self.message = message
+
+        def continue_request(self):
+            raise WebDriverException(self.message)
+
     allowed = AllowedRequest()
     request_handler(allowed)
+    adapter._network_ledger.handle_response_completed(
+        {"response": {"url": allowed.url, "bytesReceived": 10}}
+    )
+    request_handler(
+        StaleAllowedRequest(
+            "document",
+            "https://www.amazon.com/dp/B00RCPDCQU",
+            "no such request: Blocked request with id allowed-main not found",
+        )
+    )
+    request_handler(
+        StaleAllowedRequest(
+            "xhr",
+            "https://www.amazon.com/api/details",
+            "no such request: Blocked request with id allowed-subresource not found",
+        )
+    )
     request_handler(StaleBlockedRequest("no such request: Blocked request with id dummy-1 not found"))
-    with pytest.raises(WebDriverException, match="invalid session"):
-        request_handler(StaleBlockedRequest("invalid session id"))
 
     assert allowed.continued == 1
     snapshot = adapter._network_ledger.snapshot()
     assert snapshot["blocked_request_race_count"] == 1
+    assert snapshot["continued_request_race_count"] == 2
+    assert snapshot["main_document_unknown_count"] == 1
+    assert snapshot["subresource_unknown_count"] == 2
     assert worker.BrowserNetworkLedger().snapshot()["blocked_request_race_count"] == 0
+    assert worker.BrowserNetworkLedger().snapshot()["continued_request_race_count"] == 0
+    with pytest.raises(WebDriverException, match="invalid session"):
+        request_handler(
+            StaleAllowedRequest("xhr", "https://www.amazon.com/api/error", "invalid session id")
+        )
+    with pytest.raises(WebDriverException, match="invalid session"):
+        request_handler(StaleBlockedRequest("invalid session id"))
     assert [event for event, _ in driver.network.event_handlers] == ["response_completed", "fetch_error"]
     adapter.close()
     assert driver.network.removed_request_handler_args == ("before_request", "request-handler")
@@ -939,6 +972,7 @@ def test_product_fallback_reason_and_nullable_browser_traffic_are_persisted_in_e
                 "subresource_unknown_count": 0,
                 "blocked_resource_counts": {"image": 3},
                 "blocked_request_race_count": 2,
+                "continued_request_race_count": 4,
             }
             return """
             <html><head><link rel="canonical" href="https://www.amazon.com/dp/B00RCPDCQU"></head><body>
@@ -968,6 +1002,7 @@ def test_product_fallback_reason_and_nullable_browser_traffic_are_persisted_in_e
     assert context["traffic"]["firefox_subresource_bytes"] == 400
     assert context["traffic"]["blocked_resource_counts"] == {"image": 3}
     assert context["traffic"]["blocked_request_race_count"] == 2
+    assert context["traffic"]["continued_request_race_count"] == 4
 
 
 @pytest.mark.parametrize(
