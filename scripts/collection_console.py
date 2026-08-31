@@ -41,6 +41,57 @@ def _json_default(value: Any) -> str:
     return str(value)
 
 
+def summarize_traffic(rows: list[dict[str, Any]]) -> dict[str, dict[str, int | None]]:
+    accumulators = {
+        "http_compressed_response": {"known_bytes": 0, "known_records": 0, "unknown_records": 0},
+        "firefox_main_document": {"known_bytes": 0, "known_records": 0, "unknown_records": 0},
+        "firefox_subresources": {"known_bytes": 0, "known_records": 0, "unknown_records": 0},
+    }
+    for row in rows:
+        context = row.get("context_json") or {}
+        if isinstance(context, str):
+            try:
+                context = json.loads(context)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                context = {}
+        context_traffic = context.get("traffic") if isinstance(context, dict) else {}
+        context_traffic = context_traffic if isinstance(context_traffic, dict) else {}
+        source = str(row.get("source_type") or "unknown")
+        http_applicable = source == "http_html" or "http_compressed_response_bytes" in context_traffic
+        if http_applicable:
+            value = context_traffic.get("http_compressed_response_bytes")
+            if value is None and source == "http_html":
+                value = row.get("transfer_bytes")
+            if value is None:
+                accumulators["http_compressed_response"]["unknown_records"] += 1
+            else:
+                accumulators["http_compressed_response"]["known_bytes"] += max(0, int(value))
+                accumulators["http_compressed_response"]["known_records"] += 1
+        if source == "selenium_dom":
+            for category, byte_key, unknown_key in (
+                ("firefox_main_document", "firefox_main_document_bytes", "firefox_main_document_unknown_count"),
+                ("firefox_subresources", "firefox_subresource_bytes", "firefox_subresource_unknown_count"),
+            ):
+                value = context_traffic.get(byte_key)
+                unknown = int(context_traffic.get(unknown_key) or 0)
+                if value is None:
+                    accumulators[category]["unknown_records"] += max(1, unknown)
+                else:
+                    accumulators[category]["known_bytes"] += max(0, int(value))
+                    accumulators[category]["known_records"] += 1
+                    accumulators[category]["unknown_records"] += unknown
+    result = {
+        category: {
+            "bytes": None if values["unknown_records"] else values["known_bytes"],
+            "known_records": values["known_records"],
+            "unknown_records": values["unknown_records"],
+        }
+        for category, values in accumulators.items()
+    }
+    result["proxy_dashboard_bill"] = {"bytes": None, "known_records": 0, "unknown_records": 1}
+    return result
+
+
 class PostgresConsoleRepository:
     """Purpose-built, read-only query surface for the local operations UI."""
 
@@ -114,6 +165,11 @@ class PostgresConsoleRepository:
                 params,
             )
             evidence = dict(cursor.fetchone())
+            cursor.execute(
+                "SELECT source_type,transfer_bytes,context_json FROM amazon_us.collection_evidence WHERE tenant_id=%s",
+                params,
+            )
+            traffic_summary = summarize_traffic([dict(row) for row in cursor.fetchall()])
             table_counts: dict[str, int] = {}
             for name, table in (
                 ("products", "product_latest"),
@@ -176,6 +232,7 @@ class PostgresConsoleRepository:
                 "known_http_transfer_bytes": int(evidence.get("transfer_bytes") or 0),
                 "unknown_transfer_records": actions - known_transfers,
                 "proxy_billed_bytes": None,
+                **traffic_summary,
             },
             "last_evidence_at": evidence.get("last_evidence_at"),
         }
@@ -267,7 +324,7 @@ class PostgresConsoleRepository:
         with self._connect() as conn, conn.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT e.id,e.run_id,e.asin,e.subject_type,e.url,e.http_status,e.transfer_bytes,e.retrieved_at,
+                SELECT e.id,e.run_id,e.asin,e.subject_type,e.url,e.http_status,e.transfer_bytes,e.context_json,e.retrieved_at,
                        e.source_type,e.block_reason,e.error_code,e.raw_html_path,e.content_hash,
                        s.status AS current_status,s.task_stage,s.last_error,s.updated_at,p.title,p.price
                 FROM amazon_us.collection_evidence e
@@ -308,6 +365,7 @@ class PostgresConsoleRepository:
                 outcome = "blocked" if row.get("block_reason") else "failed" if row.get("last_error") else row.get("current_status")
                 items.append({**row, "outcome": outcome, "attribution": "time_window_inference"})
         items.sort(key=lambda item: (item.get("retrieved_at") or item.get("updated_at"), item["asin"]))
+        traffic_summary = summarize_traffic(evidence_rows)
         return {
             "schema_version": "amazon-us-console-v1",
             "tenant_id": self.tenant_id,
@@ -317,6 +375,7 @@ class PostgresConsoleRepository:
             "recorded_actions": len(evidence_rows),
             "inferred_actions": sum(1 for item in items if item["attribution"] == "time_window_inference"),
             "known_transfer_bytes": sum(int(item.get("transfer_bytes") or 0) for item in evidence_rows),
+            "traffic": traffic_summary,
             "items": items,
             "warning": "time_window_inference is legacy fallback; new network failures write run evidence",
         }

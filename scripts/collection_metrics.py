@@ -41,17 +41,18 @@ def build_report(db_path: Path, raw_html_dir: Path | None = None, run_id: str | 
         conn.row_factory = sqlite3.Row
         evidence_columns = {row[1] for row in conn.execute("PRAGMA table_info(collection_evidence)")}
         transfer_select = "transfer_bytes" if "transfer_bytes" in evidence_columns else "NULL AS transfer_bytes"
+        context_select = "context_json" if "context_json" in evidence_columns else "NULL AS context_json"
         if run_id is None and not all_runs:
             row = conn.execute("SELECT run_id FROM collection_evidence ORDER BY id DESC LIMIT 1").fetchone()
             run_id = row["run_id"] if row else None
         if all_runs:
             evidence = list(conn.execute(
-                f"SELECT id,asin,url,source_type,http_status,{transfer_select},retrieved_at,error_code,block_reason,raw_html_path FROM collection_evidence ORDER BY id"
+                f"SELECT id,asin,url,source_type,http_status,{transfer_select},{context_select},retrieved_at,error_code,block_reason,raw_html_path FROM collection_evidence ORDER BY id"
             ))
             run_id = "all-runs"
         else:
             evidence = list(conn.execute(
-                f"SELECT id,asin,url,source_type,http_status,{transfer_select},retrieved_at,error_code,block_reason,raw_html_path FROM collection_evidence WHERE run_id=? ORDER BY id",
+                f"SELECT id,asin,url,source_type,http_status,{transfer_select},{context_select},retrieved_at,error_code,block_reason,raw_html_path FROM collection_evidence WHERE run_id=? ORDER BY id",
                 (run_id,),
             )) if run_id else []
         asins = sorted({row["asin"] for row in evidence})
@@ -79,16 +80,50 @@ def build_report(db_path: Path, raw_html_dir: Path | None = None, run_id: str | 
     transfer_bytes_known = 0
     transfer_bytes_missing = 0
     seen_transfer_keys: set[str] = set()
+    traffic = {
+        "http_compressed_response": {"known_bytes": 0, "known_records": 0, "unknown_records": 0},
+        "firefox_main_document": {"known_bytes": 0, "known_records": 0, "unknown_records": 0},
+        "firefox_subresources": {"known_bytes": 0, "known_records": 0, "unknown_records": 0},
+    }
     for row in evidence:
         transfer_key = str(row["raw_html_path"] or f"evidence:{row['id']}")
         if transfer_key in seen_transfer_keys:
             continue
         seen_transfer_keys.add(transfer_key)
-        if row["transfer_bytes"] is not None:
-            transfer_bytes_total += max(0, int(row["transfer_bytes"]))
-            transfer_bytes_known += 1
-        else:
-            transfer_bytes_missing += 1
+        source_type = str(row["source_type"] or "unknown")
+        try:
+            context = json.loads(row["context_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            context = {}
+        context_traffic = context.get("traffic") if isinstance(context, dict) else {}
+        context_traffic = context_traffic if isinstance(context_traffic, dict) else {}
+        http_applicable = source_type == "http_html" or "http_compressed_response_bytes" in context_traffic
+        if http_applicable:
+            value = context_traffic.get("http_compressed_response_bytes")
+            if value is None and source_type == "http_html":
+                value = row["transfer_bytes"]
+            if value is None:
+                transfer_bytes_missing += 1
+                traffic["http_compressed_response"]["unknown_records"] += 1
+            else:
+                value = max(0, int(value))
+                transfer_bytes_total += value
+                transfer_bytes_known += 1
+                traffic["http_compressed_response"]["known_bytes"] += value
+                traffic["http_compressed_response"]["known_records"] += 1
+        if source_type == "selenium_dom":
+            for category, byte_key, unknown_key in (
+                ("firefox_main_document", "firefox_main_document_bytes", "firefox_main_document_unknown_count"),
+                ("firefox_subresources", "firefox_subresource_bytes", "firefox_subresource_unknown_count"),
+            ):
+                value = context_traffic.get(byte_key)
+                unknown = int(context_traffic.get(unknown_key) or 0)
+                if value is None:
+                    traffic[category]["unknown_records"] += max(1, unknown)
+                else:
+                    traffic[category]["known_bytes"] += max(0, int(value))
+                    traffic[category]["known_records"] += 1
+                    traffic[category]["unknown_records"] += unknown
     if raw_html_dir:
         for row in evidence:
             if not row["raw_html_path"]:
@@ -121,6 +156,15 @@ def build_report(db_path: Path, raw_html_dir: Path | None = None, run_id: str | 
             row["asin"] for row in successful_evidence
             if _is_product_page(row["url"], row["asin"]) and (row["asin"], row["url"]) not in failed_product_keys
         }
+    traffic_report = {
+        name: {
+            "bytes": None if values["unknown_records"] else values["known_bytes"],
+            "known_records": values["known_records"],
+            "unknown_records": values["unknown_records"],
+        }
+        for name, values in traffic.items()
+    }
+    traffic_report["proxy_dashboard_bill"] = {"bytes": None, "known_records": 0, "unknown_records": 1}
     return {
         "schema_version": "amazon-us-collection-metrics-v1",
         "run_id": run_id,
@@ -138,6 +182,7 @@ def build_report(db_path: Path, raw_html_dir: Path | None = None, run_id: str | 
         "transfer_bytes_total": transfer_bytes_total,
         "transfer_bytes_known_count": transfer_bytes_known,
         "transfer_bytes_missing_count": transfer_bytes_missing,
+        "traffic": traffic_report,
         "elapsed_seconds": elapsed,
         "pages_per_second": round(page_count / elapsed, 4) if elapsed and elapsed > 0 else None,
         "successful_pages_per_second": round(success_pages / elapsed, 4) if elapsed and elapsed > 0 else None,

@@ -9,6 +9,8 @@ const bytes = (value) => {
   if (size < 1024 ** 3) return `${(size / 1024 ** 2).toFixed(2)} MiB`;
   return `${(size / 1024 ** 3).toFixed(2)} GiB`;
 };
+const trafficBytes = (category) => category && category.bytes !== null && category.bytes !== undefined ? bytes(category.bytes) : 'unknown';
+const trafficSub = (category) => `${number(category?.known_records)} known · ${number(category?.unknown_records)} unknown`;
 const text = (tag, value, className = '') => {
   const node = document.createElement(tag);
   node.textContent = value ?? '—';
@@ -52,8 +54,13 @@ function renderOverview(data) {
   $('rowsMetric').textContent = number(data.four_scale_metrics.database_rows);
   $('rawMetric').textContent = bytes(data.traffic.saved_raw_html_bytes);
   $('rawSub').textContent = `${number(data.traffic.raw_html_files)} files`;
-  $('transferMetric').textContent = bytes(data.traffic.known_http_transfer_bytes);
-  $('transferSub').textContent = `${number(data.traffic.unknown_transfer_records)} records unknown`;
+  $('httpTrafficMetric').textContent = trafficBytes(data.traffic.http_compressed_response);
+  $('httpTrafficSub').textContent = trafficSub(data.traffic.http_compressed_response);
+  $('firefoxMainMetric').textContent = trafficBytes(data.traffic.firefox_main_document);
+  $('firefoxMainSub').textContent = trafficSub(data.traffic.firefox_main_document);
+  $('firefoxSubresourceMetric').textContent = trafficBytes(data.traffic.firefox_subresources);
+  $('firefoxSubresourceSub').textContent = trafficSub(data.traffic.firefox_subresources);
+  $('proxyBillMetric').textContent = trafficBytes(data.traffic.proxy_dashboard_bill);
   const statusRoot = $('statusList'); clear(statusRoot);
   const total = Math.max(1, Object.values(data.status_counts).reduce((sum, value) => sum + value, 0));
   for (const [key, value] of Object.entries(data.status_counts)) {
@@ -78,7 +85,7 @@ function renderOverview(data) {
 
 function renderRun(data) {
   state.selectedRun = data.run_id;
-  $('runSummary').textContent = `${data.run_id} · ${number(data.items.length)}项（evidence ${number(data.recorded_actions)}，历史推断 ${number(data.inferred_actions)}）· ${dateTime(data.started_at)} → ${dateTime(data.ended_at)} · 已知传输 ${bytes(data.known_transfer_bytes)}`;
+  $('runSummary').textContent = `${data.run_id} · ${number(data.items.length)}项（evidence ${number(data.recorded_actions)}，历史推断 ${number(data.inferred_actions)}）· ${dateTime(data.started_at)} → ${dateTime(data.ended_at)} · HTTP ${trafficBytes(data.traffic?.http_compressed_response)} · Firefox主文档 ${trafficBytes(data.traffic?.firefox_main_document)} · Firefox子资源 ${trafficBytes(data.traffic?.firefox_subresources)}`;
   $('runWarning').textContent = data.inferred_actions ? '⚠ 历史网络失败没有run evidence；黄色归属为按本run时间窗口推断。新运行已永久修复。' : '全部结果均有不可变run evidence。';
   const body = $('runRows'); clear(body);
   for (const item of data.items || []) {
@@ -165,7 +172,7 @@ async function openDetail(asin) {
     else product.append(text('p', '尚无有效商品快照', 'muted')); root.append(product);
     const media = detailSection(`媒体 URL · ${(data.media || []).length}`); const mediaList = text('div', '', 'detail-list'); for (const value of data.media || []) mediaList.append(linkItem(value.display_url || value.asset_url || value.thumbnail_url, `${value.placement || 'media'} · ${value.entry_type || ''}`)); media.append(mediaList); root.append(media);
     const topReviews = detailSection(`商品页 Top Reviews · ${(data.top_reviews || []).length}`); for (const review of data.top_reviews || []) { const item = text('div', '', 'detail-item'); item.append(text('strong', review.title || review.rating || 'Review'), text('p', review.body || review.text || JSON.stringify(review))); topReviews.append(item); } if (!(data.top_reviews || []).length) topReviews.append(text('p', '无商品页评论摘要', 'muted')); root.append(topReviews);
-    const evidence = detailSection(`Evidence · ${(data.evidence || []).length}`); for (const value of data.evidence || []) evidence.append(fieldGrid({ source: value.source_type, http: value.http_status, error: value.error_code, block: value.block_reason, retrieved: dateTime(value.retrieved_at), raw_html_path: value.raw_html_path, transfer_bytes: value.transfer_bytes })); root.append(evidence);
+    const evidence = detailSection(`Evidence · ${(data.evidence || []).length}`); for (const value of data.evidence || []) { const traffic = value.context_json?.traffic || {}; const bridge = value.context_json?.cookie_bridge || {}; evidence.append(fieldGrid({ source: value.source_type, fallback_reason: value.context_json?.fallback_reason, fallback_reasons: (value.context_json?.fallback_reasons || []).join(', '), cookie_bridge: bridge.status, cookie_bridge_error: bridge.error_code, http: value.http_status, error: value.error_code, block: value.block_reason, retrieved: dateTime(value.retrieved_at), raw_html_path: value.raw_html_path, http_compressed_bytes: traffic.http_compressed_response_bytes, firefox_main_bytes: traffic.firefox_main_document_bytes ?? 'unknown', firefox_subresource_bytes: traffic.firefox_subresource_bytes ?? 'unknown' })); } root.append(evidence);
     const content = detailSection(`内容模块 · ${(data.content_modules || []).length}`); content.append(jsonBlock(data.content_modules || [])); root.append(content);
     const reviews = detailSection('独立评论状态'); reviews.append(jsonBlock({ summary: data.review_summary, records: data.reviews || [] })); root.append(reviews);
   } catch (error) { clear(root); root.append(text('p', `详情读取失败：${error.message}`, 'error-banner')); }

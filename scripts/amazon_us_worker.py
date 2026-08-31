@@ -14,6 +14,7 @@ import gzip
 import hashlib
 import html as html_module
 import http.client
+import inspect
 import json
 import math
 import os
@@ -21,14 +22,18 @@ import re
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 import urllib.error
 import urllib.request
+from collections import Counter, defaultdict, deque
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from html.parser import HTMLParser
+from http.cookiejar import Cookie, CookieJar
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,6 +69,11 @@ STOP_PHRASES = (
     "automated access",
     "access denied",
     "too many requests",
+)
+LOGIN_WALL_PHRASES = (
+    "sign in to continue",
+    "amazon sign-in",
+    "signin to continue",
 )
 DEFAULTS: dict[str, Any] = {
     "request_timeout_seconds": 30,
@@ -163,6 +173,8 @@ def classify_block(status: int | None = None, text: str = "", title: str = "") -
     if any(tag in text.lower() for tag in ("<script", "<style", "<noscript")):
         text = visible_html_text(text)
     haystack = f"{title}\n{text}".lower()
+    if any(phrase in haystack for phrase in LOGIN_WALL_PHRASES):
+        return "login_wall"
     for phrase in STOP_PHRASES:
         if phrase in haystack:
             if phrase == "robot check":
@@ -173,6 +185,280 @@ def classify_block(status: int | None = None, text: str = "", title: str = "") -
 
 class AdapterFetchError(RuntimeError):
     """A browser fetch failure that can be checkpointed as failed."""
+
+
+class FallbackReason(str, Enum):
+    HTTP_TRANSPORT_ERROR = "http_transport_error"
+    MISSING_ASIN = "missing_asin"
+    MISSING_CANONICAL_URL = "missing_canonical_url"
+    MISSING_TITLE = "missing_title"
+    CONTEXT_MISMATCH = "context_mismatch"
+    REVIEW_EMPTY = "review_empty"
+
+
+class BrowserFallbackLedger:
+    """Run-local admission ledger for auditable browser fallbacks."""
+
+    def __init__(self) -> None:
+        self._claims: set[tuple[str, str, FallbackReason]] = set()
+
+    def claim(self, run_id: str, asin: str, reason: FallbackReason) -> bool:
+        if not isinstance(reason, FallbackReason):
+            raise TypeError("fallback reason must be a FallbackReason")
+        key = (str(run_id), str(asin).upper(), reason)
+        if key in self._claims:
+            return False
+        self._claims.add(key)
+        return True
+
+
+class RunScopedAmazonCookieSession:
+    """In-memory anonymous Amazon cookies bound to one run/tenant/worker."""
+
+    def __init__(
+        self,
+        run_id: str,
+        tenant_id: str,
+        worker_id: str,
+        *,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.scope = (str(run_id), str(tenant_id), str(worker_id))
+        self.jar = CookieJar()
+        self._now = now or (lambda: datetime.now(timezone.utc))
+        self._accepted = 0
+        self._rejected = 0
+        self._closed = False
+
+    @staticmethod
+    def _valid_domain(raw_domain: Any) -> tuple[str, bool] | None:
+        domain = str(raw_domain or "").strip().lower().rstrip(".")
+        if not domain or any(ord(char) < 33 for char in domain):
+            return None
+        bare = domain.lstrip(".")
+        if bare != "amazon.com" and not bare.endswith(".amazon.com"):
+            return None
+        return domain, domain.startswith(".")
+
+    def sync_from_firefox(
+        self,
+        cookies: Iterable[dict[str, Any]],
+        *,
+        run_id: str,
+        tenant_id: str,
+        worker_id: str,
+        context_confirmed: bool,
+    ) -> int:
+        if self._closed:
+            raise RuntimeError("cookie session is closed")
+        if (str(run_id), str(tenant_id), str(worker_id)) != self.scope:
+            raise ValueError("cookie session scope mismatch")
+        if not context_confirmed:
+            return 0
+        accepted = 0
+        now_timestamp = int(self._now().timestamp())
+        for item in cookies:
+            domain_result = self._valid_domain(item.get("domain"))
+            path = str(item.get("path") or "/")
+            name = str(item.get("name") or "")
+            value = str(item.get("value") or "")
+            expiry_value = item.get("expiry")
+            expiry: int | None = None
+            try:
+                if expiry_value is not None:
+                    expiry = int(expiry_value)
+            except (TypeError, ValueError, OverflowError):
+                self._rejected += 1
+                continue
+            if (
+                domain_result is None
+                or not name
+                or any(char in name for char in "\r\n\t;=,")
+                or not path.startswith("/")
+                or any(ord(char) < 32 for char in path)
+                or (expiry is not None and (expiry <= now_timestamp or expiry > 253402300799))
+            ):
+                self._rejected += 1
+                continue
+            domain, initial_dot = domain_result
+            cookie = Cookie(
+                version=0,
+                name=name,
+                value=value,
+                port=None,
+                port_specified=False,
+                domain=domain,
+                domain_specified=initial_dot,
+                domain_initial_dot=initial_dot,
+                path=path,
+                path_specified=True,
+                secure=bool(item.get("secure", False)),
+                expires=expiry,
+                discard=expiry is None,
+                comment=None,
+                comment_url=None,
+                rest={"HttpOnly": bool(item.get("httpOnly", False))},
+                rfc2109=False,
+            )
+            self.jar.set_cookie(cookie)
+            self._accepted += 1
+            accepted += 1
+        return accepted
+
+    def audit_summary(self) -> dict[str, int | bool]:
+        return {
+            "cookie_count": sum(1 for _ in self.jar),
+            "accepted_count": self._accepted,
+            "rejected_count": self._rejected,
+            "closed": self._closed,
+        }
+
+    def close(self) -> None:
+        self.jar.clear()
+        self._closed = True
+
+
+class BrowserNetworkLedger:
+    """BiDi request policy and nullable browser transfer accounting."""
+
+    BLOCKED_RESOURCE_TYPES = frozenset({"image", "font", "media"})
+    BLOCKED_HOST_SUFFIXES = (
+        "amazon-adsystem.com",
+        "doubleclick.net",
+        "googlesyndication.com",
+    )
+    TELEMETRY_HOST_PATHS = {
+        "fls-na.amazon.com": ("/1/batch/",),
+        "unagi-na.amazon.com": ("/1/events/", "/1/batch/"),
+        "www.amazon.com": ("/uedata/", "/gp/uedata"),
+    }
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.reset()
+
+    def reset(self, top_context_id: str | None = None) -> None:
+        with getattr(self, "_lock", threading.Lock()):
+            self._top_context_id = top_context_id
+            self._saw_main_document = False
+            self._request_buckets: dict[str, deque[str]] = defaultdict(deque)
+            self._known = {"main": 0, "subresource": 0}
+            self._known_count = {"main": 0, "subresource": 0}
+            self._unknown_count = {"main": 0, "subresource": 0}
+            self._blocked = Counter()
+
+    @classmethod
+    def _is_explicit_ad_or_telemetry(cls, url: str) -> bool:
+        parts = urlsplit(str(url or ""))
+        host = (parts.hostname or "").lower().rstrip(".")
+        path = parts.path.lower()
+        if any(host == suffix or host.endswith("." + suffix) for suffix in cls.BLOCKED_HOST_SUFFIXES):
+            return True
+        return any(marker in path for marker in cls.TELEMETRY_HOST_PATHS.get(host, ()))
+
+    def handle_request(self, request: Any) -> None:
+        resource_type = str(getattr(request, "resource_type", "") or "unknown").lower()
+        url = str(getattr(request, "url", "") or "")
+        blocked = resource_type in self.BLOCKED_RESOURCE_TYPES or self._is_explicit_ad_or_telemetry(url)
+        with self._lock:
+            if blocked:
+                self._blocked[resource_type] += 1
+            else:
+                params = getattr(request, "_params", {}) or {}
+                context_id = params.get("context") if isinstance(params, dict) else None
+                if resource_type == "document":
+                    if self._top_context_id is not None:
+                        bucket = "main" if context_id == self._top_context_id else "subresource"
+                    else:
+                        bucket = "main" if not self._saw_main_document else "subresource"
+                    if bucket == "main":
+                        self._saw_main_document = True
+                else:
+                    bucket = "subresource"
+                self._request_buckets[url].append(bucket)
+        if blocked:
+            request.fail()
+
+    @staticmethod
+    def _response_payload(event: Any) -> dict[str, Any]:
+        if isinstance(event, dict):
+            value = event.get("response") or {}
+        else:
+            value = getattr(event, "response", {}) or {}
+        return value if isinstance(value, dict) else getattr(value, "__dict__", {})
+
+    def handle_response_completed(self, event: Any) -> None:
+        response = self._response_payload(event)
+        url = str(response.get("url") or "")
+        bytes_value = response.get("bytesReceived", response.get("bytes_received"))
+        with self._lock:
+            queue = self._request_buckets.get(url)
+            if not queue:
+                self._unknown_count["main"] += 1
+                self._unknown_count["subresource"] += 1
+                return
+            bucket = queue.popleft()
+            if queue is not None and not queue:
+                self._request_buckets.pop(url, None)
+            try:
+                byte_count = int(bytes_value) if bytes_value is not None else None
+            except (TypeError, ValueError, OverflowError):
+                byte_count = None
+            if byte_count is None or byte_count < 0:
+                self._unknown_count[bucket] += 1
+            else:
+                self._known[bucket] += byte_count
+                self._known_count[bucket] += 1
+
+    def handle_fetch_error(self, event: Any) -> None:
+        if isinstance(event, dict):
+            request = event.get("request") or {}
+            url = str(request.get("url") or event.get("url") or "") if isinstance(request, dict) else ""
+        else:
+            url = ""
+        with self._lock:
+            queue = self._request_buckets.get(url) if url else None
+            if queue:
+                bucket = queue.popleft()
+                if not queue:
+                    self._request_buckets.pop(url, None)
+                self._unknown_count[bucket] += 1
+            else:
+                # Selenium 4.47's high-level FetchErrorParameters currently
+                # omits request identity. Conservatively mark every pending
+                # request unknown; if none is pending, mark both scopes rather
+                # than guessing which byte bucket failed.
+                pending = [bucket for values in self._request_buckets.values() for bucket in values]
+                if pending:
+                    for bucket in pending:
+                        self._unknown_count[bucket] += 1
+                    self._request_buckets.clear()
+                else:
+                    self._unknown_count["main"] += 1
+                    self._unknown_count["subresource"] += 1
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            main_unknown = self._unknown_count["main"]
+            sub_unknown = self._unknown_count["subresource"]
+            for queue in self._request_buckets.values():
+                main_unknown += sum(1 for bucket in queue if bucket == "main")
+                sub_unknown += sum(1 for bucket in queue if bucket == "subresource")
+            main_known = self._known_count["main"]
+            sub_known = self._known_count["subresource"]
+            if main_known == 0 and main_unknown == 0:
+                main_unknown = 1
+            if sub_known == 0 and sub_unknown == 0:
+                sub_unknown = 1
+            return {
+                "main_document_bytes": None if main_unknown else self._known["main"],
+                "subresource_bytes": None if sub_unknown else self._known["subresource"],
+                "main_document_known_count": main_known,
+                "subresource_known_count": sub_known,
+                "main_document_unknown_count": main_unknown,
+                "subresource_unknown_count": sub_unknown,
+                "blocked_resource_counts": dict(sorted(self._blocked.items())),
+            }
 
 
 class _DOMParser(HTMLParser):
@@ -1196,6 +1482,18 @@ def extract_response_status(driver: Any) -> int | None:
         return None
 
 
+def delivery_context_confirmed(driver: Any, postal_code: str) -> bool:
+    try:
+        header = " ".join(
+            (driver.find_element("id", element_id).text or "")
+            for element_id in ("glow-ingress-line1", "glow-ingress-line2")
+        )
+        currency = driver.find_element("id", "currencyOfPreference").get_attribute("value") or ""
+    except Exception:
+        return False
+    return postal_code in header and currency.strip().upper() == "USD"
+
+
 class SeleniumFirefoxAdapter:
     def __init__(self, config: dict[str, Any] | None = None, headless: bool | None = None, timeout: int | None = None) -> None:
         config = config or DEFAULTS
@@ -1210,6 +1508,8 @@ class SeleniumFirefoxAdapter:
         self._temp_profile = tempfile.TemporaryDirectory(prefix="amazon-us-firefox-")
         options = Options()
         options.profile = self._temp_profile.name
+        options.page_load_strategy = "eager"
+        options.enable_bidi = True
         if headless if headless is not None else bool(config.get("headless", True)):
             options.add_argument("-headless")
         user_agent = str(config.get("user_agent") or "")
@@ -1230,6 +1530,31 @@ class SeleniumFirefoxAdapter:
         self.driver = webdriver.Firefox(options=options, service=service)
         self.driver.set_page_load_timeout(timeout or int(config.get("request_timeout_seconds", 30)))
         self._context_initialized = False
+        self._network_ledger = BrowserNetworkLedger()
+        self.last_traffic = self._network_ledger.snapshot()
+        self._request_handler_id: Any | None = None
+        self._response_handler_id: Any | None = None
+        self._fetch_error_handler_id: Any | None = None
+        self._bidi_available = False
+        # Selenium 4.47 exposes the stable high-level driver.network surface.
+        # Initialization is fail-closed so Firefox never silently runs without
+        # the requested interception and measurement controls.
+        try:
+            network = self.driver.network
+            self._request_handler_id = network.add_request_handler(self._network_ledger.handle_request)
+            self._response_handler_id = network.add_event_handler(
+                "response_completed", self._network_ledger.handle_response_completed
+            )
+            self._fetch_error_handler_id = network.add_event_handler(
+                "fetch_error", self._network_ledger.handle_fetch_error
+            )
+            self._bidi_available = True
+        except Exception as exc:
+            try:
+                self.driver.quit()
+            finally:
+                self._temp_profile.cleanup()
+            raise RuntimeError("Firefox WebDriver BiDi network controls are unavailable") from exc
 
     def _ensure_delivery_context(self) -> bool:
         """Set the configured ZIP in this isolated browser session once."""
@@ -1247,7 +1572,7 @@ class SeleniumFirefoxAdapter:
             )
         except Exception:
             current = ""
-        if postal_code in current:
+        if postal_code in current and delivery_context_confirmed(self.driver, postal_code):
             self._context_initialized = True
             return False
         self.driver.find_element(By.ID, "nav-global-location-popover-link").click()
@@ -1274,40 +1599,50 @@ class SeleniumFirefoxAdapter:
                 self.driver.find_element(By.ID, "GLUXConfirmClose").click()
             except Exception:
                 pass
-        def context_ready(driver: Any) -> bool:
-            header = " ".join(
-                (driver.find_element(By.ID, element_id).text or "")
-                for element_id in ("glow-ingress-line1", "glow-ingress-line2")
-            )
-            if postal_code not in header:
-                return False
-            try:
-                currency = driver.find_element(By.ID, "currencyOfPreference").get_attribute("value") or ""
-            except Exception:
-                currency = ""
-            return not currency or currency.upper() == "USD"
-
-        WebDriverWait(self.driver, 15).until(context_ready)
+        WebDriverWait(self.driver, 15).until(lambda driver: delivery_context_confirmed(driver, postal_code))
         # The modal updates the header before product modules are repainted.
         # Reload once after the location is committed, then confirm the ZIP
         # survived the navigation before taking page_source.
         self.driver.refresh()
-        WebDriverWait(self.driver, 15).until(context_ready)
+        WebDriverWait(self.driver, 15).until(lambda driver: delivery_context_confirmed(driver, postal_code))
         time.sleep(0.8)
         self._context_initialized = True
         return True
 
     def fetch(self, url: str) -> tuple[str, int | None]:
+        if not hasattr(self, "_network_ledger"):
+            self._network_ledger = BrowserNetworkLedger()
+        self._network_ledger.reset(top_context_id=getattr(self.driver, "current_window_handle", None))
         try:
             self.driver.get(url)
             self._ensure_delivery_context()
         except Exception as exc:
             raise AdapterFetchError(str(exc)) from exc
+        self.last_traffic = self._network_ledger.snapshot()
         return self.driver.page_source, extract_response_status(self.driver)
+
+    def export_anonymous_amazon_cookies(self) -> list[dict[str, Any]]:
+        if not self._context_initialized:
+            return []
+        try:
+            cookies = self.driver.get_cookies()
+        except Exception as exc:
+            raise AdapterFetchError("could not read isolated Firefox cookies") from exc
+        return [dict(item) for item in cookies if isinstance(item, dict)]
 
     def close(self) -> None:
         try:
-            self.driver.quit()
+            try:
+                if self._bidi_available:
+                    network = self.driver.network
+                    if self._request_handler_id is not None:
+                        network.remove_request_handler(self._request_handler_id)
+                    if self._response_handler_id is not None:
+                        network.remove_event_handler("response_completed", self._response_handler_id)
+                    if self._fetch_error_handler_id is not None:
+                        network.remove_event_handler("fetch_error", self._fetch_error_handler_id)
+            finally:
+                self.driver.quit()
         finally:
             self._temp_profile.cleanup()
 
@@ -1326,9 +1661,11 @@ class HttpFirstAdapter:
         self.config = config or DEFAULTS
         self.timeout = int(self.config.get("request_timeout_seconds", 30))
         self.user_agent = str(self.config.get("user_agent") or "")
+        self._opener_handlers: list[Any] = []
         proxy_url = str(self.config.get("proxy_url") or "").strip()
         if proxy_url:
             proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+            self._opener_handlers.append(proxy_handler)
             username_env = str(self.config.get("proxy_username_env") or "").strip()
             password_env = str(self.config.get("proxy_password_env") or "").strip()
             if bool(username_env) != bool(password_env):
@@ -1341,11 +1678,11 @@ class HttpFirstAdapter:
                 password_manager = urllib.request.HTTPPasswordMgrWithDefaultRealm()
                 password_manager.add_password(None, proxy_url, username, password)
                 auth_handler = urllib.request.ProxyBasicAuthHandler(password_manager)
-                self.opener = urllib.request.build_opener(proxy_handler, auth_handler)
-            else:
-                self.opener = urllib.request.build_opener(proxy_handler)
-        else:
-            self.opener = urllib.request.build_opener()
+                self._opener_handlers.append(auth_handler)
+        self.cookie_session = RunScopedAmazonCookieSession(
+            "adapter-instance", str(self.config.get("tenant_id") or "local"), str(self.config.get("worker_id") or "worker")
+        )
+        self._rebuild_opener()
         self.egress_id = str(self.config.get("egress_id") or "direct")
         self.limiter = EgressLimiter(
             float(self.config.get("global_requests_per_second", 0.0)),
@@ -1355,6 +1692,39 @@ class HttpFirstAdapter:
         self.browser: SeleniumFirefoxAdapter | None = None
         self.last_retry_after_seconds: int | None = None
         self.last_transfer_bytes: int | None = None
+        self.action_http_transfer_bytes = 0
+        self.last_browser_traffic: dict[str, Any] | None = None
+        self.last_fallback_reason: str | None = None
+        self.action_fallback_reasons: list[str] = []
+        self.browser_attempted = False
+        self.last_cookie_bridge_status: str | None = None
+        self.last_cookie_bridge_error_code: str | None = None
+
+    def _rebuild_opener(self) -> None:
+        cookie_handler = urllib.request.HTTPCookieProcessor(self.cookie_session.jar)
+        self.opener = urllib.request.build_opener(*self._opener_handlers, cookie_handler)
+
+    def begin_run(self, run_id: str, tenant_id: str, worker_id: str) -> None:
+        scope = (str(run_id), str(tenant_id), str(worker_id))
+        if self.cookie_session.scope == scope:
+            return
+        try:
+            if self.browser is not None:
+                self.browser.close()
+        finally:
+            self.browser = None
+            self.cookie_session.close()
+            self.cookie_session = RunScopedAmazonCookieSession(*scope)
+            self._rebuild_opener()
+
+    def begin_action(self) -> None:
+        self.action_http_transfer_bytes = 0
+        self.last_browser_traffic = None
+        self.last_fallback_reason = None
+        self.action_fallback_reasons = []
+        self.browser_attempted = False
+        self.last_cookie_bridge_status = None
+        self.last_cookie_bridge_error_code = None
 
     @staticmethod
     def _decode(response: Any, body: bytes) -> str:
@@ -1370,6 +1740,9 @@ class HttpFirstAdapter:
     def fetch(self, url: str) -> tuple[str, int | None]:
         self.last_retry_after_seconds = None
         self.last_transfer_bytes = 0
+        self.last_browser_traffic = None
+        self.last_fallback_reason = None
+        self.source_type = "http_html"
         max_attempts = max(1, min(int(self.config.get("http_max_attempts", 2)), 3))
         backoff = max(0.0, min(float(self.config.get("http_retry_backoff_seconds", 0.5)), 5.0))
         last_error: Exception | None = None
@@ -1389,6 +1762,7 @@ class HttpFirstAdapter:
                 with self.opener.open(request, timeout=self.timeout) as response:
                     encoded_body = response.read()
                     self.last_transfer_bytes += len(encoded_body)
+                    self.action_http_transfer_bytes += len(encoded_body)
                     body = self._decode_content(response, encoded_body)
                     self.source_type = "http_html"
                     return self._decode(response, body), int(response.getcode() or 200)
@@ -1400,11 +1774,13 @@ class HttpFirstAdapter:
                 except http.client.IncompleteRead as partial:
                     encoded_body = partial.partial or b""
                 self.last_transfer_bytes += len(encoded_body)
+                self.action_http_transfer_bytes += len(encoded_body)
                 body = self._decode_content(exc, encoded_body)
                 self.source_type = "http_html"
                 return self._decode(exc, body), int(exc.code)
             except http.client.IncompleteRead as exc:
                 self.last_transfer_bytes += len(exc.partial or b"")
+                self.action_http_transfer_bytes += len(exc.partial or b"")
                 last_error = exc
                 if attempt < max_attempts and backoff:
                     time.sleep(backoff * attempt)
@@ -1431,7 +1807,17 @@ class HttpFirstAdapter:
         # A page without these anchors cannot be safely accepted as a product page.
         return not all(data.get(key) for key in ("asin", "canonical_url", "title"))
 
-    def fetch_browser(self, url: str) -> tuple[str, int | None]:
+    def fetch_browser(
+        self,
+        url: str,
+        *,
+        fallback_reason: FallbackReason,
+        run_id: str,
+        asin: str,
+    ) -> tuple[str, int | None]:
+        if not isinstance(fallback_reason, FallbackReason):
+            raise TypeError("fallback reason must be a FallbackReason")
+        self.last_fallback_reason = fallback_reason.value
         if self.browser is None:
             try:
                 self.browser = SeleniumFirefoxAdapter(self.config)
@@ -1440,11 +1826,148 @@ class HttpFirstAdapter:
         body, status = self.browser.fetch(url)
         self.source_type = "selenium_dom"
         self.last_transfer_bytes = None
+        self.last_browser_traffic = dict(self.browser.last_traffic)
         return body, status
 
+    def commit_browser_context(self, run_id: str, *, context_confirmed: bool) -> int:
+        if self.browser is None or not context_confirmed or not self.browser._context_initialized:
+            return 0
+        cookies = self.browser.export_anonymous_amazon_cookies()
+        if cookies:
+            scope_run, scope_tenant, scope_worker = self.cookie_session.scope
+            if str(run_id) != scope_run:
+                raise AdapterFetchError("browser cookie scope does not match current run")
+            return self.cookie_session.sync_from_firefox(
+                cookies,
+                run_id=scope_run,
+                tenant_id=scope_tenant,
+                worker_id=scope_worker,
+                context_confirmed=self.browser._context_initialized,
+            )
+        return 0
+
     def close(self) -> None:
-        if self.browser is not None:
-            self.browser.close()
+        try:
+            if self.browser is not None:
+                self.browser.close()
+        finally:
+            self.cookie_session.close()
+
+
+def _canonical_asin(value: Any) -> str:
+    parts = urlsplit(str(value or ""))
+    match = re.search(r"/(?:dp|clp)/([A-Za-z0-9]{10})(?:/|$)", parts.path)
+    return match.group(1).upper() if match else ""
+
+
+def _has_explicit_asin_mismatch(data: dict[str, Any], expected_asin: str) -> bool:
+    expected = expected_asin.upper()
+    parsed = str(data.get("asin") or "").upper()
+    canonical = _canonical_asin(data.get("canonical_url"))
+    return bool((parsed and parsed != expected) or (canonical and canonical != expected))
+
+
+def _valid_product_identity(data: dict[str, Any], expected_asin: str) -> bool:
+    expected = expected_asin.upper()
+    canonical = urlsplit(str(data.get("canonical_url") or ""))
+    return bool(
+        str(data.get("asin") or "").upper() == expected
+        and str(data.get("title") or "").strip()
+        and canonical.scheme == "https"
+        and (canonical.hostname or "").lower().removeprefix("www.") == "amazon.com"
+        and _canonical_asin(data.get("canonical_url")) == expected
+    )
+
+
+def _core_fallback_reason(data: dict[str, Any], expected_asin: str) -> FallbackReason | None:
+    if _has_explicit_asin_mismatch(data, expected_asin):
+        return None
+    if not str(data.get("asin") or "").strip():
+        return FallbackReason.MISSING_ASIN
+    if not str(data.get("canonical_url") or "").strip():
+        return FallbackReason.MISSING_CANONICAL_URL
+    if not str(data.get("title") or "").strip():
+        return FallbackReason.MISSING_TITLE
+    return None
+
+
+def _fetch_browser_once(
+    adapter: Any,
+    url: str,
+    *,
+    fallback_reason: FallbackReason,
+    run_id: str,
+    asin: str,
+    ledger: BrowserFallbackLedger,
+) -> tuple[str, int | None] | None:
+    if not hasattr(adapter, "fetch_browser") or not ledger.claim(run_id, asin, fallback_reason):
+        return None
+    setattr(adapter, "last_fallback_reason", fallback_reason.value)
+    setattr(adapter, "browser_attempted", True)
+    fallback_reasons = getattr(adapter, "action_fallback_reasons", None)
+    if fallback_reasons is None:
+        fallback_reasons = []
+        setattr(adapter, "action_fallback_reasons", fallback_reasons)
+    if fallback_reason.value not in fallback_reasons:
+        fallback_reasons.append(fallback_reason.value)
+    method = adapter.fetch_browser
+    parameters = inspect.signature(method).parameters
+    accepts_keywords = "fallback_reason" in parameters or any(
+        value.kind == inspect.Parameter.VAR_KEYWORD for value in parameters.values()
+    )
+    if accepts_keywords:
+        return method(url, fallback_reason=fallback_reason, run_id=run_id, asin=asin)
+    return method(url)
+
+
+def _evidence_context(base_context: dict[str, Any] | None, adapter: Any) -> dict[str, Any]:
+    context = dict(base_context or {})
+    traffic: dict[str, Any] = {}
+    action_http_transfer = getattr(adapter, "action_http_transfer_bytes", None)
+    if action_http_transfer is not None:
+        traffic["http_compressed_response_bytes"] = action_http_transfer
+    elif getattr(adapter, "source_type", "http_html") == "http_html":
+        transfer = getattr(adapter, "last_transfer_bytes", None)
+        traffic["http_compressed_response_bytes"] = transfer
+    if getattr(adapter, "source_type", "http_html") != "http_html" or bool(getattr(adapter, "browser_attempted", False)):
+        browser = dict(getattr(adapter, "last_browser_traffic", None) or {})
+        traffic.update(
+            {
+                "firefox_main_document_bytes": browser.get("main_document_bytes"),
+                "firefox_subresource_bytes": browser.get("subresource_bytes"),
+                "firefox_main_document_known_count": int(browser.get("main_document_known_count") or 0),
+                "firefox_subresource_known_count": int(browser.get("subresource_known_count") or 0),
+                "firefox_main_document_unknown_count": int(browser.get("main_document_unknown_count") or 1),
+                "firefox_subresource_unknown_count": int(browser.get("subresource_unknown_count") or 1),
+                "blocked_resource_counts": dict(browser.get("blocked_resource_counts") or {}),
+            }
+        )
+    context["traffic"] = traffic
+    fallback_reason = getattr(adapter, "last_fallback_reason", None)
+    if fallback_reason:
+        context["fallback_reason"] = str(fallback_reason)
+    fallback_reasons = list(getattr(adapter, "action_fallback_reasons", None) or [])
+    if fallback_reasons:
+        context["fallback_reasons"] = fallback_reasons
+    bridge_status = getattr(adapter, "last_cookie_bridge_status", None)
+    if bridge_status:
+        bridge = {"status": str(bridge_status)}
+        bridge_error = getattr(adapter, "last_cookie_bridge_error_code", None)
+        if bridge_error:
+            bridge["error_code"] = str(bridge_error)
+        context["cookie_bridge"] = bridge
+    return context
+
+
+def _commit_browser_context_safely(adapter: Any, run_id: str) -> None:
+    try:
+        accepted = adapter.commit_browser_context(run_id, context_confirmed=True)
+    except AdapterFetchError:
+        setattr(adapter, "last_cookie_bridge_status", "failed")
+        setattr(adapter, "last_cookie_bridge_error_code", "cookie_bridge_error")
+    else:
+        setattr(adapter, "last_cookie_bridge_status", "committed" if accepted else "confirmed_no_cookie")
+        setattr(adapter, "last_cookie_bridge_error_code", None)
 
 
 def _atomic_csv(path: Path, headers: list[str], rows: Iterable[dict[str, Any]]) -> None:
@@ -1513,6 +2036,9 @@ def _select_actions(conn: sqlite3.Connection, max_actions: int, exclude_asins: s
 
 def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], *, limit: int | None = None, run_id: str | None = None) -> int:
     run_id = run_id or f"run-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
+    fallback_ledger = BrowserFallbackLedger()
+    if hasattr(adapter, "begin_run"):
+        adapter.begin_run(run_id, "sqlite-local", str(config.get("agent_name") or "amazon-us-worker"))
     max_actions = min(limit, int(config["max_actions_per_run"])) if limit else int(config["max_actions_per_run"])
     raw_html_dir_value = config.get("raw_html_dir")
     raw_html_dir = Path(raw_html_dir_value) if raw_html_dir_value else None
@@ -1530,6 +2056,8 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
         if row["status"] == "failed" and row["attempts"] >= row["max_attempts"]:
             continue
         _claim_action(conn, row)
+        if hasattr(adapter, "begin_action"):
+            adapter.begin_action()
         row = conn.execute("SELECT * FROM item_state WHERE marketplace='US' AND asin=?", (row["asin"],)).fetchone()
         if row["task_stage"] == "reviews" and row["next_review_url"]:
             page, url = int(row["next_review_page"] or 1), row["next_review_url"]
@@ -1559,31 +2087,42 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                     else:
                         # Keep the empty fallback page as evidence before the
                         # primary portal result is recorded below.
-                        _insert_evidence(conn, run_id, row["asin"], alternate_url, alternate_status, alternate_body, None, "empty_review_page", getattr(adapter, "source_type", "http_html"), raw_html_dir, context=config.get("context"), transfer_bytes=getattr(adapter, "last_transfer_bytes", None))
+                        _insert_evidence(conn, run_id, row["asin"], alternate_url, alternate_status, alternate_body, None, "empty_review_page", getattr(adapter, "source_type", "http_html"), raw_html_dir, context=_evidence_context(config.get("context"), adapter), transfer_bytes=getattr(adapter, "last_transfer_bytes", None))
             if (
                 not reason
                 and not records
                 and int(row["reported_review_count"] or 0) > 0
-                and hasattr(adapter, "fetch_browser")
             ):
                 try:
-                    browser_body, browser_status = adapter.fetch_browser(url)
+                    browser_result = _fetch_browser_once(
+                        adapter, url, fallback_reason=FallbackReason.REVIEW_EMPTY,
+                        run_id=run_id, asin=row["asin"], ledger=fallback_ledger,
+                    )
                 except AdapterFetchError:
                     pass
                 else:
-                    browser_reason = classify_block(browser_status, browser_body)
+                    if browser_result is None:
+                        browser_body = browser_status = None
+                    else:
+                        browser_body, browser_status = browser_result
+                    if browser_result is None:
+                        browser_reason = None
+                        browser_records, browser_next_url = [], None
+                    else:
+                        browser_reason = classify_block(browser_status, browser_body)
+                        browser_records, browser_next_url = parse_reviews_html(browser_body, page, url) if not browser_reason else ([], None)
                     if browser_reason:
                         body, response_status, records, next_url, reason = browser_body, browser_status, [], None, browser_reason
-                    else:
-                        browser_records, browser_next_url = parse_reviews_html(browser_body, page, url)
-                        if browser_records or browser_next_url:
-                            body, response_status, records, next_url = browser_body, browser_status, browser_records, browser_next_url
-                            reason = browser_reason
+                    elif browser_records or browser_next_url:
+                        body, response_status, records, next_url = browser_body, browser_status, browser_records, browser_next_url
+                        reason = browser_reason
             source_type = getattr(adapter, "source_type", "selenium_dom")
             retry_after = getattr(adapter, "last_retry_after_seconds", None)
             transfer_bytes = getattr(adapter, "last_transfer_bytes", None)
             cooldown = retry_after if retry_after is not None else config.get("rate_limit_cooldown_seconds")
-            _write_review_action(conn, run_id, row, page, url, records, next_url, body, response_status, reason, int(config["review_page_limit"]), source_type, raw_html_dir, config.get("context"), cooldown, transfer_bytes)
+            if not reason and source_type == "selenium_dom" and hasattr(adapter, "commit_browser_context"):
+                _commit_browser_context_safely(adapter, run_id)
+            _write_review_action(conn, run_id, row, page, url, records, next_url, body, response_status, reason, int(config["review_page_limit"]), source_type, raw_html_dir, _evidence_context(config.get("context"), adapter), cooldown, transfer_bytes)
             if refresh_job_id and row["asin"] == refresh_asin:
                 _finish_refresh_request(conn, refresh_job_id, "queued" if reason == "http_429" else "failed" if reason else "completed")
             blocked = blocked or bool(reason)
@@ -1605,7 +2144,13 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                 actions += 1
                 continue
             try:
-                body, response_status = adapter.fetch_browser(row["url"])
+                browser_result = _fetch_browser_once(
+                    adapter, row["url"], fallback_reason=FallbackReason.HTTP_TRANSPORT_ERROR,
+                    run_id=run_id, asin=row["asin"], ledger=fallback_ledger,
+                )
+                if browser_result is None:
+                    raise AdapterFetchError("duplicate browser fallback suppressed")
+                body, response_status = browser_result
             except AdapterFetchError:
                 _record_failure(conn, "US", row["asin"], "fetch_error", str(exc))
                 if refresh_job_id and row["asin"] == refresh_asin:
@@ -1614,30 +2159,39 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                 continue
         reason = classify_block(response_status, body)
         data = parse_product_html(body, row["url"]) if not reason else {"asin": "", "canonical_url": ""}
-        if not reason and hasattr(adapter, "needs_browser_fallback") and adapter.needs_browser_fallback(data):
+        core_reason = _core_fallback_reason(data, row["asin"]) if not reason else None
+        if core_reason is not None:
             try:
-                browser_body, browser_status = adapter.fetch_browser(row["url"])
+                browser_result = _fetch_browser_once(
+                    adapter, row["url"], fallback_reason=core_reason,
+                    run_id=run_id, asin=row["asin"], ledger=fallback_ledger,
+                )
             except AdapterFetchError:
                 pass
             else:
-                browser_reason = classify_block(browser_status, browser_body)
+                browser_body, browser_status = browser_result if browser_result is not None else (None, None)
+                browser_reason = classify_block(browser_status, browser_body or "") if browser_result is not None else None
                 if browser_reason:
                     body, response_status, data, reason = browser_body, browser_status, {"asin": "", "canonical_url": ""}, browser_reason
-                else:
+                elif browser_result is not None:
                     body, response_status, data, reason = browser_body, browser_status, parse_product_html(browser_body, row["url"]), browser_reason
         context_errors = validate_context(data, config.get("context")) if not reason else []
-        if context_errors and hasattr(adapter, "fetch_browser"):
+        if context_errors:
             try:
-                browser_body, browser_status = adapter.fetch_browser(row["url"])
+                browser_result = _fetch_browser_once(
+                    adapter, row["url"], fallback_reason=FallbackReason.CONTEXT_MISMATCH,
+                    run_id=run_id, asin=row["asin"], ledger=fallback_ledger,
+                )
             except AdapterFetchError:
                 pass
             else:
-                browser_reason = classify_block(browser_status, browser_body)
-                browser_data = parse_product_html(browser_body, row["url"]) if not browser_reason else data
-                browser_context_errors = validate_context(browser_data, config.get("context")) if not browser_reason else context_errors
+                browser_body, browser_status = browser_result if browser_result is not None else (None, None)
+                browser_reason = classify_block(browser_status, browser_body or "") if browser_result is not None else None
+                browser_data = parse_product_html(browser_body, row["url"]) if browser_result is not None and not browser_reason else data
+                browser_context_errors = validate_context(browser_data, config.get("context")) if browser_result is not None and not browser_reason else context_errors
                 if browser_reason:
                     body, response_status, data, reason, context_errors = browser_body, browser_status, {"asin": "", "canonical_url": ""}, browser_reason, []
-                elif not browser_context_errors:
+                elif browser_result is not None and not browser_context_errors:
                     body, response_status, data, reason, context_errors = browser_body, browser_status, browser_data, browser_reason, []
         if context_errors:
             error_code = "context_mismatch:" + ",".join(context_errors)
@@ -1647,7 +2201,15 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
         retry_after = getattr(adapter, "last_retry_after_seconds", None)
         transfer_bytes = getattr(adapter, "last_transfer_bytes", None)
         cooldown = retry_after if retry_after is not None else config.get("rate_limit_cooldown_seconds")
-        _write_product_action(conn, run_id, row, data, body, response_status, reason, error_code=error_code, source_type=source_type, raw_html_dir=raw_html_dir, context=config.get("context"), cooldown_seconds=cooldown, transfer_bytes=transfer_bytes)
+        if (
+            not reason
+            and not context_errors
+            and source_type == "selenium_dom"
+            and _valid_product_identity(data, row["asin"])
+            and hasattr(adapter, "commit_browser_context")
+        ):
+            _commit_browser_context_safely(adapter, run_id)
+        _write_product_action(conn, run_id, row, data, body, response_status, reason, error_code=error_code, source_type=source_type, raw_html_dir=raw_html_dir, context=_evidence_context(config.get("context"), adapter), cooldown_seconds=cooldown, transfer_bytes=transfer_bytes)
         if refresh_job_id and row["asin"] == refresh_asin:
             _finish_refresh_request(conn, refresh_job_id, "queued" if reason == "http_429" else "failed" if reason else "completed")
         blocked = blocked or bool(reason)
@@ -1701,6 +2263,9 @@ def run_postgres_actions(
 ) -> int:
     """Run a bounded production batch using PostgreSQL task leases."""
     run_id = run_id or f"run-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
+    fallback_ledger = BrowserFallbackLedger()
+    if hasattr(adapter, "begin_run"):
+        adapter.begin_run(run_id, str(getattr(storage, "tenant_id", "postgres-local")), worker_id)
     max_actions = min(limit, int(config["max_actions_per_run"])) if limit else int(config["max_actions_per_run"])
     raw_value = config.get("raw_html_dir")
     raw_html_dir = Path(raw_value) if raw_value else None
@@ -1716,6 +2281,8 @@ def run_postgres_actions(
             )
         if task is None:
             break
+        if hasattr(adapter, "begin_action"):
+            adapter.begin_action()
         refresh_job_id = task.get("job_id")
         if task.get("task_stage") == "reviews" and task.get("next_review_url"):
             page = int(task.get("next_review_page") or 1)
@@ -1727,7 +2294,7 @@ def run_postgres_actions(
             except AdapterFetchError as exc:
                 evidence = _postgres_evidence(
                     run_id, task, None, None, getattr(adapter, "source_type", "http_html"),
-                    raw_html_dir, config.get("context"), getattr(adapter, "last_transfer_bytes", None),
+                    raw_html_dir, _evidence_context(config.get("context"), adapter), getattr(adapter, "last_transfer_bytes", None),
                     error_code="review_fetch_error",
                 )
                 storage.save_failure(task=task, reason="review_fetch_error", error=str(exc), evidence=evidence)
@@ -1750,22 +2317,28 @@ def run_postgres_actions(
                         body, response_status, url, records, next_url, reason = alternate_body, alternate_status, alternate_url, [], None, alternate_reason
                     elif alternate_records or alternate_next_url:
                         body, response_status, url, records, next_url = alternate_body, alternate_status, alternate_url, alternate_records, alternate_next_url
-            if not reason and not records and int(task.get("reported_review_count") or 0) > 0 and hasattr(adapter, "fetch_browser"):
+            if not reason and not records and int(task.get("reported_review_count") or 0) > 0:
                 try:
-                    browser_body, browser_status = adapter.fetch_browser(url)
+                    browser_result = _fetch_browser_once(
+                        adapter, url, fallback_reason=FallbackReason.REVIEW_EMPTY,
+                        run_id=run_id, asin=task["asin"], ledger=fallback_ledger,
+                    )
                 except AdapterFetchError:
                     pass
                 else:
-                    browser_reason = classify_block(browser_status, browser_body)
-                    browser_records, browser_next_url = parse_reviews_html(browser_body, page, url) if not browser_reason else ([], None)
+                    browser_body, browser_status = browser_result if browser_result is not None else (None, None)
+                    browser_reason = classify_block(browser_status, browser_body or "") if browser_result is not None else None
+                    browser_records, browser_next_url = parse_reviews_html(browser_body, page, url) if browser_result is not None and not browser_reason else ([], None)
                     if browser_reason:
                         body, response_status, records, next_url, reason = browser_body, browser_status, [], None, browser_reason
                     elif browser_records or browser_next_url:
                         body, response_status, records, next_url = browser_body, browser_status, browser_records, browser_next_url
             task["url"] = url
             source_type = getattr(adapter, "source_type", "http_html")
+            if not reason and source_type == "selenium_dom" and hasattr(adapter, "commit_browser_context"):
+                _commit_browser_context_safely(adapter, run_id)
             evidence = _postgres_evidence(
-                run_id, task, body, response_status, source_type, raw_html_dir, config.get("context"),
+                run_id, task, body, response_status, source_type, raw_html_dir, _evidence_context(config.get("context"), adapter),
                 getattr(adapter, "last_transfer_bytes", None), block_reason=reason,
                 error_code="empty_review_page" if not reason and not records and int(task.get("reported_review_count") or 0) > 0 else None,
             )
@@ -1831,46 +2404,68 @@ def run_postgres_actions(
         try:
             body, response_status = adapter.fetch(task["url"])
         except AdapterFetchError as exc:
-            evidence = _postgres_evidence(
-                run_id, task, None, None, getattr(adapter, "source_type", "http_html"),
-                raw_html_dir, config.get("context"), getattr(adapter, "last_transfer_bytes", None),
-                error_code="fetch_error",
-            )
-            storage.save_failure(task=task, reason="fetch_error", error=str(exc), evidence=evidence)
-            if refresh_job_id:
-                storage.finish_refresh_request(refresh_job_id, "failed")
-            actions += 1
-            continue
+            postal_code = str((config.get("context") or {}).get("postal_code") or "").strip()
+            browser_result = None
+            if postal_code:
+                try:
+                    browser_result = _fetch_browser_once(
+                        adapter, task["url"], fallback_reason=FallbackReason.HTTP_TRANSPORT_ERROR,
+                        run_id=run_id, asin=task["asin"], ledger=fallback_ledger,
+                    )
+                except AdapterFetchError:
+                    browser_result = None
+            if browser_result is None:
+                evidence = _postgres_evidence(
+                    run_id, task, None, None, getattr(adapter, "source_type", "http_html"),
+                    raw_html_dir, _evidence_context(config.get("context"), adapter), getattr(adapter, "last_transfer_bytes", None),
+                    error_code="fetch_error",
+                )
+                storage.save_failure(task=task, reason="fetch_error", error=str(exc), evidence=evidence)
+                if refresh_job_id:
+                    storage.finish_refresh_request(refresh_job_id, "failed")
+                actions += 1
+                continue
+            body, response_status = browser_result
         reason = classify_block(response_status, body)
         data = parse_product_html(body, task["url"]) if not reason else {"asin": "", "canonical_url": ""}
-        if not reason and hasattr(adapter, "needs_browser_fallback") and adapter.needs_browser_fallback(data):
+        core_reason = _core_fallback_reason(data, task["asin"]) if not reason else None
+        if core_reason is not None:
             try:
-                browser_body, browser_status = adapter.fetch_browser(task["url"])
+                browser_result = _fetch_browser_once(
+                    adapter, task["url"], fallback_reason=core_reason,
+                    run_id=run_id, asin=task["asin"], ledger=fallback_ledger,
+                )
             except AdapterFetchError:
                 pass
             else:
-                browser_reason = classify_block(browser_status, browser_body)
-                body, response_status, reason = browser_body, browser_status, browser_reason
-                data = parse_product_html(browser_body, task["url"]) if not browser_reason else {"asin": "", "canonical_url": ""}
+                browser_body, browser_status = browser_result if browser_result is not None else (None, None)
+                browser_reason = classify_block(browser_status, browser_body or "") if browser_result is not None else None
+                if browser_result is not None:
+                    body, response_status, reason = browser_body, browser_status, browser_reason
+                    data = parse_product_html(browser_body, task["url"]) if not browser_reason else {"asin": "", "canonical_url": ""}
         context_errors = validate_context(data, config.get("context")) if not reason else []
-        if context_errors and hasattr(adapter, "fetch_browser"):
+        if context_errors:
             try:
-                browser_body, browser_status = adapter.fetch_browser(task["url"])
+                browser_result = _fetch_browser_once(
+                    adapter, task["url"], fallback_reason=FallbackReason.CONTEXT_MISMATCH,
+                    run_id=run_id, asin=task["asin"], ledger=fallback_ledger,
+                )
             except AdapterFetchError:
                 pass
             else:
-                browser_reason = classify_block(browser_status, browser_body)
-                browser_data = parse_product_html(browser_body, task["url"]) if not browser_reason else data
-                browser_context_errors = validate_context(browser_data, config.get("context")) if not browser_reason else context_errors
+                browser_body, browser_status = browser_result if browser_result is not None else (None, None)
+                browser_reason = classify_block(browser_status, browser_body or "") if browser_result is not None else None
+                browser_data = parse_product_html(browser_body, task["url"]) if browser_result is not None and not browser_reason else data
+                browser_context_errors = validate_context(browser_data, config.get("context")) if browser_result is not None and not browser_reason else context_errors
                 if browser_reason:
                     body, response_status, data, reason, context_errors = browser_body, browser_status, {"asin": "", "canonical_url": ""}, browser_reason, []
-                elif not browser_context_errors:
+                elif browser_result is not None and not browser_context_errors:
                     body, response_status, data, reason, context_errors = browser_body, browser_status, browser_data, browser_reason, []
         source_type = getattr(adapter, "source_type", "http_html")
         transfer_bytes = getattr(adapter, "last_transfer_bytes", None)
         error_code = "context_mismatch:" + ",".join(context_errors) if context_errors else None
         evidence = _postgres_evidence(
-            run_id, task, body, response_status, source_type, raw_html_dir, config.get("context"), transfer_bytes,
+            run_id, task, body, response_status, source_type, raw_html_dir, _evidence_context(config.get("context"), adapter), transfer_bytes,
             block_reason=reason, error_code=error_code,
         )
         if reason or context_errors:
@@ -1891,6 +2486,13 @@ def run_postgres_actions(
                 break
             continue
         missing_core = [key for key in ("asin", "canonical_url", "title") if not str(data.get(key) or "").strip()]
+        if _has_explicit_asin_mismatch(data, task["asin"]):
+            evidence["error_code"] = "asin_mismatch"
+            storage.save_failure(task=task, reason="asin_mismatch", error="asin_mismatch", evidence=evidence)
+            if refresh_job_id:
+                storage.finish_refresh_request(refresh_job_id, "failed")
+            actions += 1
+            continue
         if missing_core:
             error = "missing_core_fields:" + ",".join(missing_core)
             evidence["error_code"] = error
@@ -1914,6 +2516,9 @@ def run_postgres_actions(
                 storage.finish_refresh_request(refresh_job_id, "failed")
             actions += 1
             continue
+        if source_type == "selenium_dom" and hasattr(adapter, "commit_browser_context"):
+            _commit_browser_context_safely(adapter, run_id)
+            evidence["context_json"] = _evidence_context(config.get("context"), adapter)
         review_url = data.get("review_link") or None
         media = []
         for item in data.get("media", []):

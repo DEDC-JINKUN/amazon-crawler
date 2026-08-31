@@ -116,7 +116,22 @@ class HttpAdapterTests(unittest.TestCase):
             def set_preference(self, name, value):
                 pass
 
+        class FakeNetwork:
+            def add_request_handler(self, callback):
+                return "request"
+
+            def add_event_handler(self, event, callback):
+                return 1 if event == "response_completed" else 2
+
+            def remove_request_handler(self, handler_id):
+                pass
+
+            def remove_event_handler(self, event, handler_id):
+                pass
+
         class FakeDriver:
+            network = FakeNetwork()
+
             def set_page_load_timeout(self, value):
                 pass
 
@@ -257,7 +272,12 @@ class HttpAdapterTests(unittest.TestCase):
         adapter.last_transfer_bytes = 123
 
         with self.assertRaises(worker.AdapterFetchError):
-            adapter.fetch_browser("https://www.amazon.com/dp/B00RCPDCQU")
+            adapter.fetch_browser(
+                "https://www.amazon.com/dp/B00RCPDCQU",
+                fallback_reason=worker.FallbackReason.CONTEXT_MISMATCH,
+                run_id="run-1",
+                asin="B00RCPDCQU",
+            )
 
         self.assertEqual(adapter.source_type, "http_html")
         self.assertEqual(adapter.last_transfer_bytes, 123)
@@ -376,7 +396,9 @@ class HttpAdapterTests(unittest.TestCase):
         with patch.object(worker.urllib.request, "ProxyHandler") as proxy_handler, patch.object(worker.urllib.request, "build_opener") as build_opener:
             worker.HttpFirstAdapter({**worker.DEFAULTS, "proxy_url": "http://127.0.0.1:8080"})
         proxy_handler.assert_called_once_with({"http": "http://127.0.0.1:8080", "https": "http://127.0.0.1:8080"})
-        build_opener.assert_called_once_with(proxy_handler.return_value)
+        handlers = build_opener.call_args.args
+        self.assertIs(handlers[0], proxy_handler.return_value)
+        self.assertIsInstance(handlers[1], worker.urllib.request.HTTPCookieProcessor)
 
     def test_proxy_credentials_are_read_from_named_environment_variables(self):
         worker = load_worker()
