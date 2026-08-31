@@ -70,10 +70,15 @@ STOP_PHRASES = (
     "access denied",
     "too many requests",
 )
-LOGIN_WALL_PHRASES = (
-    "sign in to continue",
-    "amazon sign-in",
-    "signin to continue",
+LOGIN_WALL_DOM_MARKERS = (
+    "/ap/signin",
+    "id=\"ap_email\"",
+    "id='ap_email'",
+    "id=\"ap_password\"",
+    "id='ap_password'",
+    "id=\"signinsubmit\"",
+    "id='signinsubmit'",
+    "authportal-main-section",
 )
 DEFAULTS: dict[str, Any] = {
     "request_timeout_seconds": 30,
@@ -170,11 +175,29 @@ def classify_block(status: int | None = None, text: str = "", title: str = "") -
     raw_text = text.lower()
     if any(marker in raw_text for marker in ("awswafcookiedomainlist", "awswafintegration", "token.awswaf.com")):
         return "waf_challenge"
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", text, flags=re.IGNORECASE | re.DOTALL)
+    page_title = _clean(f"{title} {title_match.group(1) if title_match else ''}").lower()
+    auth_title = "amazon sign-in" in page_title or "amazon sign in" in page_title
+    auth_dom = any(marker in raw_text for marker in LOGIN_WALL_DOM_MARKERS)
+    canonical_asin = re.search(
+        r"<link\b(?=[^>]*\brel\s*=\s*['\"]canonical['\"])(?=[^>]*\bhref\s*=\s*['\"][^'\"]*/(?:dp|clp)/([a-z0-9]{10})(?:/|['\"?#]))[^>]*>",
+        raw_text,
+    )
+    input_asin = re.search(
+        r"<input\b(?=[^>]*(?:\bid|\bname)\s*=\s*['\"]asin['\"])(?=[^>]*\bvalue\s*=\s*['\"]([a-z0-9]{10})['\"])[^>]*>",
+        raw_text,
+    )
+    product_identity = bool(
+        re.search(r"id\s*=\s*['\"]producttitle['\"]", raw_text)
+        and canonical_asin
+        and input_asin
+        and canonical_asin.group(1) == input_asin.group(1)
+    )
+    if auth_title or (auth_dom and not product_identity):
+        return "login_wall"
     if any(tag in text.lower() for tag in ("<script", "<style", "<noscript")):
         text = visible_html_text(text)
     haystack = f"{title}\n{text}".lower()
-    if any(phrase in haystack for phrase in LOGIN_WALL_PHRASES):
-        return "login_wall"
     for phrase in STOP_PHRASES:
         if phrase in haystack:
             if phrase == "robot check":

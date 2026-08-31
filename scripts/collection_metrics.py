@@ -111,19 +111,23 @@ def build_report(db_path: Path, raw_html_dir: Path | None = None, run_id: str | 
                 transfer_bytes_known += 1
                 traffic["http_compressed_response"]["known_bytes"] += value
                 traffic["http_compressed_response"]["known_records"] += 1
-        if source_type == "selenium_dom":
-            for category, byte_key, unknown_key in (
-                ("firefox_main_document", "firefox_main_document_bytes", "firefox_main_document_unknown_count"),
-                ("firefox_subresources", "firefox_subresource_bytes", "firefox_subresource_unknown_count"),
-            ):
-                value = context_traffic.get(byte_key)
-                unknown = int(context_traffic.get(unknown_key) or 0)
-                if value is None:
-                    traffic[category]["unknown_records"] += max(1, unknown)
-                else:
-                    traffic[category]["known_bytes"] += max(0, int(value))
-                    traffic[category]["known_records"] += 1
-                    traffic[category]["unknown_records"] += unknown
+        for category, byte_key, unknown_key, known_key in (
+            ("firefox_main_document", "firefox_main_document_bytes", "firefox_main_document_unknown_count", "firefox_main_document_known_count"),
+            ("firefox_subresources", "firefox_subresource_bytes", "firefox_subresource_unknown_count", "firefox_subresource_known_count"),
+        ):
+            applicable = source_type == "selenium_dom" or any(
+                key in context_traffic for key in (byte_key, unknown_key, known_key)
+            )
+            if not applicable:
+                continue
+            value = context_traffic.get(byte_key)
+            unknown = int(context_traffic.get(unknown_key) or 0)
+            if value is None:
+                traffic[category]["unknown_records"] += max(1, unknown)
+            else:
+                traffic[category]["known_bytes"] += max(0, int(value))
+                traffic[category]["known_records"] += 1
+                traffic[category]["unknown_records"] += unknown
     if raw_html_dir:
         for row in evidence:
             if not row["raw_html_path"]:

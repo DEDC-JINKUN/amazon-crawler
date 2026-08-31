@@ -170,3 +170,40 @@ def test_traffic_categories_keep_http_browser_and_proxy_scopes_separate_with_unk
         }
         assert result["transfer_bytes_total"] == 200
         assert result["transfer_bytes_missing_count"] == 0
+
+
+def test_metrics_use_firefox_context_keys_when_final_source_is_http():
+    with tempfile.TemporaryDirectory() as directory:
+        db = Path(directory) / "state.sqlite3"
+        conn = sqlite3.connect(db)
+        conn.executescript("""
+        CREATE TABLE collection_evidence (
+          id INTEGER PRIMARY KEY,run_id TEXT,asin TEXT,marketplace TEXT,url TEXT,http_status INTEGER,
+          transfer_bytes INTEGER,retrieved_at TEXT,source_type TEXT,error_code TEXT,block_reason TEXT,
+          raw_html_path TEXT,context_json TEXT
+        );
+        CREATE TABLE item_state (asin TEXT,marketplace TEXT,status TEXT);
+        CREATE TABLE product_snapshot (asin TEXT,marketplace TEXT);
+        CREATE TABLE media_asset (asin TEXT,marketplace TEXT);
+        CREATE TABLE content_module (asin TEXT,marketplace TEXT);
+        CREATE TABLE review_summary (asin TEXT,marketplace TEXT);
+        CREATE TABLE review_record (asin TEXT,marketplace TEXT);
+        """)
+        conn.execute(
+            "INSERT INTO collection_evidence VALUES(1,'run-real','B077K939L7','US','https://www.amazon.com/dp/B077K939L7',404,1147,'2026-08-31T03:54:36+00:00','http_html','fetch_error',NULL,NULL,?)",
+            ('{"traffic":{"http_compressed_response_bytes":1147,"firefox_main_document_bytes":null,"firefox_subresource_bytes":null,"firefox_main_document_unknown_count":3,"firefox_subresource_unknown_count":3}}',),
+        )
+        conn.commit()
+        conn.close()
+
+        result = metrics.build_report(db, run_id="run-real")
+
+    assert result["traffic"]["http_compressed_response"] == {
+        "bytes": 1147, "known_records": 1, "unknown_records": 0
+    }
+    assert result["traffic"]["firefox_main_document"] == {
+        "bytes": None, "known_records": 0, "unknown_records": 3
+    }
+    assert result["traffic"]["firefox_subresources"] == {
+        "bytes": None, "known_records": 0, "unknown_records": 3
+    }

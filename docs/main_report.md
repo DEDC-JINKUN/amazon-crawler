@@ -28,7 +28,7 @@
 
 ### 1.4 当前结论
 
-低流量控制、Cookie 桥接、fallback 去重和 nullable 流量口径已通过离线测试。当前进程没有 `AMAZON_TEST_POSTGRES_DSN`，因此真实 PostgreSQL 集成测试明确跳过。新的 BiDi 计量、资源拦截和 Cookie 桥接尚未执行真实 Amazon `3 → 10 → 20` 验证，也没有代理供应商后台 `U1-U0` 账单证据；这些仍是待真实测试项，不能从离线结果推断成本承诺。
+低流量控制、Cookie 桥接、fallback 去重和 nullable 流量口径已通过离线测试。2026-08-31 的真实 3-ASIN 探针尚未形成完整通过批次：第一次受执行环境 `WinError 10013` 阻断，第二次非沙箱运行形成 2 个 action 后因商品页 trade-in 侧栏文案误报登录墙而停止；该误报与 Firefox 流量汇总漏计已进入本轮回归。当前进程没有 `AMAZON_TEST_POSTGRES_DSN`，因此真实 PostgreSQL 集成测试明确跳过，也没有代理供应商后台 `U1-U0` 账单证据；不能从离线结果或未完成探针推断成本承诺。
 
 ## 2. 系统架构
 
@@ -242,6 +242,8 @@ driver.network.add_event_handler("fetch_error", fetch_error_handler)
 - 页面已明确指向其他 ASIN；
 - 只缺 `product_description` 等非核心字段。
 
+`login_wall` 必须由明确认证页证据支持：页面标题为 Amazon Sign-In，或在没有完整商品身份三锚点（`productTitle`、ASIN input、同 ASIN `/dp`/`/clp` canonical）时出现 `/ap/signin`、`ap_email`、`ap_password`、`signInSubmit` 等认证 DOM。普通商品页隐藏 trade-in/feedback 组件中的 `Sign in to continue` 不是登录墙，不能抢在 ASIN 质量门之前触发熔断。
+
 HTTP 网络权限错误、连接错误和响应截断属于 `fetch_error`/`http_transport_error`，不是 Amazon `block_reason`。如果 HTTP 和 Firefox fallback 都失败，PostgreSQL 与 SQLite runner 都必须写一条 body 可空的 action evidence、把任务从 `running` 终结为失败并保留有限重试语义；不能依赖租约过期来掩盖未捕获异常。Windows `WinError 10013` 表示当前执行环境或出口权限失败，代码不得将其改写成 403/429/CAPTCHA/WAF，也不得通过绕过沙箱修复。
 
 ## 7. 解析、质量门与数据分层
@@ -338,7 +340,7 @@ portal 评论 URL 为空时可尝试稳定 `/product-reviews/{ASIN}`；两者均
 | Firefox subresources | BiDi `response_completed` | 任一子资源 response unknown/fetch_error/pending | 否 |
 | Proxy dashboard bill | 供应商后台 `U1-U0` | 未录入供应商数据 | 是 |
 
-Console 的 overview 和 run 详情分别显示上述四类。Raw HTML 文件大小是本地保存体积，不能代替任何网络或账单类别。
+Console 的 overview 和 run 详情分别显示上述四类。Firefox 类别是否适用由对应 `context_json.traffic.firefox_*` 键判断，即使 action 最终 `source_type=http_html`，只要曾尝试 Firefox，unknown 仍必须计入并使 `bytes=null`。Raw HTML 文件大小是本地保存体积，不能代替任何网络或账单类别。
 
 成本验收必须在独立 tenant、固定样本和隔离账单窗口中记录：
 
@@ -409,6 +411,8 @@ if (-not $env:AMAZON_US_POSTGRES_DSN) { throw 'AMAZON_US_POSTGRES_DSN is require
 ```
 
 每一级必须使用新的 `run_id`。只有上一级无 403/429/CAPTCHA/WAF/login、上下文正确且字段质量稳定时才扩大。出现阻断立即停止，不自动换代理或重排 blocked。
+
+Console 是常驻 Python 进程，代码更新后必须重启旧 Console 才会加载新的分类与汇总逻辑：先执行 `.\crawler.ps1 stop -All`，再由下一次 `probe/run` 自动启动，或单独执行 `.\crawler.ps1 console`。
 
 ### 11.4 PostgreSQL 集成测试
 

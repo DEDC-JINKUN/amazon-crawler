@@ -129,6 +129,29 @@ def test_console_traffic_summary_separates_http_firefox_and_proxy_unknown():
     assert summary["proxy_dashboard_bill"] == {"bytes": None, "known_records": 0, "unknown_records": 1}
 
 
+def test_console_traffic_uses_firefox_context_keys_when_final_source_is_http():
+    module = load_module()
+    rows = [{
+        "source_type": "http_html",
+        "transfer_bytes": 1147,
+        "context_json": {
+            "traffic": {
+                "http_compressed_response_bytes": 1147,
+                "firefox_main_document_bytes": None,
+                "firefox_subresource_bytes": None,
+                "firefox_main_document_unknown_count": 3,
+                "firefox_subresource_unknown_count": 3,
+            }
+        },
+    }]
+
+    summary = module.summarize_traffic(rows)
+
+    assert summary["http_compressed_response"] == {"bytes": 1147, "known_records": 1, "unknown_records": 0}
+    assert summary["firefox_main_document"] == {"bytes": None, "known_records": 0, "unknown_records": 3}
+    assert summary["firefox_subresources"] == {"bytes": None, "known_records": 0, "unknown_records": 3}
+
+
 def test_console_serves_static_ui_with_security_headers():
     module = load_module()
     server, thread = start_server(module)

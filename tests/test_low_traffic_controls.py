@@ -954,3 +954,60 @@ def test_explicit_different_asin_redirect_and_noncore_description_gap_do_not_sta
     second = OneProductStorage()
     worker.run_postgres_actions(second, Adapter(valid_without_description), config, limit=1, run_id="run-2", worker_id="worker-a")
     assert second.saved[0]["next_status"] == "succeeded"
+
+
+def test_trade_in_sign_in_prompt_on_product_page_is_not_a_login_wall_and_keeps_asin_mismatch():
+    worker = load_worker()
+    product_html = """
+    <html><head>
+      <title>Amazon.com: Valid product</title>
+      <link rel="canonical" href="https://www.amazon.com/example/dp/B07FMMYMQQ">
+    </head><body>
+      <input id="ASIN" name="ASIN" value="B07FMMYMQQ">
+      <span id="productTitle">Valid product title</span>
+      <div class="unified-trade-in aok-hidden">
+        <a href="#" role="button">Sign in to continue</a>
+      </div>
+    </body></html>
+    """
+
+    assert worker.classify_block(200, product_html) is None
+
+    class Storage(OneProductStorage):
+        def claim_task(self, worker_id, lease_seconds=None):
+            task = super().claim_task(worker_id, lease_seconds)
+            if task is not None:
+                task["asin"] = "B07FMLVYDZ"
+                task["url"] = "https://www.amazon.com/dp/B07FMLVYDZ"
+            return task
+
+    class Adapter:
+        source_type = "http_html"
+        last_transfer_bytes = 362269
+        last_retry_after_seconds = None
+
+        def fetch(self, url):
+            return product_html, 200
+
+        def fetch_browser(self, *args, **kwargs):
+            raise AssertionError("explicit ASIN mismatch must not start Firefox")
+
+    storage = Storage()
+    config = {**worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None, "context": {}}
+
+    assert worker.run_postgres_actions(
+        storage, Adapter(), config, limit=1, run_id="run-trade-in", worker_id="worker-a"
+    ) == 1
+    assert storage.saved[0]["reason"] == "asin_mismatch"
+
+
+@pytest.mark.parametrize(
+    "login_html",
+    [
+        "<html><title>Amazon Sign-In</title><body>Sign in to continue</body></html>",
+        "<html><title>Account</title><body><form action='/ap/signin'><input id='ap_email'><button id='signInSubmit'>Sign in</button></form></body></html>",
+    ],
+)
+def test_explicit_authentication_page_remains_a_login_wall(login_html):
+    worker = load_worker()
+    assert worker.classify_block(200, login_html) == "login_wall"

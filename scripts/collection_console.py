@@ -67,19 +67,23 @@ def summarize_traffic(rows: list[dict[str, Any]]) -> dict[str, dict[str, int | N
             else:
                 accumulators["http_compressed_response"]["known_bytes"] += max(0, int(value))
                 accumulators["http_compressed_response"]["known_records"] += 1
-        if source == "selenium_dom":
-            for category, byte_key, unknown_key in (
-                ("firefox_main_document", "firefox_main_document_bytes", "firefox_main_document_unknown_count"),
-                ("firefox_subresources", "firefox_subresource_bytes", "firefox_subresource_unknown_count"),
+        for category, byte_key, unknown_key, known_key in (
+                ("firefox_main_document", "firefox_main_document_bytes", "firefox_main_document_unknown_count", "firefox_main_document_known_count"),
+                ("firefox_subresources", "firefox_subresource_bytes", "firefox_subresource_unknown_count", "firefox_subresource_known_count"),
             ):
-                value = context_traffic.get(byte_key)
-                unknown = int(context_traffic.get(unknown_key) or 0)
-                if value is None:
-                    accumulators[category]["unknown_records"] += max(1, unknown)
-                else:
-                    accumulators[category]["known_bytes"] += max(0, int(value))
-                    accumulators[category]["known_records"] += 1
-                    accumulators[category]["unknown_records"] += unknown
+            applicable = source == "selenium_dom" or any(
+                key in context_traffic for key in (byte_key, unknown_key, known_key)
+            )
+            if not applicable:
+                continue
+            value = context_traffic.get(byte_key)
+            unknown = int(context_traffic.get(unknown_key) or 0)
+            if value is None:
+                accumulators[category]["unknown_records"] += max(1, unknown)
+            else:
+                accumulators[category]["known_bytes"] += max(0, int(value))
+                accumulators[category]["known_records"] += 1
+                accumulators[category]["unknown_records"] += unknown
     result = {
         category: {
             "bytes": None if values["unknown_records"] else values["known_bytes"],
