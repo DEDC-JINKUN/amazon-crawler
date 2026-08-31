@@ -117,13 +117,13 @@ class HttpAdapterTests(unittest.TestCase):
                 pass
 
         class FakeNetwork:
-            def add_request_handler(self, callback):
+            def add_request_handler(self, *args):
                 return "request"
 
             def add_event_handler(self, event, callback):
                 return 1 if event == "response_completed" else 2
 
-            def remove_request_handler(self, handler_id):
+            def remove_request_handler(self, *args):
                 pass
 
             def remove_event_handler(self, event, handler_id):

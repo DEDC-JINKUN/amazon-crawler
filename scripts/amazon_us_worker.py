@@ -369,6 +369,7 @@ class BrowserNetworkLedger:
             self._known_count = {"main": 0, "subresource": 0}
             self._unknown_count = {"main": 0, "subresource": 0}
             self._blocked = Counter()
+            self._blocked_request_race_count = 0
 
     @classmethod
     def _is_explicit_ad_or_telemetry(cls, url: str) -> bool:
@@ -379,7 +380,7 @@ class BrowserNetworkLedger:
             return True
         return any(marker in path for marker in cls.TELEMETRY_HOST_PATHS.get(host, ()))
 
-    def handle_request(self, request: Any) -> None:
+    def should_block_request(self, request: Any) -> bool:
         resource_type = str(getattr(request, "resource_type", "") or "unknown").lower()
         url = str(getattr(request, "url", "") or "")
         blocked = resource_type in self.BLOCKED_RESOURCE_TYPES or self._is_explicit_ad_or_telemetry(url)
@@ -399,8 +400,18 @@ class BrowserNetworkLedger:
                 else:
                     bucket = "subresource"
                 self._request_buckets[url].append(bucket)
+        return blocked
+
+    def handle_request(self, request: Any) -> bool:
+        blocked = self.should_block_request(request)
         if blocked:
             request.fail()
+        return blocked
+
+    def record_blocked_request_race(self) -> None:
+        with self._lock:
+            self._blocked_request_race_count += 1
+            self._unknown_count["subresource"] += 1
 
     @staticmethod
     def _response_payload(event: Any) -> dict[str, Any]:
@@ -481,6 +492,7 @@ class BrowserNetworkLedger:
                 "main_document_unknown_count": main_unknown,
                 "subresource_unknown_count": sub_unknown,
                 "blocked_resource_counts": dict(sorted(self._blocked.items())),
+                "blocked_request_race_count": self._blocked_request_race_count,
             }
 
 
@@ -1543,6 +1555,11 @@ def delivery_context_confirmed(driver: Any, postal_code: str) -> bool:
     return postal_code in header and currency.strip().upper() == "USD"
 
 
+def _is_stale_bidi_fail_request(error: Exception) -> bool:
+    message = str(getattr(error, "msg", "") or "").strip().lower()
+    return re.fullmatch(r"no such request:\s*blocked request with id \S+ not found", message) is not None
+
+
 class SeleniumFirefoxAdapter:
     def __init__(self, config: dict[str, Any] | None = None, headless: bool | None = None, timeout: int | None = None) -> None:
         config = config or DEFAULTS
@@ -1591,7 +1608,7 @@ class SeleniumFirefoxAdapter:
         # the requested interception and measurement controls.
         try:
             network = self.driver.network
-            self._request_handler_id = network.add_request_handler(self._network_ledger.handle_request)
+            self._request_handler_id = network.add_request_handler("before_request", self._handle_bidi_request)
             self._response_handler_id = network.add_event_handler(
                 "response_completed", self._network_ledger.handle_response_completed
             )
@@ -1606,6 +1623,21 @@ class SeleniumFirefoxAdapter:
                 self._temp_profile.cleanup()
                 self._closed = True
             raise RuntimeError("Firefox WebDriver BiDi network controls are unavailable") from exc
+
+    def _handle_bidi_request(self, request: Any) -> None:
+        from selenium.common.exceptions import WebDriverException
+
+        blocked = self._network_ledger.should_block_request(request)
+        try:
+            if blocked:
+                request.fail()
+            else:
+                request.continue_request()
+        except WebDriverException as exc:
+            if blocked and _is_stale_bidi_fail_request(exc):
+                self._network_ledger.record_blocked_request_race()
+                return
+            raise
 
     def _ensure_delivery_context(self) -> bool:
         """Set the configured ZIP in this isolated browser session once."""
@@ -1697,7 +1729,7 @@ class SeleniumFirefoxAdapter:
                     try:
                         network = self.driver.network
                         if self._request_handler_id is not None:
-                            network.remove_request_handler(self._request_handler_id)
+                            network.remove_request_handler("before_request", self._request_handler_id)
                         if self._response_handler_id is not None:
                             network.remove_event_handler("response_completed", self._response_handler_id)
                         if self._fetch_error_handler_id is not None:
@@ -2024,6 +2056,7 @@ def _evidence_context(base_context: dict[str, Any] | None, adapter: Any) -> dict
                 "firefox_main_document_unknown_count": int(browser.get("main_document_unknown_count") or 1),
                 "firefox_subresource_unknown_count": int(browser.get("subresource_unknown_count") or 1),
                 "blocked_resource_counts": dict(browser.get("blocked_resource_counts") or {}),
+                "blocked_request_race_count": int(browser.get("blocked_request_race_count") or 0),
             }
         )
     context["traffic"] = traffic

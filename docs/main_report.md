@@ -186,10 +186,12 @@ Firefox 选项固定启用：
 使用 Selenium 4.47 高层 API：
 
 ```python
-driver.network.add_request_handler(request_handler)
+driver.network.add_request_handler("before_request", request_handler)
 driver.network.add_event_handler("response_completed", response_handler)
 driver.network.add_event_handler("fetch_error", fetch_error_handler)
 ```
+
+请求拦截使用 Selenium 4.47 公开 `Network.add_request_handler` 的 phase-based 调用，使 `Request.fail()` / `continue_request()` 在本 adapter 实例回调内立即执行。原因是推荐 deferred registry 会在用户 callback 返回后调用内部 `_resolve()`；Gecko 若已释放被拦截请求，`network.failRequest` 的 `no such request: Blocked request with id … not found` 会从后台线程逃逸。Adapter 只在 blocked 分支精确识别这一条竞态，记录脱敏 `blocked_request_race_count` 并把对应子资源计为 unknown；不记录 request id、URL、Cookie，不吞其他 WebDriverException，也不使用全局线程 hook、site-packages 修改或 monkeypatch。
 
 `BrowserNetworkLedger` 在 action 开始时记录顶层 `current_window_handle`。顶层 context 的 `document` 计入 Firefox 主文档；iframe context 的 `document` 计入子资源。`response_completed.response.bytesReceived` 有合法值时累加；以下情况计为 unknown：
 
@@ -325,7 +327,8 @@ portal 评论 URL 为空时可尝试稳定 `/product-reviews/{ASIN}`；两者均
         "image": 27,
         "font": 4,
         "media": 2
-      }
+      },
+      "blocked_request_race_count": 0
     }
   }
 }

@@ -169,22 +169,23 @@ def test_http_adapter_switching_run_destroys_browser_and_cookie_state():
 
 def test_firefox_adapter_installs_selenium_447_high_level_bidi_handlers():
     worker = load_worker()
+    from selenium.common.exceptions import WebDriverException
 
     class FakeNetwork:
         def __init__(self):
-            self.request_handlers = []
+            self.request_handler_args = None
             self.event_handlers = []
 
-        def add_request_handler(self, callback):
-            self.request_handlers.append(callback)
+        def add_request_handler(self, *args):
+            self.request_handler_args = args
             return "request-handler"
 
         def add_event_handler(self, event, callback):
             self.event_handlers.append((event, callback))
             return 7
 
-        def remove_request_handler(self, handler_id):
-            pass
+        def remove_request_handler(self, *args):
+            self.removed_request_handler_args = args
 
         def remove_event_handler(self, event, handler_id):
             pass
@@ -240,9 +241,88 @@ def test_firefox_adapter_installs_selenium_447_high_level_bidi_handlers():
 
     assert FakeOptions.last.enable_bidi is True
     assert FakeOptions.last.page_load_strategy == "eager"
-    assert len(driver.network.request_handlers) == 1
+    assert driver.network.request_handler_args[0] == "before_request"
+    request_handler = driver.network.request_handler_args[1]
+
+    class AllowedRequest(FakeRequest):
+        def __init__(self):
+            super().__init__("script", "https://www.amazon.com/app.js")
+            self.continued = 0
+
+        def continue_request(self):
+            self.continued += 1
+
+    class StaleBlockedRequest(FakeRequest):
+        def __init__(self, message):
+            super().__init__("image", "https://images.example/item.jpg")
+            self.message = message
+
+        def fail(self):
+            raise WebDriverException(self.message)
+
+        def continue_request(self):
+            raise AssertionError("blocked resources must not continue")
+
+    allowed = AllowedRequest()
+    request_handler(allowed)
+    request_handler(StaleBlockedRequest("no such request: Blocked request with id dummy-1 not found"))
+    with pytest.raises(WebDriverException, match="invalid session"):
+        request_handler(StaleBlockedRequest("invalid session id"))
+
+    assert allowed.continued == 1
+    snapshot = adapter._network_ledger.snapshot()
+    assert snapshot["blocked_request_race_count"] == 1
+    assert worker.BrowserNetworkLedger().snapshot()["blocked_request_race_count"] == 0
     assert [event for event, _ in driver.network.event_handlers] == ["response_completed", "fetch_error"]
     adapter.close()
+    assert driver.network.removed_request_handler_args == ("before_request", "request-handler")
+
+
+def test_selenium_447_deferred_registry_leaks_stale_fail_request_after_user_callback():
+    from selenium.common.exceptions import WebDriverException
+    from selenium.webdriver.common.bidi._network_handlers import RequestHandlerRegistry
+
+    class Connection:
+        def execute(self, command):
+            payload = next(command)
+            if payload["method"] == "network.failRequest":
+                raise WebDriverException("no such request: Blocked request with id upstream-dummy not found")
+            return {}
+
+    class Network:
+        def __init__(self):
+            self._conn = Connection()
+            self.callback = None
+
+        def _add_intercept(self, phases=None, url_patterns=None):
+            return {"intercept": "intercept-1"}
+
+        def add_event_handler(self, event, callback):
+            self.callback = callback
+            return 1
+
+        def _remove_intercept(self, intercept_id):
+            pass
+
+        def remove_event_handler(self, event, callback_id):
+            pass
+
+    network = Network()
+    registry = RequestHandlerRegistry(network)
+    registry.add_handler(None, lambda request: request.fail())
+    event = {
+        "isBlocked": True,
+        "intercepts": ["intercept-1"],
+        "request": {
+            "request": "request-1",
+            "url": "https://images.example/item.jpg",
+            "method": "GET",
+            "destination": "image",
+        },
+    }
+
+    with pytest.raises(WebDriverException, match="no such request"):
+        network.callback(event)
 
 
 @pytest.mark.parametrize("currency", [None, "HKD"])
@@ -324,13 +404,13 @@ def test_firefox_fetch_sanitizes_missing_window_and_cleans_invalid_session():
     from selenium.common.exceptions import NoSuchWindowException
 
     class FakeNetwork:
-        def add_request_handler(self, callback):
+        def add_request_handler(self, *args):
             return "request-handler"
 
         def add_event_handler(self, event, callback):
             return 1 if event == "response_completed" else 2
 
-        def remove_request_handler(self, handler_id):
+        def remove_request_handler(self, *args):
             pass
 
         def remove_event_handler(self, event, handler_id):
@@ -858,6 +938,7 @@ def test_product_fallback_reason_and_nullable_browser_traffic_are_persisted_in_e
                 "main_document_unknown_count": 1,
                 "subresource_unknown_count": 0,
                 "blocked_resource_counts": {"image": 3},
+                "blocked_request_race_count": 2,
             }
             return """
             <html><head><link rel="canonical" href="https://www.amazon.com/dp/B00RCPDCQU"></head><body>
@@ -886,6 +967,7 @@ def test_product_fallback_reason_and_nullable_browser_traffic_are_persisted_in_e
     assert context["traffic"]["firefox_main_document_bytes"] is None
     assert context["traffic"]["firefox_subresource_bytes"] == 400
     assert context["traffic"]["blocked_resource_counts"] == {"image": 3}
+    assert context["traffic"]["blocked_request_race_count"] == 2
 
 
 @pytest.mark.parametrize(
