@@ -664,10 +664,13 @@ class PostgresWorkerStorage:
         next_status: str = "failed",
         state_fields: Mapping[str, Any] | None = None,
         increment_attempts: bool = True,
+        terminal: bool = False,
     ) -> bool:
         """Persist one failed or deferred action while releasing its lease."""
         if next_status not in self.VALID_STATUSES:
             raise ValueError(f"invalid task status: {next_status}")
+        if terminal and next_status != "failed":
+            raise ValueError("terminal failures must use failed status")
         asin = str(task.get("asin", "")).strip().upper()
         lease_token = str(task.get("lease_token", ""))
         lease_owner = str(task.get("lease_owner", ""))
@@ -712,7 +715,9 @@ class PostgresWorkerStorage:
                         )
                     assignments = ["status=%s", "last_error=%s"]
                     params: list[Any] = [next_status, error]
-                    if increment_attempts:
+                    if terminal:
+                        assignments.append("attempts=max_attempts")
+                    elif increment_attempts:
                         assignments.append("attempts=attempts+1")
                     for name, value in fields.items():
                         assignments.append(f"{name}=%s")

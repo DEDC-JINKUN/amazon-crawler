@@ -1449,6 +1449,7 @@ def test_postgres_explicit_asin_mismatch_precedes_context_fallback():
     assert adapter.browser_calls == 0
     assert payload["reason"] == "asin_mismatch"
     assert payload["error"] == "asin_mismatch"
+    assert payload["terminal"] is True
     assert payload["evidence"]["http_status"] == 200
     assert payload["evidence"]["transfer_bytes"] == 362269
     assert payload["evidence"]["source_type"] == "http_html"

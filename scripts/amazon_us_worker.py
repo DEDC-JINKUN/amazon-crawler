@@ -1379,11 +1379,20 @@ def _set_status(conn: sqlite3.Connection, marketplace: str, asin: str, status: s
         conn.execute("INSERT INTO state_history(marketplace,asin,from_status,to_status,reason,changed_at) VALUES(?,?,?,?,?,?)", (marketplace, asin, current, status, reason, utc_now()))
 
 
-def _record_failure(conn: sqlite3.Connection, marketplace: str, asin: str, reason: str, error: str) -> None:
+def _record_failure(
+    conn: sqlite3.Connection,
+    marketplace: str,
+    asin: str,
+    reason: str,
+    error: str,
+    *,
+    terminal: bool = False,
+) -> None:
     row = conn.execute("SELECT attempts,max_attempts FROM item_state WHERE marketplace=? AND asin=?", (marketplace, asin)).fetchone()
     if row is None:
         raise KeyError(f"未知商品: {marketplace}+{asin}")
-    _set_status(conn, marketplace, asin, "failed", reason=reason, attempts=int(row["attempts"]) + 1, last_error=error)
+    attempts = int(row["max_attempts"]) if terminal else int(row["attempts"]) + 1
+    _set_status(conn, marketplace, asin, "failed", reason=reason, attempts=attempts, last_error=error)
 
 
 def _set_rate_limited(conn: sqlite3.Connection, marketplace: str, asin: str, stage: str, cooldown_seconds: int | float | None = None) -> None:
@@ -1489,10 +1498,23 @@ def _write_product_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.R
         if error_code and error_code.startswith("context_mismatch"):
             _record_failure(conn, "US", asin, "context_mismatch", error_code)
             return
+        missing_core = [key for key in ("asin", "canonical_url", "title") if not str(data.get(key) or "").strip()]
+        if missing_core and status is not None:
+            error = "missing_core_fields:" + ",".join(missing_core)
+            _insert_evidence(conn, run_id, asin, task["url"], status, body, None, error, source_type, raw_html_dir, raw_html_path, context, transfer_bytes)
+            _record_failure(
+                conn,
+                "US",
+                asin,
+                "missing_core_fields",
+                error,
+                terminal=_is_terminal_missing_core_failure(status, missing_core),
+            )
+            return
         canonical = data.get("canonical_url") or ""
         if not _valid_asin_identity(data, asin):
             _insert_evidence(conn, run_id, asin, task["url"], status, body, None, "asin_mismatch", source_type, raw_html_dir, raw_html_path, context, transfer_bytes)
-            _record_failure(conn, "US", asin, "asin_mismatch", "asin_mismatch")
+            _record_failure(conn, "US", asin, "asin_mismatch", "asin_mismatch", terminal=True)
             return
         now = utc_now()
         product = {"asin": asin, "marketplace": "US", "canonical_url": canonical, "availability": data.get("availability", ""), "title": data.get("title", ""), "brand": data.get("brand", ""), "rating": data.get("rating", ""), "reported_rating_count": data.get("reported_rating_count") or None, "reported_review_count": data.get("reported_review_count") or None, "review_count": data.get("review_count", ""), "review_count_source": data.get("review_count_source", ""), "price": data.get("price", ""), "bullets_json": _json(data.get("bullets", [])), "product_description": data.get("product_description", ""), "specs_json": _json(data.get("specs", {})), "buy_box_json": _json(data.get("buy_box", {})), "top_reviews_json": _json(data.get("top_reviews", [])), "review_link": data.get("review_link", ""), "review_section_anchor": data.get("review_section_anchor", ""), "aplus_present": int(bool(data.get("aplus_present"))), "collected_at": now, "status": "product_done"}
@@ -2108,6 +2130,11 @@ def _valid_product_identity(data: dict[str, Any], expected_asin: str) -> bool:
     )
 
 
+def _is_terminal_missing_core_failure(status: int | None, missing_core: list[str]) -> bool:
+    missing = set(missing_core)
+    return status == 404 and {"asin", "title"}.issubset(missing)
+
+
 def _core_fallback_reason(data: dict[str, Any], expected_asin: str) -> FallbackReason | None:
     if _has_explicit_asin_mismatch(data, expected_asin):
         return None
@@ -2707,7 +2734,9 @@ def run_postgres_actions(
                 _evidence_context(config.get("context"), adapter), transfer_bytes,
                 error_code="asin_mismatch",
             )
-            storage.save_failure(task=task, reason="asin_mismatch", error="asin_mismatch", evidence=evidence)
+            storage.save_failure(
+                task=task, reason="asin_mismatch", error="asin_mismatch", evidence=evidence, terminal=True
+            )
             if refresh_job_id:
                 storage.finish_refresh_request(refresh_job_id, "failed")
             actions += 1
@@ -2759,14 +2788,22 @@ def run_postgres_actions(
         if missing_core:
             error = "missing_core_fields:" + ",".join(missing_core)
             evidence["error_code"] = error
-            storage.save_failure(task=task, reason="missing_core_fields", error=error, evidence=evidence)
+            storage.save_failure(
+                task=task,
+                reason="missing_core_fields",
+                error=error,
+                evidence=evidence,
+                terminal=_is_terminal_missing_core_failure(response_status, missing_core),
+            )
             if refresh_job_id:
                 storage.finish_refresh_request(refresh_job_id, "failed")
             actions += 1
             continue
         if not _valid_asin_identity(data, task["asin"]):
             evidence["error_code"] = "asin_mismatch"
-            storage.save_failure(task=task, reason="asin_mismatch", error="asin_mismatch", evidence=evidence)
+            storage.save_failure(
+                task=task, reason="asin_mismatch", error="asin_mismatch", evidence=evidence, terminal=True
+            )
             if refresh_job_id:
                 storage.finish_refresh_request(refresh_job_id, "failed")
             actions += 1

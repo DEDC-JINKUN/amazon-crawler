@@ -177,6 +177,11 @@ class MissingTitleAdapter(Adapter):
         """, 200
 
 
+class Missing404Adapter(Adapter):
+    def fetch(self, url):
+        return "<html><body>Not found</body></html>", 404
+
+
 class SameAsinClpCanonicalAdapter(Adapter):
     def fetch(self, url):
         return """
@@ -378,3 +383,16 @@ def test_postgres_runner_rejects_product_without_core_title():
     assert worker.run_postgres_actions(storage, MissingTitleAdapter(), config, limit=1, worker_id="worker-a") == 1
     assert storage.saved[0]["reason"] == "missing_core_fields"
     assert storage.saved[0]["error"] == "missing_core_fields:title"
+    assert storage.saved[0].get("terminal", False) is False
+
+
+def test_postgres_runner_marks_404_missing_asin_and_title_terminal():
+    worker = load_worker()
+    storage = Storage()
+    config = dict(worker.DEFAULTS)
+    config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}})
+
+    assert worker.run_postgres_actions(storage, Missing404Adapter(), config, limit=1, worker_id="worker-a") == 1
+    assert storage.saved[0]["reason"] == "missing_core_fields"
+    assert storage.saved[0]["error"] == "missing_core_fields:asin,title"
+    assert storage.saved[0]["terminal"] is True

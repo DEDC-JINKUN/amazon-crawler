@@ -113,9 +113,11 @@ flowchart TD
 | `reviews_pending` | 独立评论分页仍有断点 | `next_review_url`, `next_review_page` |
 | `succeeded` | 当前任务阶段完整结束 | 评论可能没有独立分页入口 |
 | `blocked` | 403/CAPTCHA/WAF/login 等访问控制 | `block_reason`, `last_error` |
-| `failed` | 非阻断错误或空评论页达到失败语义 | `attempts`, `last_error` |
+| `failed` | 非阻断错误；`attempts < max_attempts` 可有限重试，`attempts = max_attempts` 为终止失败 | `attempts`, `max_attempts`, `last_error` |
 
 商品成功和评论成功不是同一个状态事实。独立评论失败必须保留已成功的 `product_snapshot`、`media_asset`、`content_module` 和商品页 `top_reviews`。
+
+商品阶段的两类确定性失败在首次保存 evidence 后直接写为 `failed, attempts=max_attempts`：HTTP 404 且同时缺少 ASIN 与标题的 `missing_core_fields:asin,title`，以及已通过严格身份门确认的 `asin_mismatch`。普通 `claim_task()` 因此不会在下一 run 自动领取；显式 requeue/refresh 仍可重置 attempts。HTTP 连接/截断等 `fetch_error`、context/browser 可恢复错误、HTTP 200 缺字段和独立评论失败继续使用既有有限重试/游标语义。该表示复用现有字段，不需要 schema 迁移；升级前已经保存且 `attempts < max_attempts` 的历史失败不自动回填，若再次被领取，会在新规则下终止。
 
 ## 4. HTTP 匿名会话与 Cookie 桥接
 
@@ -236,6 +238,8 @@ driver.network.add_event_handler("fetch_error", fetch_error_handler)
 `BrowserFallbackLedger.claim(run_id, asin, reason)` 保证同一 run、ASIN、reason 最多一次。Evidence 保存最后一个 `fallback_reason` 和本 action 的 `fallback_reasons` 列表。
 
 商品门禁优先级固定为：HTTP status/CAPTCHA/WAF/login block → 明确 ASIN/canonical identity mismatch → 缺核心字段 fallback → context mismatch fallback → 最终质量与持久化。只要页面 input ASIN 已明确属于其他商品，就直接保存原 HTTP body/status/transfer 的 `asin_mismatch` evidence，不允许 ZIP/币种/国家错误触发 Firefox。唯一例外是严格 Child/Parent 关系：页面 ASIN 必须仍等于任务 Child，canonical 必须为 HTTPS Amazon 且指向页面唯一 `parentAsin`，并且 `landingAsin`、`currentAsin/current_asin`、`dimensionValuesDisplayData` 或 `colorToAsin` 的明确成员集合必须包含该 Child；缺任一证据仍是 `asin_mismatch`，不得把任务 ASIN改写为 Parent。
+
+`asin_mismatch` 与 HTTP 404 的 `missing_core_fields:asin,title` 是商品身份/存在性终态，不因下一 run 自动重试。HTTP 200 缺核心字段仍保留有限重试，因为页面完整性可能随出口或渲染恢复。
 
 以下响应不允许升级 Firefox：
 

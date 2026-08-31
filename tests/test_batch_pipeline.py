@@ -298,6 +298,83 @@ class BatchCheckpointTests(unittest.TestCase):
             self.assertEqual(adapter.calls, 2)
             conn.close()
 
+    def test_deterministic_product_failures_are_not_retried_by_next_run(self):
+        cases = [
+            ("http_404_missing_core", "<html><body>Not found</body></html>", 404, "missing_core_fields:asin,title"),
+            (
+                "asin_mismatch",
+                "<html><head><link rel='canonical' href='https://www.amazon.com/dp/B01FSJD0ZO'></head>"
+                "<body><input id='ASIN' value='B01FSJD0ZO'><span id='productTitle'>Other product</span></body></html>",
+                200,
+                "asin_mismatch",
+            ),
+        ]
+        for name, body, status, expected_error in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                worker, conn, config = self._setup(Path(directory))
+                try:
+                    class Adapter:
+                        def __init__(self):
+                            self.calls = 0
+
+                        def fetch(self, url):
+                            self.calls += 1
+                            return body, status
+
+                    adapter = Adapter()
+                    self.assertEqual(worker.run_actions(conn, adapter, config, limit=1), 1)
+                    evidence_after_first = conn.execute("SELECT COUNT(*) FROM collection_evidence").fetchone()[0]
+                    self.assertEqual(worker.run_actions(conn, adapter, config, limit=1), 0)
+                    row = conn.execute("SELECT status,attempts,max_attempts,last_error FROM item_state").fetchone()
+
+                    self.assertEqual(adapter.calls, 1)
+                    self.assertEqual(row["status"], "failed")
+                    self.assertEqual(row["attempts"], row["max_attempts"])
+                    self.assertEqual(row["last_error"], expected_error)
+                    self.assertEqual(conn.execute("SELECT COUNT(*) FROM collection_evidence").fetchone()[0], evidence_after_first)
+                finally:
+                    conn.close()
+
+    def test_http_200_missing_core_fields_remain_retryable(self):
+        cases = [
+            (
+                "missing_title",
+                "<html><head><link rel='canonical' href='https://www.amazon.com/dp/B00RCPDCQU'></head>"
+                "<body><input id='ASIN' value='B00RCPDCQU'></body></html>",
+                "missing_core_fields:title",
+            ),
+            (
+                "missing_asin",
+                "<html><head><link rel='canonical' href='https://www.amazon.com/dp/B00RCPDCQU'></head>"
+                "<body><span id='productTitle'>Incomplete page</span></body></html>",
+                "missing_core_fields:asin",
+            ),
+        ]
+        for name, body, expected_error in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                worker, conn, config = self._setup(Path(directory))
+                try:
+                    class Adapter:
+                        def __init__(self):
+                            self.calls = 0
+
+                        def fetch(self, url):
+                            self.calls += 1
+                            return body, 200
+
+                    adapter = Adapter()
+                    self.assertEqual(worker.run_actions(conn, adapter, config, limit=1), 1)
+                    self.assertEqual(worker.run_actions(conn, adapter, config, limit=1), 1)
+                    row = conn.execute("SELECT status,attempts,max_attempts,last_error FROM item_state").fetchone()
+
+                    self.assertEqual(adapter.calls, 2)
+                    self.assertEqual(row["status"], "failed")
+                    self.assertEqual(row["attempts"], 2)
+                    self.assertLess(row["attempts"], row["max_attempts"])
+                    self.assertEqual(row["last_error"], expected_error)
+                finally:
+                    conn.close()
+
     def test_429_defers_product_and_review_without_losing_cursor(self):
         product = (FIXTURES / "product_unavailable_video_aplus.html").read_text()
         page1 = (FIXTURES / "reviews_page_1.html").read_text()

@@ -337,6 +337,25 @@ def test_save_failure_increments_attempts_and_releases_lease():
     assert "state_history" in statements
 
 
+def test_save_terminal_failure_exhausts_attempts_and_releases_lease():
+    storage = load_storage()
+    connection = ScriptedConnection([[{"status": "running"}]])
+    repository = storage.PostgresWorkerStorage(
+        "postgresql://example", tenant_id="tenant-a", subject_type="own", connect=lambda: connection
+    )
+
+    assert repository.save_failure(
+        task={"asin": "B00RCPDCQU", "lease_token": "token-1", "lease_owner": "worker-1"},
+        reason="asin_mismatch",
+        error="asin_mismatch",
+        terminal=True,
+    ) is True
+    statements = "\n".join(sql for sql, _ in connection.cursor_instance.executed).replace(" ", "")
+    assert "attempts=max_attempts" in statements
+    assert "attempts=attempts+1" not in statements
+    assert "lease_token=NULL" in statements
+
+
 def test_save_review_result_persists_page_records_summary_and_checkpoint():
     storage = load_storage()
     connection = ScriptedConnection([[{"status": "running"}]])
