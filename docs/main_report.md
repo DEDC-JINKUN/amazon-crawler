@@ -28,7 +28,7 @@
 
 ### 1.4 当前结论
 
-低流量控制、Cookie 桥接、fallback 去重、nullable 流量、terminal failure 和 full/partial 上下文合同已通过离线测试，最新完整结果为 `261 passed, 1 skipped`。2026-08-31 修复后的真实 Amazon 阶梯已验证：3-ASIN 为 3/3 completed（1 full、2 partial）；10-ASIN 为 8 full、1 terminal ASIN mismatch、1 旧版 404 顺序回归；顺序修复后直接20-ASIN得到14 full、3 terminal 404、3 terminal ASIN mismatch、0 blocked、stderr 为0。最新20条中仅首个有效上下文需要1次 Firefox full 确认和 Cookie bridge，后续有效商品由HTTP复用同run匿名上下文；6个确定性失败均已写 `attempts=max_attempts` 并释放租约，不会被普通下一run重复领取。当前进程仍没有 `AMAZON_TEST_POSTGRES_DSN`，独立真实 PostgreSQL集成测试明确跳过；也没有代理供应商后台 `U1-U0` 账单证据，不能把本地流量当成代理成本承诺。
+低流量控制、Cookie 桥接、fallback 去重、nullable 流量、terminal failure 和 full/partial 上下文合同已通过离线测试，最新完整结果为 `261 passed, 1 skipped`。2026-08-31 修复后的真实 Amazon 阶梯已验证3/10/20；继续扩到100-ASIN时在第73条首次出现HTTP 200 CAPTCHA，`stop_on_block`立即以73/100熔断，剩余27条未请求。已完成73条中60个商品全部为full，12条均为同Parent内跳向活跃Sibling Child的`asin_mismatch/variant_redirect`，1条为CAPTCHA；没有新的代码失败或stderr。60个商品页已保存338条真实top reviews，其中54条进入`reviews_pending`，但独立评论分页尚未执行。当前进程仍没有 `AMAZON_TEST_POSTGRES_DSN`，独立真实 PostgreSQL集成测试明确跳过；也没有代理供应商后台 `U1-U0` 账单证据，不能把本地流量当成代理成本承诺。当前出口在CAPTCHA后必须冷却或由用户明确切换合规出口，不得用登录态绕过挑战。
 
 ## 2. 系统架构
 
@@ -520,10 +520,11 @@ Console 只在三项同时成立时复用：`.console.lock.json` 中的 PID+Star
 | 已验证 | full/partial/invalid 字段级上下文、风险字段与Cookie仅full桥接 | 离线测试；真实3-ASIN为1 full/2 partial，后续10/20实机覆盖full |
 | 已验证 | 404缺ASIN+标题与严格ASIN mismatch终止、释放租约且不普通重领 | 离线PG/SQLite测试；最新20-ASIN真实PostgreSQL状态核对 |
 | 已验证 | 同run匿名Cookie桥接后HTTP复用 | 最新20-ASIN为1条Firefox、19条HTTP，桥接1次 |
+| 已验证 | `stop_on_block` 在扩量时立即停止当前出口 | 100-ASIN run在第73条HTTP 200 CAPTCHA后停止，剩余27条未请求 |
 | 目标值 | 商品成功率 | `>= 95%`，待真实批次 |
 | 目标值 | US/USD 硬门正确率 | `100%`，待真实批次 |
-| 目标值 | full/partial 可解释率 | 最新3/10/20 evidence 与 Console 均可解释；继续扩样验证 |
-| 目标值 | Firefox action 比例 | 最新20-ASIN为`5%`；继续扩样和代理账单验证 |
+| 目标值 | full/partial 可解释率 | 最新3/10/20及100-run已完成73条 evidence 与 Console 均可解释 |
+| 目标值 | Firefox action 比例 | 最新100-run已完成73条中5条Firefox（约`6.8%`）；继续代理账单验证 |
 | 目标值 | 媒体 URL 与内容模块保留率 | `>= 95%`，待真实双跑 |
 | 目标值 | 代理计费流量 | `<= 4 MB / successful ASIN`，待供应商账单 |
 | 未验证 | Firefox/geckodriver 实机 BiDi bytes 与 fetch_error 事件完整性 | 需获批 Amazon 小样本 |
