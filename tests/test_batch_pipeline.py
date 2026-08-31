@@ -38,6 +38,7 @@ class BatchCheckpointTests(unittest.TestCase):
         <html><body>
           <input id="ASIN" value="B00RCPDCQU">
           <link rel="canonical" href="https://www.amazon.com/dp/B00RCPDCQU">
+          <span id="productTitle">Example</span>
           <div id="acrPopover">4.0 out of 5 stars</div>
           <a id="acrCustomerReviewLink" href="#averageCustomerReviewsAnchor">(17)</a>
           <div id="averageCustomerReviewsAnchor">Reviews</div>
@@ -314,6 +315,9 @@ class BatchCheckpointTests(unittest.TestCase):
         for name, body, status, expected_error in cases:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
                 worker, conn, config = self._setup(Path(directory))
+                config["context"] = {
+                    "expected_country": "US", "expected_currency": "USD", "postal_code": "90001"
+                }
                 try:
                     class Adapter:
                         def __init__(self):
@@ -326,6 +330,8 @@ class BatchCheckpointTests(unittest.TestCase):
                     adapter = Adapter()
                     self.assertEqual(worker.run_actions(conn, adapter, config, limit=1), 1)
                     evidence_after_first = conn.execute("SELECT COUNT(*) FROM collection_evidence").fetchone()[0]
+                    if name == "http_404_missing_core":
+                        self.assertEqual(evidence_after_first, 1)
                     self.assertEqual(worker.run_actions(conn, adapter, config, limit=1), 0)
                     row = conn.execute("SELECT status,attempts,max_attempts,last_error FROM item_state").fetchone()
 
@@ -376,6 +382,31 @@ class BatchCheckpointTests(unittest.TestCase):
                     self.assertEqual(row["last_error"], expected_error)
                 finally:
                     conn.close()
+
+    def test_unknown_status_missing_core_fields_remain_retryable(self):
+        class Adapter:
+            def __init__(self):
+                self.calls = 0
+
+            def fetch(self, url):
+                self.calls += 1
+                return "<html><body>Incomplete response</body></html>", None
+
+        with tempfile.TemporaryDirectory() as directory:
+            worker, conn, config = self._setup(Path(directory))
+            try:
+                adapter = Adapter()
+                self.assertEqual(worker.run_actions(conn, adapter, config, limit=1), 1)
+                self.assertEqual(worker.run_actions(conn, adapter, config, limit=1), 1)
+                row = conn.execute("SELECT status,attempts,max_attempts,last_error FROM item_state").fetchone()
+
+                self.assertEqual(adapter.calls, 2)
+                self.assertEqual(row["status"], "failed")
+                self.assertEqual(row["attempts"], 2)
+                self.assertLess(row["attempts"], row["max_attempts"])
+                self.assertEqual(row["last_error"], "missing_core_fields:asin,title")
+            finally:
+                conn.close()
 
     def test_429_defers_product_and_review_without_losing_cursor(self):
         product = (FIXTURES / "product_unavailable_video_aplus.html").read_text()

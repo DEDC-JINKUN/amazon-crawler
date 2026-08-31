@@ -183,6 +183,17 @@ class Missing404Adapter(Adapter):
         return "<html><body>Not found</body></html>", 404
 
 
+class Complete404Adapter(Adapter):
+    def fetch(self, url):
+        return """
+        <html><head><link rel="canonical" href="https://www.amazon.com/dp/B00RCPDCQU"></head><body>
+          <input id="ASIN" value="B00RCPDCQU"><span id="productTitle">Complete fallback body</span>
+          <span class="a-price"><span class="a-offscreen">$19.99</span></span>
+          <div id="desktop_buybox">Delivering to Los Angeles 90001</div>
+        </body></html>
+        """, 404
+
+
 class SameAsinClpCanonicalAdapter(Adapter):
     def fetch(self, url):
         return """
@@ -391,9 +402,30 @@ def test_postgres_runner_marks_404_missing_asin_and_title_terminal():
     worker = load_worker()
     storage = Storage()
     config = dict(worker.DEFAULTS)
-    config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}})
+    config.update({
+        "max_actions_per_run": 1,
+        "raw_html_dir": None,
+        "context": {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
+    })
 
     assert worker.run_postgres_actions(storage, Missing404Adapter(), config, limit=1, worker_id="worker-a") == 1
     assert storage.saved[0]["reason"] == "missing_core_fields"
     assert storage.saved[0]["error"] == "missing_core_fields:asin,title"
     assert storage.saved[0]["terminal"] is True
+    assert storage.saved[0]["evidence"]["http_status"] == 404
+
+
+def test_postgres_runner_does_not_terminalize_404_with_complete_identity():
+    worker = load_worker()
+    storage = Storage()
+    config = dict(worker.DEFAULTS)
+    config.update({
+        "max_actions_per_run": 1,
+        "raw_html_dir": None,
+        "context": {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
+    })
+
+    assert worker.run_postgres_actions(storage, Complete404Adapter(), config, limit=1, worker_id="worker-a") == 1
+    assert "product" in storage.saved[0]
+    assert storage.saved[0]["evidence"]["http_status"] == 404
+    assert storage.saved[0]["evidence"]["error_code"] is None

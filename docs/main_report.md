@@ -239,9 +239,9 @@ driver.network.add_event_handler("fetch_error", fetch_error_handler)
 
 `BrowserFallbackLedger.claim(run_id, asin, reason)` 保证同一 run、ASIN、reason 最多一次。Evidence 保存最后一个 `fallback_reason` 和本 action 的 `fallback_reasons` 列表。
 
-商品门禁优先级固定为：HTTP status/CAPTCHA/WAF/login block → 明确 ASIN/canonical identity mismatch → 缺核心字段 fallback → context mismatch fallback → 最终质量与持久化。只要页面 input ASIN 已明确属于其他商品，就直接保存原 HTTP body/status/transfer 的 `asin_mismatch` evidence，不允许 ZIP/币种/国家错误触发 Firefox。唯一例外是严格 Child/Parent 关系：页面 ASIN 必须仍等于任务 Child，canonical 必须为 HTTPS Amazon 且指向页面唯一 `parentAsin`，并且 `landingAsin`、`currentAsin/current_asin`、`dimensionValuesDisplayData` 或 `colorToAsin` 的明确成员集合必须包含该 Child；缺任一证据仍是 `asin_mismatch`，不得把任务 ASIN改写为 Parent。
+商品门禁优先级固定为：HTTP status/CAPTCHA/WAF/login block → 明确 ASIN/canonical identity mismatch → 缺核心字段 fallback → 最终 HTTP 404 且缺 ASIN+标题的 terminal missing-core → 一般 US/USD/ZIP context assessment → 最终质量与持久化。只要页面 input ASIN 已明确属于其他商品，就直接保存原 HTTP body/status/transfer 的 `asin_mismatch` evidence，不允许 ZIP/币种/国家错误触发 Firefox。唯一例外是严格 Child/Parent 关系：页面 ASIN 必须仍等于任务 Child，canonical 必须为 HTTPS Amazon 且指向页面唯一 `parentAsin`，并且 `landingAsin`、`currentAsin/current_asin`、`dimensionValuesDisplayData` 或 `colorToAsin` 的明确成员集合必须包含该 Child；缺任一证据仍是 `asin_mismatch`，不得把任务 ASIN改写为 Parent。
 
-`asin_mismatch` 与 HTTP 404 的 `missing_core_fields:asin,title` 是商品身份/存在性终态，不因下一 run 自动重试。HTTP 200 缺核心字段仍保留有限重试，因为页面完整性可能随出口或渲染恢复。
+`asin_mismatch` 与 Firefox/core fallback 后仍为 HTTP 404 且同时缺 ASIN、标题的 `missing_core_fields:asin,title` 是商品身份/存在性终态，不因下一 run 自动重试。该 404 终态在一般 US/USD context 评估前保存，避免被误写成 `currency_not_observed` / `delivery_country_not_observed`；HTTP 200 或响应状态未知时的缺核心字段保持 `missing_core_fields` 有限重试，404 但身份字段完整的响应继续走既有可恢复/严格质量语义。
 
 以下响应不允许升级 Firefox：
 

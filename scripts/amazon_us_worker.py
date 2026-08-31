@@ -1489,8 +1489,15 @@ def _write_fetch_failure_action(
 
 def _write_product_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.Row, data: dict[str, Any], body: str, status: int | None, block_reason: str | None, error_code: str | None = None, source_type: str = "selenium_dom", raw_html_dir: Path | None = None, context: dict[str, Any] | None = None, cooldown_seconds: int | float | None = None, transfer_bytes: int | None = None) -> None:
     asin = task["asin"]
+    missing_core = [key for key in ("asin", "canonical_url", "title") if not str(data.get(key) or "").strip()]
+    missing_error = "missing_core_fields:" + ",".join(missing_core) if missing_core else None
+    explicit_identity_mismatch = _has_explicit_asin_mismatch(data, asin)
+    evidence_error = error_code or (
+        "asin_mismatch" if explicit_identity_mismatch and not block_reason
+        else missing_error if not block_reason else None
+    )
     with conn:
-        raw_html_path = _insert_evidence(conn, run_id, asin, task["url"], status, body, block_reason, error_code, source_type, raw_html_dir, context=context, transfer_bytes=transfer_bytes)
+        raw_html_path = _insert_evidence(conn, run_id, asin, task["url"], status, body, block_reason, evidence_error, source_type, raw_html_dir, context=context, transfer_bytes=transfer_bytes)
         if block_reason:
             if status == 429 or block_reason == "too_many_requests":
                 _set_rate_limited(conn, "US", asin, "product", cooldown_seconds)
@@ -1500,16 +1507,16 @@ def _write_product_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.R
         if error_code and error_code.startswith("context_mismatch"):
             _record_failure(conn, "US", asin, "context_mismatch", error_code)
             return
-        missing_core = [key for key in ("asin", "canonical_url", "title") if not str(data.get(key) or "").strip()]
-        if missing_core and status is not None:
-            error = "missing_core_fields:" + ",".join(missing_core)
-            _insert_evidence(conn, run_id, asin, task["url"], status, body, None, error, source_type, raw_html_dir, raw_html_path, context, transfer_bytes)
+        if explicit_identity_mismatch:
+            _record_failure(conn, "US", asin, "asin_mismatch", "asin_mismatch", terminal=True)
+            return
+        if missing_core:
             _record_failure(
                 conn,
                 "US",
                 asin,
                 "missing_core_fields",
-                error,
+                str(missing_error),
                 terminal=_is_terminal_missing_core_failure(status, missing_core),
             )
             return
@@ -2519,6 +2526,28 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                 _finish_refresh_request(conn, refresh_job_id, "failed")
             actions += 1
             continue
+        missing_core = [key for key in ("asin", "canonical_url", "title") if not str(data.get(key) or "").strip()]
+        if not reason and _is_terminal_missing_core_failure(response_status, missing_core):
+            error = "missing_core_fields:" + ",".join(missing_core)
+            source_type = getattr(adapter, "source_type", "http_html")
+            _write_product_action(
+                conn,
+                run_id,
+                row,
+                data,
+                body,
+                response_status,
+                None,
+                error_code=error,
+                source_type=source_type,
+                raw_html_dir=raw_html_dir,
+                context=_product_evidence_context(config.get("context"), adapter, data, row["asin"]),
+                transfer_bytes=getattr(adapter, "last_transfer_bytes", None),
+            )
+            if refresh_job_id and row["asin"] == refresh_asin:
+                _finish_refresh_request(conn, refresh_job_id, "failed")
+            actions += 1
+            continue
         context_errors, context_quality = (
             _assess_product_context(data, config.get("context"), adapter) if not reason else ([], {})
         )
@@ -2807,6 +2836,32 @@ def run_postgres_actions(
             )
             storage.save_failure(
                 task=task, reason="asin_mismatch", error="asin_mismatch", evidence=evidence, terminal=True
+            )
+            if refresh_job_id:
+                storage.finish_refresh_request(refresh_job_id, "failed")
+            actions += 1
+            continue
+        missing_core = [key for key in ("asin", "canonical_url", "title") if not str(data.get(key) or "").strip()]
+        if not reason and _is_terminal_missing_core_failure(response_status, missing_core):
+            error = "missing_core_fields:" + ",".join(missing_core)
+            source_type = getattr(adapter, "source_type", "http_html")
+            evidence = _postgres_evidence(
+                run_id,
+                task,
+                body,
+                response_status,
+                source_type,
+                raw_html_dir,
+                _product_evidence_context(config.get("context"), adapter, data, task["asin"]),
+                getattr(adapter, "last_transfer_bytes", None),
+                error_code=error,
+            )
+            storage.save_failure(
+                task=task,
+                reason="missing_core_fields",
+                error=error,
+                evidence=evidence,
+                terminal=True,
             )
             if refresh_job_id:
                 storage.finish_refresh_request(refresh_job_id, "failed")
