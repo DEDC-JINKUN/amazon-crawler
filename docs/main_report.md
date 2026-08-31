@@ -414,6 +414,10 @@ if (-not $env:AMAZON_US_POSTGRES_DSN) { throw 'AMAZON_US_POSTGRES_DSN is require
 
 Console 是常驻 Python 进程，代码更新后必须重启旧 Console 才会加载新的分类与汇总逻辑：先执行 `.\crawler.ps1 stop -All`，再由下一次 `probe/run` 自动启动，或单独执行 `.\crawler.ps1 console`。
 
+Console 只在三项同时成立时复用：`.console.lock.json` 中的 PID+StartTime 仍指向受控 host、lock 的 tenant/raw HTML 身份匹配、readyz 与当前 `collection_console.py` 的 SHA-256 runtime fingerprint 一致。仅 tenant/raw 目录匹配不足以证明进程受控。端口存在无有效 lock 的 listener 时，控制器 fail closed 并提示由操作者在控制器外处理；`stop -All` 不会任意终止未知 PID。
+
+`probe` 的 Worker exit 0 只表示完成有界 action 循环，不代表商品质量通过。Worker 退出后，控制器会有界读取最终 run，打印最终 `recorded/requested`、completed、failed、blocked、inferred，并在 receipt v2 保存这些字段、四类 traffic、`worker_exit_code`、`quality_gate_ok` 与失败原因。Probe 只有在 recorded 等于请求数、inferred/failed/blocked 均为 0、且全部 item 为 evidence-attributed completed 时返回 0；否则状态为 `quality_failed` 并返回非零。普通 `run` 保留原 Worker exit 语义，但 receipt 同样提供最终观测字段。
+
 ### 11.4 PostgreSQL 集成测试
 
 测试只读取 `AMAZON_TEST_POSTGRES_DSN`。变量不存在时应 skip，不索取或打印密码：

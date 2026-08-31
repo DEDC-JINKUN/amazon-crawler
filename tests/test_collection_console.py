@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import threading
 import urllib.error
 import urllib.request
@@ -173,6 +174,7 @@ def test_console_serves_static_ui_with_security_headers():
             assert ready["ok"] is True
             assert ready["tenant_id"] == "tenant-console"
             assert ready["task_count"] == 3
+            assert re.fullmatch(r"[0-9a-f]{64}", ready["runtime_fingerprint"])
     finally:
         stop_server(server, thread)
 

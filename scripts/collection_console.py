@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import hmac
 import json
 import mimetypes
@@ -33,6 +34,7 @@ SECURITY_POLICY = (
     "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
     "frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 )
+RUNTIME_FINGERPRINT = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
 def _json_default(value: Any) -> str:
@@ -524,7 +526,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 raw_html_dir = str(self.server.raw_html_dir.resolve()) if self.server.raw_html_dir else None
                 self._send_json(
                     HTTPStatus.OK,
-                    {"ok": True, "schema_version": "amazon-us-console-v1", **identity, "raw_html_dir": raw_html_dir},
+                    {
+                        "ok": True,
+                        "schema_version": "amazon-us-console-v1",
+                        "runtime_fingerprint": RUNTIME_FINGERPRINT,
+                        **identity,
+                        "raw_html_dir": raw_html_dir,
+                    },
                 )
             except Exception:
                 self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "database_unavailable"})
