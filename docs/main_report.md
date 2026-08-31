@@ -28,7 +28,7 @@
 
 ### 1.4 当前结论
 
-低流量控制、Cookie 桥接、fallback 去重、nullable 流量、terminal failure 和 full/partial 上下文合同已通过离线测试，最新完整结果为 `261 passed, 1 skipped`。2026-08-31 修复后的真实 Amazon 阶梯已验证3/10/20；继续扩到100-ASIN时在第73条首次出现HTTP 200 CAPTCHA，`stop_on_block`立即以73/100熔断，剩余27条未请求。已完成73条中60个商品全部为full，12条均为同Parent内跳向活跃Sibling Child的`asin_mismatch/variant_redirect`，1条为CAPTCHA；没有新的代码失败或stderr。60个商品页已保存338条真实top reviews，其中54条进入`reviews_pending`，但独立评论分页尚未执行。用户只切同VPN池后的3-ASIN探针在第2条再次命中同型CAPTCHA；改用手机热点后重新探针3/3 completed、全部full，首条Firefox确认90001并桥接Cookie，后两条HTTP复用，证明热点当前出口可用。当前进程仍没有 `AMAZON_TEST_POSTGRES_DSN`，也没有代理供应商后台 `U1-U0` 账单证据；测试账户不得用于绕过挑战，独立评论登录能力仍需单独实现和验证。
+低流量控制、Cookie 桥接、fallback 去重、nullable 流量、terminal failure 和 full/partial 上下文合同已通过离线测试，最新完整结果为 `261 passed, 1 skipped`。2026-08-31 修复后的真实 Amazon 阶梯已验证3/10/20；继续扩到100-ASIN时在第73条首次出现HTTP 200 CAPTCHA，`stop_on_block`立即以73/100熔断，剩余27条未请求。已完成73条中60个商品全部为full，12条均为同Parent内跳向活跃Sibling Child的`asin_mismatch/variant_redirect`，1条为CAPTCHA；没有新的代码失败或stderr。60个商品页已保存338条真实top reviews，其中54条进入`reviews_pending`，但独立评论分页尚未执行。用户连接手机热点后的短探针3/3通过，但随后的100-run在第2条再次命中同型CAPTCHA；Windows路由核对发现`EFan tun2socks Tunnel`仍为Up并持有覆盖绝大多数公网地址的低metric路由，证明热点只更换底层WLAN，Amazon流量仍经过原VPN隧道。当前必须先关闭EFan或切到真正不同的合规美国出口，不能继续试探；测试账户不得用于绕过挑战，独立评论登录能力仍需单独实现和验证。
 
 ## 2. 系统架构
 
