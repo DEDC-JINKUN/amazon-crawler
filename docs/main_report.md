@@ -28,7 +28,7 @@
 
 ### 1.4 当前结论
 
-低流量控制、Cookie 桥接、fallback 去重、nullable 流量、terminal failure 和 full/partial 上下文合同已通过离线测试，最新完整结果为 `261 passed, 1 skipped`。2026-08-31 修复后的真实 Amazon 阶梯已验证3/10/20；继续扩到100-ASIN时在第73条首次出现HTTP 200 CAPTCHA，`stop_on_block`立即以73/100熔断，剩余27条未请求。已完成73条中60个商品全部为full，12条均为同Parent内跳向活跃Sibling Child的`asin_mismatch/variant_redirect`，1条为CAPTCHA；没有新的代码失败或stderr。60个商品页已保存338条真实top reviews，其中54条进入`reviews_pending`，但独立评论分页尚未执行。当前进程仍没有 `AMAZON_TEST_POSTGRES_DSN`，独立真实 PostgreSQL集成测试明确跳过；也没有代理供应商后台 `U1-U0` 账单证据，不能把本地流量当成代理成本承诺。当前出口在CAPTCHA后必须冷却或由用户明确切换合规出口，不得用登录态绕过挑战。
+低流量控制、Cookie 桥接、fallback 去重、nullable 流量、terminal failure 和 full/partial 上下文合同已通过离线测试，最新完整结果为 `261 passed, 1 skipped`。2026-08-31 修复后的真实 Amazon 阶梯已验证3/10/20；继续扩到100-ASIN时在第73条首次出现HTTP 200 CAPTCHA，`stop_on_block`立即以73/100熔断，剩余27条未请求。已完成73条中60个商品全部为full，12条均为同Parent内跳向活跃Sibling Child的`asin_mismatch/variant_redirect`，1条为CAPTCHA；没有新的代码失败或stderr。60个商品页已保存338条真实top reviews，其中54条进入`reviews_pending`，但独立评论分页尚未执行。用户切换VPN后做3-ASIN安全探针，第一条只得到Portland 97218 partial，第二条再次返回同型3,781-byte `/errors_page/validateCaptcha`并在2/3熔断，证明只切同供应商端口/同地区出口不保证恢复。当前进程仍没有 `AMAZON_TEST_POSTGRES_DSN`，也没有代理供应商后台 `U1-U0` 账单证据；当前出口必须停止，下一次只允许使用可确认不同公网IP/地区的合规出口，不得用测试账户登录态绕过挑战。
 
 ## 2. 系统架构
 
