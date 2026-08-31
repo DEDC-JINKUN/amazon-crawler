@@ -116,6 +116,88 @@ $partial = Test-ProbeRunQuality ([pscustomobject]@{{recorded_actions=2;inferred_
     assert "recorded_actions" in payload["partial"]["quality_gate_reason"]
 
 
+def test_verified_process_accepts_json_datetime_and_iso_but_rejects_unsafe_locks():
+    powershell = shutil.which("pwsh") or shutil.which("pwsh.exe") or shutil.which("powershell") or shutil.which("powershell.exe")
+    assert powershell is not None
+    script_path = str(SCRIPT).replace("'", "''")
+    command = rf"""
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile('{script_path}', [ref]$tokens, [ref]$errors)
+$fn = $ast.FindAll({{ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-VerifiedProcess' }}, $true) | Select-Object -First 1
+if ($null -eq $fn) {{ throw 'Get-VerifiedProcess not found' }}
+Invoke-Expression $fn.Extent.Text
+$process = Get-Process -Id $PID
+$iso = $process.StartTime.ToUniversalTime().ToString('o')
+$jsonLock = ('{{{{"pid":{{0}},"start_time":"{{1}}"}}}}' -f $PID,$iso) | ConvertFrom-Json
+$stringLock = [pscustomobject]@{{pid=$PID;start_time=[string]$iso}}
+$invalidLock = [pscustomobject]@{{pid=$PID;start_time='not-a-time'}}
+$mismatchLock = [pscustomobject]@{{pid=$PID;start_time=$process.StartTime.ToUniversalTime().AddTicks(1).ToString('o')}}
+$missingProcessLock = [pscustomobject]@{{pid=2147483647;start_time=$iso}}
+[ordered]@{{
+  json_type=$jsonLock.start_time.GetType().FullName
+  json_ok=$null -ne (Get-VerifiedProcess $jsonLock)
+  string_ok=$null -ne (Get-VerifiedProcess $stringLock)
+  invalid_rejected=$null -eq (Get-VerifiedProcess $invalidLock)
+  mismatch_rejected=$null -eq (Get-VerifiedProcess $mismatchLock)
+  missing_process_rejected=$null -eq (Get-VerifiedProcess $missingProcessLock)
+}} | ConvertTo-Json -Compress
+"""
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload == {
+        "json_type": "System.DateTime",
+        "json_ok": True,
+        "string_ok": True,
+        "invalid_rejected": True,
+        "mismatch_rejected": True,
+        "missing_process_rejected": True,
+    }
+
+
+def test_worker_and_console_locks_share_the_same_verified_process_gate():
+    text = SCRIPT.read_text(encoding="utf-8")
+    assert text.count("Get-VerifiedProcess") >= 5
+    assert "Get-VerifiedProcess $worker" in text
+    assert "Get-VerifiedProcess $console" in text
+
+
+def test_verified_process_fails_closed_when_start_time_access_throws():
+    powershell = shutil.which("pwsh") or shutil.which("pwsh.exe") or shutil.which("powershell") or shutil.which("powershell.exe")
+    assert powershell is not None
+    script_path = str(SCRIPT).replace("'", "''")
+    command = rf"""
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile('{script_path}', [ref]$tokens, [ref]$errors)
+$fn = $ast.FindAll({{ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-VerifiedProcess' }}, $true) | Select-Object -First 1
+if ($null -eq $fn) {{ throw 'Get-VerifiedProcess not found' }}
+Invoke-Expression $fn.Extent.Text
+$throwingProcess = [pscustomobject]@{{}}
+$throwingProcess | Add-Member -MemberType ScriptProperty -Name StartTime -Value {{ throw 'start time unavailable' }}
+function Get-Process {{ param([int]$Id, $ErrorAction) return $throwingProcess }}
+$lock = [pscustomobject]@{{pid=123;start_time='2026-08-31T04:52:15.7663775Z'}}
+$result = Get-VerifiedProcess $lock
+[ordered]@{{rejected=$null -eq $result}} | ConvertTo-Json -Compress
+"""
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert json.loads(result.stdout.strip().splitlines()[-1]) == {"rejected": True}
+
+
 def test_control_script_defaults_to_current_isolated_tenant():
     text = SCRIPT.read_text(encoding="utf-8")
     assert "real_batch_20260828_500_04" in text

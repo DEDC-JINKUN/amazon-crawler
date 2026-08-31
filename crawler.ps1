@@ -80,8 +80,29 @@ function Get-VerifiedProcess([object]$Lock) {
     if ($null -eq $Lock -or -not $Lock.pid -or -not $Lock.start_time) { return $null }
     try { $process = Get-Process -Id ([int]$Lock.pid) -ErrorAction Stop }
     catch { return $null }
-    $actual = $process.StartTime.ToUniversalTime().ToString('o')
-    if ($actual -ne [string]$Lock.start_time) { return $null }
+    try {
+        if ($Lock.start_time -is [DateTime]) {
+            $expectedUtc = ([DateTime]$Lock.start_time).ToUniversalTime()
+        }
+        elseif ($Lock.start_time -is [DateTimeOffset]) {
+            $expectedUtc = ([DateTimeOffset]$Lock.start_time).UtcDateTime
+        }
+        else {
+            $parsed = [DateTimeOffset]::MinValue
+            $valid = [DateTimeOffset]::TryParseExact(
+                [string]$Lock.start_time,
+                'o',
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::RoundtripKind,
+                [ref]$parsed
+            )
+            if (-not $valid) { return $null }
+            $expectedUtc = $parsed.UtcDateTime
+        }
+        $actualUtc = $process.StartTime.ToUniversalTime()
+    }
+    catch { return $null }
+    if ($actualUtc.Ticks -ne $expectedUtc.Ticks) { return $null }
     return $process
 }
 
