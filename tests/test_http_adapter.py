@@ -188,6 +188,7 @@ class HttpAdapterTests(unittest.TestCase):
 
         class Driver:
             page_source = "<html>ok</html>"
+            current_window_handle = "top-context"
             input_value = ""
             committed = False
             js_clicked = False

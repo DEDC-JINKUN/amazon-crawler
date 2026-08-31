@@ -179,6 +179,8 @@ Firefox 选项固定启用：
 
 初始化必须同时获得 `driver.network` 并成功注册全部 handler。缺少 BiDi、handler 注册失败或 WebSocket 不可用时，适配器关闭 driver、清理 profile 并 fail closed；不会无拦截地继续 Firefox。
 
+`current_window_handle`、导航、ZIP 设置、DOM 和响应状态读取处于同一个受保护生命周期。窗口已丢失或 browsing context 已销毁时，适配器先把浏览器流量保守标为 unknown，幂等清理 BiDi handler、driver 和临时 profile，再只向 runner 返回固定的 `Firefox browser session is unavailable`；原始 WebDriver 异常不进入任务错误或 evidence。
+
 ### 5.2 事件与计量
 
 使用 Selenium 4.47 高层 API：
@@ -239,6 +241,8 @@ driver.network.add_event_handler("fetch_error", fetch_error_handler)
 - 登录墙；
 - 页面已明确指向其他 ASIN；
 - 只缺 `product_description` 等非核心字段。
+
+HTTP 网络权限错误、连接错误和响应截断属于 `fetch_error`/`http_transport_error`，不是 Amazon `block_reason`。如果 HTTP 和 Firefox fallback 都失败，PostgreSQL 与 SQLite runner 都必须写一条 body 可空的 action evidence、把任务从 `running` 终结为失败并保留有限重试语义；不能依赖租约过期来掩盖未捕获异常。Windows `WinError 10013` 表示当前执行环境或出口权限失败，代码不得将其改写成 403/429/CAPTCHA/WAF，也不得通过绕过沙箱修复。
 
 ## 7. 解析、质量门与数据分层
 
@@ -473,6 +477,7 @@ if (-not $env:AMAZON_US_POSTGRES_DSN) { throw 'AMAZON_US_POSTGRES_DSN is require
 | 目标值 | 代理计费流量 | `<= 4 MB / successful ASIN`，待供应商账单 |
 | 未验证 | Firefox/geckodriver 实机 BiDi bytes 与 fetch_error 事件完整性 | 需获批 Amazon 小样本 |
 | 未验证 | 匿名 ZIP Cookie 桥接后的 Firefox 比例下降 | 需 `3 → 10 → 20` |
+| 未验证 | 修复窗口丢失后的真实 3-ASIN 回归 | 需获准的非受限网络环境；不得在沙箱内绕过 WinError 10013 |
 | 未验证 | 真实 PostgreSQL 集成（当前进程） | `AMAZON_TEST_POSTGRES_DSN` 缺失 |
 | 未验证 | 代理后台计费与本地四类指标对账 | 需最小付费套餐和 `U1-U0` |
 

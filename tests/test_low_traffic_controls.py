@@ -319,6 +319,84 @@ def test_firefox_adapter_fails_closed_when_bidi_network_is_missing():
     assert driver.quit_called is True
 
 
+def test_firefox_fetch_sanitizes_missing_window_and_cleans_invalid_session():
+    worker = load_worker()
+    from selenium.common.exceptions import NoSuchWindowException
+
+    class FakeNetwork:
+        def add_request_handler(self, callback):
+            return "request-handler"
+
+        def add_event_handler(self, event, callback):
+            return 1 if event == "response_completed" else 2
+
+        def remove_request_handler(self, handler_id):
+            pass
+
+        def remove_event_handler(self, event, handler_id):
+            pass
+
+    class FakeDriver:
+        def __init__(self):
+            self.network = FakeNetwork()
+            self.quit_called = False
+
+        @property
+        def current_window_handle(self):
+            raise NoSuchWindowException("Browsing context has been discarded webdriver-secret")
+
+        def set_page_load_timeout(self, value):
+            pass
+
+        def quit(self):
+            self.quit_called = True
+
+    class FakeOptions:
+        def __init__(self):
+            self.profile = None
+
+        def add_argument(self, value):
+            pass
+
+        def set_preference(self, name, value):
+            pass
+
+    driver = FakeDriver()
+    webdriver = types.ModuleType("selenium.webdriver")
+    webdriver.Firefox = lambda **kwargs: driver
+    selenium_module = types.ModuleType("selenium")
+    selenium_module.webdriver = webdriver
+    proxy_module = types.ModuleType("selenium.webdriver.common.proxy")
+    proxy_module.Proxy = lambda value: value
+    options_module = types.ModuleType("selenium.webdriver.firefox.options")
+    options_module.Options = FakeOptions
+    service_module = types.ModuleType("selenium.webdriver.firefox.service")
+    service_module.Service = lambda **kwargs: object()
+    fake_modules = {
+        "selenium": selenium_module,
+        "selenium.webdriver": webdriver,
+        "selenium.webdriver.common": types.ModuleType("selenium.webdriver.common"),
+        "selenium.webdriver.common.proxy": proxy_module,
+        "selenium.webdriver.firefox": types.ModuleType("selenium.webdriver.firefox"),
+        "selenium.webdriver.firefox.options": options_module,
+        "selenium.webdriver.firefox.service": service_module,
+    }
+
+    with patch.dict(sys.modules, fake_modules):
+        adapter = worker.SeleniumFirefoxAdapter({**worker.DEFAULTS, "geckodriver_path": ""})
+    profile_path = Path(adapter._temp_profile.name)
+
+    with pytest.raises(worker.AdapterFetchError) as raised:
+        adapter.fetch("https://www.amazon.com/dp/B00RCPDCQU")
+
+    assert str(raised.value) == "Firefox browser session is unavailable"
+    assert "webdriver-secret" not in str(raised.value)
+    assert driver.quit_called is True
+    assert profile_path.exists() is False
+    assert adapter.last_traffic["main_document_bytes"] is None
+    assert adapter.last_traffic["subresource_bytes"] is None
+
+
 class FakeRequest:
     def __init__(self, resource_type: str, url: str, context: str | None = None):
         self.resource_type = resource_type
@@ -474,6 +552,95 @@ class OneProductStorage:
     def save_failure(self, **payload):
         self.saved.append(payload)
         return True
+
+
+def test_postgres_http_and_browser_transport_failures_persist_action_evidence():
+    worker = load_worker()
+
+    class DoubleFailureAdapter:
+        source_type = "http_html"
+        last_transfer_bytes = 0
+        last_retry_after_seconds = None
+
+        def fetch(self, url):
+            raise worker.AdapterFetchError("HTTP transport unavailable")
+
+        def fetch_browser(self, url, *, fallback_reason, run_id, asin):
+            raise worker.AdapterFetchError("Firefox browser session is unavailable")
+
+    storage = OneProductStorage()
+    config = {
+        **worker.DEFAULTS,
+        "max_actions_per_run": 1,
+        "raw_html_dir": None,
+        "context": {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
+    }
+
+    assert worker.run_postgres_actions(
+        storage, DoubleFailureAdapter(), config, limit=1, run_id="run-window-loss", worker_id="worker-a"
+    ) == 1
+
+    payload = storage.saved[0]
+    assert payload["reason"] == "fetch_error"
+    assert payload["evidence"]["run_id"] == "run-window-loss"
+    assert payload["evidence"]["error_code"] == "fetch_error"
+    assert payload["evidence"]["source_type"] == "http_html"
+    assert payload["evidence"]["context_json"]["fallback_reason"] == "http_transport_error"
+    assert payload["evidence"]["context_json"]["traffic"]["firefox_main_document_bytes"] is None
+
+
+def test_sqlite_http_and_browser_transport_failures_persist_action_evidence_and_finish_task():
+    worker = load_worker()
+
+    class DoubleFailureAdapter:
+        source_type = "http_html"
+        last_transfer_bytes = 0
+        last_retry_after_seconds = None
+
+        def fetch(self, url):
+            raise worker.AdapterFetchError("HTTP transport unavailable")
+
+        def fetch_browser(self, url, *, fallback_reason, run_id, asin):
+            raise worker.AdapterFetchError("Firefox browser session is unavailable")
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        manifest = root / "manifest.csv"
+        manifest.write_text(
+            "\ufeffasin,url,marketplace,source_site_label,source_workbook\n"
+            "B00RCPDCQU,https://www.amazon.com/dp/B00RCPDCQU,US,test,fixture.xlsx\n",
+            encoding="utf-8",
+        )
+        conn = worker.init_db(root / "state.sqlite3")
+        config = {
+            **worker.DEFAULTS,
+            "max_actions_per_run": 1,
+            "output_dir": root / "out",
+            "raw_html_dir": None,
+            "context": {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
+        }
+        worker.initialize_manifest(conn, manifest, config)
+
+        assert worker.run_actions(
+            conn, DoubleFailureAdapter(), config, limit=1, run_id="run-window-loss"
+        ) == 1
+        state = conn.execute(
+            "SELECT status,last_error FROM item_state WHERE marketplace='US' AND asin='B00RCPDCQU'"
+        ).fetchone()
+        evidence = conn.execute(
+            "SELECT run_id,error_code,http_status,raw_html_path,context_json "
+            "FROM collection_evidence WHERE asin='B00RCPDCQU' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+
+    assert tuple(state) == ("failed", "HTTP transport unavailable")
+    assert evidence["run_id"] == "run-window-loss"
+    assert evidence["error_code"] == "fetch_error"
+    assert evidence["http_status"] is None
+    assert evidence["raw_html_path"] is None
+    context = json.loads(evidence["context_json"])
+    assert context["fallback_reason"] == "http_transport_error"
+    assert context["traffic"]["firefox_main_document_bytes"] is None
 
 
 class ReviewOnlyStorage(OneProductStorage):

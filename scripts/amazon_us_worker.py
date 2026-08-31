@@ -1323,12 +1323,38 @@ def _persist_raw_html(raw_html_dir: Path | None, run_id: str, asin: str, body: s
     return LocalRawHtmlStore(raw_html_dir).put(run_id, asin, body)
 
 
-def _insert_evidence(conn: sqlite3.Connection, run_id: str, asin: str, url: str, status: int | None, body: str, block_reason: str | None, error_code: str | None = None, source_type: str = "selenium_dom", raw_html_dir: Path | None = None, raw_html_path: str | None = None, context: dict[str, Any] | None = None, transfer_bytes: int | None = None) -> str | None:
-    if raw_html_path is None:
+def _insert_evidence(conn: sqlite3.Connection, run_id: str, asin: str, url: str, status: int | None, body: str | None, block_reason: str | None, error_code: str | None = None, source_type: str = "selenium_dom", raw_html_dir: Path | None = None, raw_html_path: str | None = None, context: dict[str, Any] | None = None, transfer_bytes: int | None = None) -> str | None:
+    if raw_html_path is None and body is not None:
         raw_html_path = _persist_raw_html(raw_html_dir, run_id, asin, body)
     context_json = _json(context or {})
-    conn.execute("INSERT INTO collection_evidence(run_id,marketplace,asin,url,http_status,transfer_bytes,retrieved_at,source_type,content_hash,raw_html_path,block_reason,parser_version,error_code,context_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (run_id, "US", asin, url, status, transfer_bytes, utc_now(), source_type, hashlib.sha256(body.encode()).hexdigest(), raw_html_path, block_reason, PARSER_VERSION, error_code, context_json))
+    content_hash = hashlib.sha256(body.encode()).hexdigest() if body is not None else None
+    conn.execute("INSERT INTO collection_evidence(run_id,marketplace,asin,url,http_status,transfer_bytes,retrieved_at,source_type,content_hash,raw_html_path,block_reason,parser_version,error_code,context_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (run_id, "US", asin, url, status, transfer_bytes, utc_now(), source_type, content_hash, raw_html_path, block_reason, PARSER_VERSION, error_code, context_json))
     return raw_html_path
+
+
+def _write_fetch_failure_action(
+    conn: sqlite3.Connection,
+    run_id: str,
+    task: sqlite3.Row,
+    error: str,
+    adapter: Any,
+    context: dict[str, Any] | None,
+) -> None:
+    with conn:
+        _insert_evidence(
+            conn,
+            run_id,
+            task["asin"],
+            task["url"],
+            None,
+            None,
+            None,
+            "fetch_error",
+            getattr(adapter, "source_type", "http_html"),
+            context=_evidence_context(context, adapter),
+            transfer_bytes=getattr(adapter, "last_transfer_bytes", None),
+        )
+        _record_failure(conn, "US", task["asin"], "fetch_error", error)
 
 
 def _write_product_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.Row, data: dict[str, Any], body: str, status: int | None, block_reason: str | None, error_code: str | None = None, source_type: str = "selenium_dom", raw_html_dir: Path | None = None, context: dict[str, Any] | None = None, cooldown_seconds: int | float | None = None, transfer_bytes: int | None = None) -> None:
@@ -1536,6 +1562,7 @@ class SeleniumFirefoxAdapter:
         self._response_handler_id: Any | None = None
         self._fetch_error_handler_id: Any | None = None
         self._bidi_available = False
+        self._closed = False
         # Selenium 4.47 exposes the stable high-level driver.network surface.
         # Initialization is fail-closed so Firefox never silently runs without
         # the requested interception and measurement controls.
@@ -1554,6 +1581,7 @@ class SeleniumFirefoxAdapter:
                 self.driver.quit()
             finally:
                 self._temp_profile.cleanup()
+                self._closed = True
             raise RuntimeError("Firefox WebDriver BiDi network controls are unavailable") from exc
 
     def _ensure_delivery_context(self) -> bool:
@@ -1612,14 +1640,20 @@ class SeleniumFirefoxAdapter:
     def fetch(self, url: str) -> tuple[str, int | None]:
         if not hasattr(self, "_network_ledger"):
             self._network_ledger = BrowserNetworkLedger()
-        self._network_ledger.reset(top_context_id=getattr(self.driver, "current_window_handle", None))
+        self._network_ledger.reset(top_context_id=None)
         try:
+            top_context_id = self.driver.current_window_handle
+            self._network_ledger.reset(top_context_id=top_context_id)
             self.driver.get(url)
             self._ensure_delivery_context()
-        except Exception as exc:
-            raise AdapterFetchError(str(exc)) from exc
+            body = self.driver.page_source
+            status = extract_response_status(self.driver)
+        except Exception:
+            self.last_traffic = self._network_ledger.snapshot()
+            self.close()
+            raise AdapterFetchError("Firefox browser session is unavailable") from None
         self.last_traffic = self._network_ledger.snapshot()
-        return self.driver.page_source, extract_response_status(self.driver)
+        return body, status
 
     def export_anonymous_amazon_cookies(self) -> list[dict[str, Any]]:
         if not self._context_initialized:
@@ -1631,20 +1665,34 @@ class SeleniumFirefoxAdapter:
         return [dict(item) for item in cookies if isinstance(item, dict)]
 
     def close(self) -> None:
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
         try:
             try:
-                if self._bidi_available:
-                    network = self.driver.network
-                    if self._request_handler_id is not None:
-                        network.remove_request_handler(self._request_handler_id)
-                    if self._response_handler_id is not None:
-                        network.remove_event_handler("response_completed", self._response_handler_id)
-                    if self._fetch_error_handler_id is not None:
-                        network.remove_event_handler("fetch_error", self._fetch_error_handler_id)
+                if getattr(self, "_bidi_available", False):
+                    try:
+                        network = self.driver.network
+                        if self._request_handler_id is not None:
+                            network.remove_request_handler(self._request_handler_id)
+                        if self._response_handler_id is not None:
+                            network.remove_event_handler("response_completed", self._response_handler_id)
+                        if self._fetch_error_handler_id is not None:
+                            network.remove_event_handler("fetch_error", self._fetch_error_handler_id)
+                    except Exception:
+                        pass
             finally:
-                self.driver.quit()
+                try:
+                    self.driver.quit()
+                except Exception:
+                    pass
         finally:
-            self._temp_profile.cleanup()
+            try:
+                temp_profile = getattr(self, "_temp_profile", None)
+                if temp_profile is not None:
+                    temp_profile.cleanup()
+            except Exception:
+                pass
 
 
 class HttpFirstAdapter:
@@ -1823,7 +1871,20 @@ class HttpFirstAdapter:
                 self.browser = SeleniumFirefoxAdapter(self.config)
             except (RuntimeError, OSError) as exc:
                 raise AdapterFetchError(str(exc)) from exc
-        body, status = self.browser.fetch(url)
+        browser = self.browser
+        try:
+            body, status = browser.fetch(url)
+        except AdapterFetchError:
+            self.last_browser_traffic = dict(getattr(browser, "last_traffic", None) or {})
+            try:
+                close_browser = getattr(browser, "close", None)
+                if close_browser is not None:
+                    close_browser()
+            except Exception:
+                pass
+            finally:
+                self.browser = None
+            raise
         self.source_type = "selenium_dom"
         self.last_transfer_bytes = None
         self.last_browser_traffic = dict(self.browser.last_traffic)
@@ -2138,7 +2199,7 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
             # the normal HTTP-first route, but do not discard the fallback.
             postal_code = str((config.get("context") or {}).get("postal_code") or "").strip()
             if not postal_code or not hasattr(adapter, "fetch_browser"):
-                _record_failure(conn, "US", row["asin"], "fetch_error", str(exc))
+                _write_fetch_failure_action(conn, run_id, row, str(exc), adapter, config.get("context"))
                 if refresh_job_id and row["asin"] == refresh_asin:
                     _finish_refresh_request(conn, refresh_job_id, "failed")
                 actions += 1
@@ -2152,7 +2213,7 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                     raise AdapterFetchError("duplicate browser fallback suppressed")
                 body, response_status = browser_result
             except AdapterFetchError:
-                _record_failure(conn, "US", row["asin"], "fetch_error", str(exc))
+                _write_fetch_failure_action(conn, run_id, row, str(exc), adapter, config.get("context"))
                 if refresh_job_id and row["asin"] == refresh_asin:
                     _finish_refresh_request(conn, refresh_job_id, "failed")
                 actions += 1
