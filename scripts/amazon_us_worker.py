@@ -2259,6 +2259,18 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                     body, response_status, data, reason = browser_body, browser_status, {"asin": "", "canonical_url": ""}, browser_reason
                 elif browser_result is not None:
                     body, response_status, data, reason = browser_body, browser_status, parse_product_html(browser_body, row["url"]), browser_reason
+        if not reason and _has_explicit_asin_mismatch(data, row["asin"]):
+            source_type = getattr(adapter, "source_type", "http_html")
+            transfer_bytes = getattr(adapter, "last_transfer_bytes", None)
+            _write_product_action(
+                conn, run_id, row, data, body, response_status, None,
+                source_type=source_type, raw_html_dir=raw_html_dir,
+                context=_evidence_context(config.get("context"), adapter), transfer_bytes=transfer_bytes,
+            )
+            if refresh_job_id and row["asin"] == refresh_asin:
+                _finish_refresh_request(conn, refresh_job_id, "failed")
+            actions += 1
+            continue
         context_errors = validate_context(data, config.get("context")) if not reason else []
         if context_errors:
             try:
@@ -2527,6 +2539,19 @@ def run_postgres_actions(
                 if browser_result is not None:
                     body, response_status, reason = browser_body, browser_status, browser_reason
                     data = parse_product_html(browser_body, task["url"]) if not browser_reason else {"asin": "", "canonical_url": ""}
+        if not reason and _has_explicit_asin_mismatch(data, task["asin"]):
+            source_type = getattr(adapter, "source_type", "http_html")
+            transfer_bytes = getattr(adapter, "last_transfer_bytes", None)
+            evidence = _postgres_evidence(
+                run_id, task, body, response_status, source_type, raw_html_dir,
+                _evidence_context(config.get("context"), adapter), transfer_bytes,
+                error_code="asin_mismatch",
+            )
+            storage.save_failure(task=task, reason="asin_mismatch", error="asin_mismatch", evidence=evidence)
+            if refresh_job_id:
+                storage.finish_refresh_request(refresh_job_id, "failed")
+            actions += 1
+            continue
         context_errors = validate_context(data, config.get("context")) if not reason else []
         if context_errors:
             try:
@@ -2570,13 +2595,6 @@ def run_postgres_actions(
                 break
             continue
         missing_core = [key for key in ("asin", "canonical_url", "title") if not str(data.get(key) or "").strip()]
-        if _has_explicit_asin_mismatch(data, task["asin"]):
-            evidence["error_code"] = "asin_mismatch"
-            storage.save_failure(task=task, reason="asin_mismatch", error="asin_mismatch", evidence=evidence)
-            if refresh_job_id:
-                storage.finish_refresh_request(refresh_job_id, "failed")
-            actions += 1
-            continue
         if missing_core:
             error = "missing_core_fields:" + ",".join(missing_core)
             evidence["error_code"] = error

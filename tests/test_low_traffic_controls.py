@@ -1011,3 +1011,124 @@ def test_trade_in_sign_in_prompt_on_product_page_is_not_a_login_wall_and_keeps_a
 def test_explicit_authentication_page_remains_a_login_wall(login_html):
     worker = load_worker()
     assert worker.classify_block(200, login_html) == "login_wall"
+
+
+def test_postgres_explicit_asin_mismatch_precedes_context_fallback():
+    worker = load_worker()
+    html = """
+    <html><head><link rel="canonical" href="https://www.amazon.com/example/dp/B01FSJD0ZO"></head><body>
+      <input id="ASIN" value="B01FSJD0ZO"><span id="productTitle">Different product</span>
+      <span class="a-price"><span class="a-offscreen">HKD117.52</span></span>
+      <div id="desktop_buybox">Delivering to Hong Kong</div>
+    </body></html>
+    """
+
+    class Storage(OneProductStorage):
+        def claim_task(self, worker_id, lease_seconds=None):
+            task = super().claim_task(worker_id, lease_seconds)
+            if task is not None:
+                task["asin"] = "B07Q2S1LQ3"
+                task["url"] = "https://www.amazon.com/dp/B07Q2S1LQ3"
+            return task
+
+    class Adapter:
+        source_type = "http_html"
+        last_transfer_bytes = 362269
+        last_retry_after_seconds = None
+
+        def __init__(self):
+            self.browser_calls = 0
+
+        def fetch(self, url):
+            return html, 200
+
+        def fetch_browser(self, *args, **kwargs):
+            self.browser_calls += 1
+            raise AssertionError("explicit ASIN mismatch must precede context fallback")
+
+    storage = Storage()
+    adapter = Adapter()
+    config = {
+        **worker.DEFAULTS,
+        "max_actions_per_run": 1,
+        "raw_html_dir": None,
+        "context": {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
+    }
+
+    assert worker.run_postgres_actions(
+        storage, adapter, config, limit=1, run_id="run-identity-first", worker_id="worker-a"
+    ) == 1
+
+    payload = storage.saved[0]
+    assert adapter.browser_calls == 0
+    assert payload["reason"] == "asin_mismatch"
+    assert payload["error"] == "asin_mismatch"
+    assert payload["evidence"]["http_status"] == 200
+    assert payload["evidence"]["transfer_bytes"] == 362269
+    assert payload["evidence"]["source_type"] == "http_html"
+    assert payload["evidence"]["error_code"] == "asin_mismatch"
+    assert "fallback_reason" not in payload["evidence"]["context_json"]
+
+
+def test_sqlite_explicit_asin_mismatch_precedes_context_fallback():
+    worker = load_worker()
+    html = """
+    <html><head><link rel="canonical" href="https://www.amazon.com/example/dp/B01FSJD0ZO"></head><body>
+      <input id="ASIN" value="B01FSJD0ZO"><span id="productTitle">Different product</span>
+      <span class="a-price"><span class="a-offscreen">HKD117.52</span></span>
+      <div id="desktop_buybox">Delivering to Hong Kong</div>
+    </body></html>
+    """
+
+    class Adapter:
+        source_type = "http_html"
+        last_transfer_bytes = 362269
+        last_retry_after_seconds = None
+
+        def __init__(self):
+            self.browser_calls = 0
+
+        def fetch(self, url):
+            return html, 200
+
+        def fetch_browser(self, *args, **kwargs):
+            self.browser_calls += 1
+            raise AssertionError("explicit ASIN mismatch must precede context fallback")
+
+    adapter = Adapter()
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        manifest = root / "manifest.csv"
+        manifest.write_text(
+            "\ufeffasin,url,marketplace,source_site_label,source_workbook\n"
+            "B07Q2S1LQ3,https://www.amazon.com/dp/B07Q2S1LQ3,US,test,fixture.xlsx\n",
+            encoding="utf-8",
+        )
+        conn = worker.init_db(root / "state.sqlite3")
+        config = {
+            **worker.DEFAULTS,
+            "max_actions_per_run": 1,
+            "output_dir": root / "out",
+            "raw_html_dir": None,
+            "context": {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
+        }
+        worker.initialize_manifest(conn, manifest, config)
+
+        assert worker.run_actions(conn, adapter, config, limit=1, run_id="run-identity-first") == 1
+        state = conn.execute(
+            "SELECT status,last_error FROM item_state WHERE marketplace='US' AND asin='B07Q2S1LQ3'"
+        ).fetchone()
+        evidence = conn.execute(
+            "SELECT http_status,transfer_bytes,source_type,error_code,content_hash,context_json "
+            "FROM collection_evidence WHERE asin='B07Q2S1LQ3' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+
+    assert adapter.browser_calls == 0
+    assert tuple(state) == ("failed", "asin_mismatch")
+    assert evidence["http_status"] == 200
+    assert evidence["transfer_bytes"] == 362269
+    assert evidence["source_type"] == "http_html"
+    assert evidence["error_code"] == "asin_mismatch"
+    assert evidence["content_hash"]
+    assert "fallback_reason" not in json.loads(evidence["context_json"])

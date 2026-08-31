@@ -28,7 +28,7 @@
 
 ### 1.4 当前结论
 
-低流量控制、Cookie 桥接、fallback 去重和 nullable 流量口径已通过离线测试。2026-08-31 的真实 3-ASIN 探针尚未形成完整通过批次：第一次受执行环境 `WinError 10013` 阻断，第二次非沙箱运行形成 2 个 action 后因商品页 trade-in 侧栏文案误报登录墙而停止；该误报与 Firefox 流量汇总漏计已进入本轮回归。当前进程没有 `AMAZON_TEST_POSTGRES_DSN`，因此真实 PostgreSQL 集成测试明确跳过，也没有代理供应商后台 `U1-U0` 账单证据；不能从离线结果或未完成探针推断成本承诺。
+低流量控制、Cookie 桥接、fallback 去重和 nullable 流量口径已通过离线测试。2026-08-31 的真实 3-ASIN 探针尚未形成成功批次：第一次受执行环境 `WinError 10013` 阻断；第二次暴露 trade-in 文案误报登录墙和旧 Console 流量口径；第三次已验证 receipt v2 能以 `3/3 failed` 返回 `quality_failed/exit 4`，同时暴露“明确其他 ASIN 仍先走 context fallback”的顺序错误。上述缺陷均进入永久回归，但不等于商品采集成功。当前进程没有 `AMAZON_TEST_POSTGRES_DSN`，因此真实 PostgreSQL 集成测试明确跳过，也没有代理供应商后台 `U1-U0` 账单证据；不能从离线结果或失败探针推断成本承诺。
 
 ## 2. 系统架构
 
@@ -232,6 +232,8 @@ driver.network.add_event_handler("fetch_error", fetch_error_handler)
 | `review_empty` | 独立评论页无 review DOM，且 reported count > 0 | 不允许伪造评论成功 |
 
 `BrowserFallbackLedger.claim(run_id, asin, reason)` 保证同一 run、ASIN、reason 最多一次。Evidence 保存最后一个 `fallback_reason` 和本 action 的 `fallback_reasons` 列表。
+
+商品门禁优先级固定为：HTTP status/CAPTCHA/WAF/login block → 明确 ASIN/canonical identity mismatch → 缺核心字段 fallback → context mismatch fallback → 最终质量与持久化。只要页面已明确属于其他 ASIN，就直接保存原 HTTP body/status/transfer 的 `asin_mismatch` evidence，不允许 ZIP/币种/国家错误触发 Firefox。
 
 以下响应不允许升级 Firefox：
 
