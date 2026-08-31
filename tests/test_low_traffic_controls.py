@@ -1131,6 +1131,271 @@ def test_explicit_authentication_page_remains_a_login_wall(login_html):
     assert worker.classify_block(200, login_html) == "login_wall"
 
 
+def _parent_child_product_html():
+    return """
+    <html><head><link rel="canonical" href="https://www.amazon.com/example/dp/B0DKHT1KY7"></head><body>
+      <input id="ASIN" value="B07VK5XSRP"><span id="productTitle">Child variation</span>
+      <span class="a-price"><span class="a-offscreen">$12.99</span></span>
+      <script>
+        var request = "parentAsin=B0DKHT1KY7&landingAsin=B07VK5XSRP";
+        var twister = {
+          "currentAsin": "B07VK5XSRP",
+          "dimensionValuesDisplayData": {"B07VK5XSRP": ["Black"]},
+          "colorToAsin": {"Black": {"asin": "B07VK5XSRP"}}
+        };
+      </script>
+    </body></html>
+    """
+
+
+def test_postgres_canonical_parent_with_explicit_child_membership_saves_child_without_browser():
+    worker = load_worker()
+
+    class Storage(OneProductStorage):
+        def claim_task(self, worker_id, lease_seconds=None):
+            task = super().claim_task(worker_id, lease_seconds)
+            if task is not None:
+                task["asin"] = "B07VK5XSRP"
+                task["url"] = "https://www.amazon.com/dp/B07VK5XSRP"
+            return task
+
+    class Adapter:
+        source_type = "http_html"
+        last_transfer_bytes = 411277
+        last_retry_after_seconds = None
+
+        def __init__(self):
+            self.browser_calls = 0
+
+        def fetch(self, url):
+            return _parent_child_product_html(), 200
+
+        def fetch_browser(self, *args, **kwargs):
+            self.browser_calls += 1
+            raise AssertionError("valid child-parent identity must not start Firefox")
+
+    storage = Storage()
+    adapter = Adapter()
+    config = {**worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None, "context": {}}
+
+    assert worker.run_postgres_actions(
+        storage, adapter, config, limit=1, run_id="run-parent-child", worker_id="worker-a"
+    ) == 1
+
+    payload = storage.saved[0]
+    assert adapter.browser_calls == 0
+    assert payload["product"]["canonical_url"].endswith("/dp/B0DKHT1KY7")
+    assert payload["evidence"]["error_code"] is None
+    assert payload["evidence"]["context_json"]["parent_asin"] == "B0DKHT1KY7"
+    assert payload["evidence"]["context_json"]["identity_relation"] == "child_of_canonical_parent"
+
+
+def test_sqlite_canonical_parent_with_explicit_child_membership_saves_child_without_browser():
+    worker = load_worker()
+
+    class Adapter:
+        source_type = "http_html"
+        last_transfer_bytes = 411277
+        last_retry_after_seconds = None
+
+        def __init__(self):
+            self.browser_calls = 0
+
+        def fetch(self, url):
+            return _parent_child_product_html(), 200
+
+        def fetch_browser(self, *args, **kwargs):
+            self.browser_calls += 1
+            raise AssertionError("valid child-parent identity must not start Firefox")
+
+    adapter = Adapter()
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        manifest = root / "manifest.csv"
+        manifest.write_text(
+            "\ufeffasin,url,marketplace,source_site_label,source_workbook\n"
+            "B07VK5XSRP,https://www.amazon.com/dp/B07VK5XSRP,US,test,fixture.xlsx\n",
+            encoding="utf-8",
+        )
+        conn = worker.init_db(root / "state.sqlite3")
+        config = {
+            **worker.DEFAULTS,
+            "max_actions_per_run": 1,
+            "output_dir": root / "out",
+            "raw_html_dir": None,
+            "context": {},
+        }
+        worker.initialize_manifest(conn, manifest, config)
+
+        assert worker.run_actions(conn, adapter, config, limit=1, run_id="run-parent-child") == 1
+        state = conn.execute(
+            "SELECT status,last_error FROM item_state WHERE marketplace='US' AND asin='B07VK5XSRP'"
+        ).fetchone()
+        product = conn.execute(
+            "SELECT asin,canonical_url FROM product_snapshot WHERE marketplace='US' AND asin='B07VK5XSRP'"
+        ).fetchone()
+        evidence = conn.execute(
+            "SELECT error_code,context_json FROM collection_evidence WHERE asin='B07VK5XSRP' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+
+    assert adapter.browser_calls == 0
+    assert tuple(state) == ("succeeded", None)
+    assert tuple(product) == ("B07VK5XSRP", "https://www.amazon.com/example/dp/B0DKHT1KY7")
+    assert evidence["error_code"] is None
+    context = json.loads(evidence["context_json"])
+    assert context["parent_asin"] == "B0DKHT1KY7"
+    assert context["identity_relation"] == "child_of_canonical_parent"
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {
+            "asin": "B07VK5XSRP",
+            "canonical_url": "https://www.amazon.com/dp/B0DKHT1KY7",
+            "parent_asin": "B0DKHT1KY7",
+            "identity_child_asins": [],
+        },
+        {
+            "asin": "B07VK5XSRP",
+            "canonical_url": "https://www.amazon.com/dp/B0DKHT1KY7",
+            "parent_asin": "",
+            "identity_child_asins": ["B07VK5XSRP"],
+        },
+        {
+            "asin": "B07VK5XSRP",
+            "canonical_url": "https://example.com/dp/B0DKHT1KY7",
+            "parent_asin": "B0DKHT1KY7",
+            "identity_child_asins": ["B07VK5XSRP"],
+        },
+        {
+            "asin": "B07FMMYMQQ",
+            "canonical_url": "https://www.amazon.com/dp/B0DKHT1KY7",
+            "parent_asin": "B0DKHT1KY7",
+            "identity_child_asins": ["B07VK5XSRP"],
+        },
+    ],
+)
+def test_incomplete_or_foreign_parent_child_evidence_remains_asin_mismatch(data):
+    worker = load_worker()
+
+    assert worker._has_explicit_asin_mismatch(data, "B07VK5XSRP") is True
+    assert worker._valid_asin_identity(data, "B07VK5XSRP") is False
+
+
+def _invalid_canonical_product_html(canonical_url):
+    return f"""
+    <html><head><link rel="canonical" href="{canonical_url}"></head><body>
+      <input id="ASIN" value="B07VK5XSRP"><span id="productTitle">Invalid canonical</span>
+      <span class="a-price"><span class="a-offscreen">HKD117.52</span></span>
+      <div id="desktop_buybox">Delivering to Hong Kong</div>
+    </body></html>
+    """
+
+
+@pytest.mark.parametrize(
+    "canonical_url",
+    ["https://example.com/dp/B07VK5XSRP", "http://www.amazon.com/dp/B07VK5XSRP"],
+)
+def test_postgres_invalid_canonical_is_rejected_before_context_browser(canonical_url):
+    worker = load_worker()
+
+    class Storage(OneProductStorage):
+        def claim_task(self, worker_id, lease_seconds=None):
+            task = super().claim_task(worker_id, lease_seconds)
+            if task is not None:
+                task["asin"] = "B07VK5XSRP"
+                task["url"] = "https://www.amazon.com/dp/B07VK5XSRP"
+            return task
+
+    class Adapter:
+        source_type = "http_html"
+        last_transfer_bytes = 100
+        last_retry_after_seconds = None
+
+        def __init__(self):
+            self.browser_calls = 0
+
+        def fetch(self, url):
+            return _invalid_canonical_product_html(canonical_url), 200
+
+        def fetch_browser(self, url, *args, **kwargs):
+            self.browser_calls += 1
+            return self.fetch(url)
+
+    storage = Storage()
+    adapter = Adapter()
+    config = {
+        **worker.DEFAULTS,
+        "max_actions_per_run": 1,
+        "raw_html_dir": None,
+        "context": {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
+    }
+
+    assert worker.run_postgres_actions(
+        storage, adapter, config, limit=1, run_id="run-invalid-canonical", worker_id="worker-a"
+    ) == 1
+    assert adapter.browser_calls == 0
+    assert storage.saved[0]["reason"] == "asin_mismatch"
+    assert storage.saved[0]["evidence"]["error_code"] == "asin_mismatch"
+
+
+@pytest.mark.parametrize(
+    "canonical_url",
+    ["https://example.com/dp/B07VK5XSRP", "http://www.amazon.com/dp/B07VK5XSRP"],
+)
+def test_sqlite_invalid_canonical_is_rejected_before_context_browser(canonical_url):
+    worker = load_worker()
+
+    class Adapter:
+        source_type = "http_html"
+        last_transfer_bytes = 100
+        last_retry_after_seconds = None
+
+        def __init__(self):
+            self.browser_calls = 0
+
+        def fetch(self, url):
+            return _invalid_canonical_product_html(canonical_url), 200
+
+        def fetch_browser(self, url, *args, **kwargs):
+            self.browser_calls += 1
+            return self.fetch(url)
+
+    adapter = Adapter()
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        manifest = root / "manifest.csv"
+        manifest.write_text(
+            "\ufeffasin,url,marketplace,source_site_label,source_workbook\n"
+            "B07VK5XSRP,https://www.amazon.com/dp/B07VK5XSRP,US,test,fixture.xlsx\n",
+            encoding="utf-8",
+        )
+        conn = worker.init_db(root / "state.sqlite3")
+        config = {
+            **worker.DEFAULTS,
+            "max_actions_per_run": 1,
+            "output_dir": root / "out",
+            "raw_html_dir": None,
+            "context": {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
+        }
+        worker.initialize_manifest(conn, manifest, config)
+
+        assert worker.run_actions(conn, adapter, config, limit=1, run_id="run-invalid-canonical") == 1
+        state = conn.execute(
+            "SELECT status,last_error FROM item_state WHERE marketplace='US' AND asin='B07VK5XSRP'"
+        ).fetchone()
+        evidence = conn.execute(
+            "SELECT error_code FROM collection_evidence WHERE asin='B07VK5XSRP' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+
+    assert adapter.browser_calls == 0
+    assert tuple(state) == ("failed", "asin_mismatch")
+    assert evidence["error_code"] == "asin_mismatch"
+
+
 def test_postgres_explicit_asin_mismatch_precedes_context_fallback():
     worker = load_worker()
     html = """

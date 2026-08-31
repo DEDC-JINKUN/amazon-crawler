@@ -228,14 +228,14 @@ driver.network.add_event_handler("fetch_error", fetch_error_handler)
 |---|---|---|
 | `http_transport_error` | HTTP 响应截断、超时或连接错误，且配置了配送 ZIP | 浏览器仍要过 block、身份和上下文门 |
 | `missing_asin` | HTTP HTML 缺 ASIN，且没有明确指向其他 ASIN | 再解析目标 ASIN |
-| `missing_canonical_url` | HTTP HTML 缺 canonical | canonical 必须为 HTTPS amazon.com 同 ASIN `/dp` 或 `/clp` |
+| `missing_canonical_url` | HTTP HTML 缺 canonical | canonical 必须为 HTTPS amazon.com `/dp` 或 `/clp`；可为任务 ASIN，或有严格页面证据的 Parent ASIN |
 | `missing_title` | 只缺核心标题 | 浏览器必须补出标题 |
 | `context_mismatch` | ZIP/国家/币种不符合配置 | 必须确认 ZIP 与 USD |
 | `review_empty` | 独立评论页无 review DOM，且 reported count > 0 | 不允许伪造评论成功 |
 
 `BrowserFallbackLedger.claim(run_id, asin, reason)` 保证同一 run、ASIN、reason 最多一次。Evidence 保存最后一个 `fallback_reason` 和本 action 的 `fallback_reasons` 列表。
 
-商品门禁优先级固定为：HTTP status/CAPTCHA/WAF/login block → 明确 ASIN/canonical identity mismatch → 缺核心字段 fallback → context mismatch fallback → 最终质量与持久化。只要页面已明确属于其他 ASIN，就直接保存原 HTTP body/status/transfer 的 `asin_mismatch` evidence，不允许 ZIP/币种/国家错误触发 Firefox。
+商品门禁优先级固定为：HTTP status/CAPTCHA/WAF/login block → 明确 ASIN/canonical identity mismatch → 缺核心字段 fallback → context mismatch fallback → 最终质量与持久化。只要页面 input ASIN 已明确属于其他商品，就直接保存原 HTTP body/status/transfer 的 `asin_mismatch` evidence，不允许 ZIP/币种/国家错误触发 Firefox。唯一例外是严格 Child/Parent 关系：页面 ASIN 必须仍等于任务 Child，canonical 必须为 HTTPS Amazon 且指向页面唯一 `parentAsin`，并且 `landingAsin`、`currentAsin/current_asin`、`dimensionValuesDisplayData` 或 `colorToAsin` 的明确成员集合必须包含该 Child；缺任一证据仍是 `asin_mismatch`，不得把任务 ASIN改写为 Parent。
 
 以下响应不允许升级 Firefox：
 
@@ -246,7 +246,7 @@ driver.network.add_event_handler("fetch_error", fetch_error_handler)
 - 页面已明确指向其他 ASIN；
 - 只缺 `product_description` 等非核心字段。
 
-`login_wall` 必须由明确认证页证据支持：页面标题为 Amazon Sign-In，或在没有商品身份三锚点（非空可见 `productTitle`、ASIN input、`https://amazon.com` 或 `https://www.amazon.com` 的 `/dp`/`/clp` canonical）时出现以 `/ap/signin` 为 action 的认证表单、`ap_email`、`ap_password`、`signInSubmit` 等强认证 DOM。普通导航中的 `/ap/signin` 链接及商品页隐藏 trade-in/feedback 组件中的 `Sign in to continue` 都不是充分证据；canonical 与 input ASIN 不一致属于后续 `asin_mismatch` 质量门，不能先误触登录墙熔断。
+`login_wall` 必须由明确认证页证据支持：页面标题为 Amazon Sign-In，或在没有商品身份三锚点（非空可见 `productTitle`、ASIN input、`https://amazon.com` 或 `https://www.amazon.com` 的 `/dp`/`/clp` canonical）时出现以 `/ap/signin` 为 action 的认证表单、`ap_email`、`ap_password`、`signInSubmit` 等强认证 DOM。普通导航中的 `/ap/signin` 链接及商品页隐藏 trade-in/feedback 组件中的 `Sign in to continue` 都不是充分证据；canonical 与 input ASIN 不一致交给后续 identity 门判定为严格 Child/Parent 或 `asin_mismatch`，不能先误触登录墙熔断。
 
 HTTP 网络权限错误、连接错误和响应截断属于 `fetch_error`/`http_transport_error`，不是 Amazon `block_reason`。如果 HTTP 和 Firefox fallback 都失败，PostgreSQL 与 SQLite runner 都必须写一条 body 可空的 action evidence、把任务从 `running` 终结为失败并保留有限重试语义；不能依赖租约过期来掩盖未捕获异常。Windows `WinError 10013` 表示当前执行环境或出口权限失败，代码不得将其改写成 403/429/CAPTCHA/WAF，也不得通过绕过沙箱修复。
 
@@ -256,14 +256,14 @@ HTTP 网络权限错误、连接错误和响应截断属于 `fetch_error`/`http_
 
 `parse_product_html()` 从 HTML/DOM/内嵌数据中产生：
 
-- 身份：`asin`, `canonical_url`, `title`, `brand`
+- 身份：`asin`, `canonical_url`, `title`, `brand`；parser 内部另提取 `parent_asin` 与 `identity_child_asins` 供身份门使用，不新增商品 schema
 - 商业：`price`, `availability`, `buy_box`
 - 评价：`rating`, `reported_rating_count`, `reported_review_count`, `top_reviews`
 - 内容：`bullets`, `product_description`, `specs`, `aplus_present`, `content_modules`
 - 媒体：图片/视频 URL、placement、entry_type、ordinal 等元数据
 - 评论入口：`review_link`, `review_section_anchor`
 
-商品事务前必须满足目标 ASIN、canonical host/path、标题和配置的地域/币种上下文。失败 evidence 不覆盖已有有效商品快照。
+商品事务前必须满足目标 ASIN、canonical host/path、标题和配置的地域/币种上下文。严格 Child/Parent 成功时商品仍按 Child ASIN 保存，canonical 保留 Parent URL，evidence context 仅记录脱敏 `parent_asin` 与 `identity_relation=child_of_canonical_parent`。失败 evidence 不覆盖已有有效商品快照。
 
 ### 7.2 独立评论
 

@@ -20,6 +20,28 @@ def load(name: str):
 
 
 class ParserFixtureTests(unittest.TestCase):
+    def test_product_identity_extracts_canonical_parent_and_explicit_child_membership(self):
+        worker = load("amazon_us_worker")
+        html = """
+        <html><head><link rel="canonical" href="https://www.amazon.com/example/dp/B0DKHT1KY7"></head><body>
+          <input id="ASIN" value="B07VK5XSRP"><span id="productTitle">Child variation</span>
+          <script>
+            var request = "parentAsin=B0DKHT1KY7&landingAsin=B07VK5XSRP";
+            var twister = {
+              "currentAsin": "B07VK5XSRP",
+              "dimensionValuesDisplayData": {"B07VK5XSRP": ["Black"]},
+              "colorToAsin": {"Black": {"asin": "B07VK5XSRP"}}
+            };
+          </script>
+        </body></html>
+        """
+
+        result = worker.parse_product_html(html, "https://www.amazon.com/dp/B07VK5XSRP")
+
+        self.assertEqual(result["asin"], "B07VK5XSRP")
+        self.assertEqual(result["parent_asin"], "B0DKHT1KY7")
+        self.assertEqual(result["identity_child_asins"], ["B07VK5XSRP"])
+
     def test_brand_normalization_removes_store_call_to_action(self):
         worker = load("amazon_us_worker")
         self.assertEqual(worker._normalize_brand("Visit the Eyourlife Store"), "Eyourlife")

@@ -1066,11 +1066,65 @@ def _buy_box_facts(parser: _DOMParser) -> dict[str, str]:
     return facts
 
 
+def _named_asin_values(source_html: str, name: str) -> set[str]:
+    pattern = re.compile(
+        rf"(?:['\"]{re.escape(name)}['\"]|\b{re.escape(name)}\b)\s*(?::|=)\s*['\"]?([A-Z0-9]{{10}})",
+        flags=re.IGNORECASE,
+    )
+    return {match.group(1).upper() for match in pattern.finditer(source_html)}
+
+
+def _named_object_payloads(source_html: str, name: str) -> list[str]:
+    marker = re.compile(
+        rf"(?:['\"]{re.escape(name)}['\"]|\b{re.escape(name)}\b)\s*:\s*\{{",
+        flags=re.IGNORECASE,
+    )
+    payloads: list[str] = []
+    for match in marker.finditer(source_html):
+        start = match.end() - 1
+        depth = 0
+        quote = ""
+        escaped = False
+        for index in range(start, min(len(source_html), start + 500_000)):
+            char = source_html[index]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = ""
+                continue
+            if char in {"'", '"'}:
+                quote = char
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    payloads.append(source_html[start : index + 1])
+                    break
+    return payloads
+
+
+def _product_identity_metadata(source_html: str) -> tuple[str, list[str]]:
+    parents = _named_asin_values(source_html, "parentAsin")
+    parent_asin = next(iter(parents)) if len(parents) == 1 else ""
+    children = set()
+    for name in ("landingAsin", "current_asin", "currentAsin"):
+        children.update(_named_asin_values(source_html, name))
+    for name in ("dimensionValuesDisplayData", "colorToAsin"):
+        for payload in _named_object_payloads(source_html, name):
+            children.update(re.findall(r"['\"]([A-Z0-9]{10})['\"]", payload, flags=re.IGNORECASE))
+    return parent_asin, sorted(value.upper() for value in children)
+
+
 def parse_product_html(source_html: str, page_url: str = "") -> dict[str, Any]:
     parser = _DOMParser()
     parser.feed(source_html)
     asin = _first_attr(parser, [{"tag": "input", "attr": ("id", "ASIN")}, {"tag": "input", "attr": ("name", "ASIN")}], "value")
     canonical = _first_attr(parser, [{"tag": "link", "attr": ("rel", "canonical")}], "href") or _meta(parser, "og:url") or page_url
+    parent_asin, identity_child_asins = _product_identity_metadata(source_html)
     title = _first_text(parser, [{"id_value": "productTitle"}, {"tag": "h1", "class_name": "product-title"}])
     review_summary_text = _first_text(parser, [{"id_value": "acrCustomerReviewLink"}, {"attr": ("data-hook", "total-review-count")}])
     reported_rating_text = _first_text(parser, [{"id_value": "acrPopover"}, {"attr": ("data-hook", "rating-out-of-five")}])
@@ -1109,6 +1163,7 @@ def parse_product_html(source_html: str, page_url: str = "") -> dict[str, Any]:
     body_text = " ".join(_visible_text(parser, index) for index, node in enumerate(parser.nodes) if node["parent"] is None)
     return {
         "asin": asin.upper(), "marketplace": "US", "canonical_url": canonical,
+        "parent_asin": parent_asin, "identity_child_asins": identity_child_asins,
         "availability": _first_text(parser, [{"id_value": "availability"}, {"id_value": "outOfStock"}]),
         "title": title, "brand": _normalize_brand(_first_text(parser, [{"id_value": "bylineInfo"}, {"id_value": "brand"}])),
         "rating": reported_rating_text, "reported_ratings": _count_from_text(review_summary_text), "reported_rating_count": reported_rating_count,
@@ -1434,18 +1489,8 @@ def _write_product_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.R
         if error_code and error_code.startswith("context_mismatch"):
             _record_failure(conn, "US", asin, "context_mismatch", error_code)
             return
-        parsed_asin = (data.get("asin") or "").upper()
         canonical = data.get("canonical_url") or ""
-        canonical_parts = urlsplit(canonical)
-        canonical_host = (canonical_parts.hostname or "").lower().removeprefix("www.")
-        path_match = re.search(r"/(?:dp|clp)/([A-Za-z0-9]{10})(?:/|$)", canonical_parts.path)
-        if (
-            parsed_asin != asin
-            or canonical_parts.scheme != "https"
-            or canonical_host != "amazon.com"
-            or not path_match
-            or path_match.group(1).upper() != asin
-        ):
+        if not _valid_asin_identity(data, asin):
             _insert_evidence(conn, run_id, asin, task["url"], status, body, None, "asin_mismatch", source_type, raw_html_dir, raw_html_path, context, transfer_bytes)
             _record_failure(conn, "US", asin, "asin_mismatch", "asin_mismatch")
             return
@@ -2008,22 +2053,58 @@ def _canonical_asin(value: Any) -> str:
     return match.group(1).upper() if match else ""
 
 
-def _has_explicit_asin_mismatch(data: dict[str, Any], expected_asin: str) -> bool:
+def _valid_amazon_canonical(value: Any) -> bool:
+    parts = urlsplit(str(value or ""))
+    return bool(
+        parts.scheme == "https"
+        and (parts.hostname or "").lower().removeprefix("www.") == "amazon.com"
+        and _canonical_asin(value)
+    )
+
+
+def _is_canonical_parent_child(data: dict[str, Any], expected_asin: str) -> bool:
+    expected = expected_asin.upper()
+    parsed = str(data.get("asin") or "").upper()
+    parent = str(data.get("parent_asin") or "").upper()
+    canonical = _canonical_asin(data.get("canonical_url"))
+    children = {str(value or "").upper() for value in data.get("identity_child_asins") or []}
+    return bool(
+        parsed == expected
+        and parent
+        and parent != expected
+        and canonical == parent
+        and expected in children
+        and _valid_amazon_canonical(data.get("canonical_url"))
+    )
+
+
+def _valid_asin_identity(data: dict[str, Any], expected_asin: str) -> bool:
     expected = expected_asin.upper()
     parsed = str(data.get("asin") or "").upper()
     canonical = _canonical_asin(data.get("canonical_url"))
-    return bool((parsed and parsed != expected) or (canonical and canonical != expected))
+    return bool(
+        parsed == expected
+        and _valid_amazon_canonical(data.get("canonical_url"))
+        and (canonical == expected or _is_canonical_parent_child(data, expected))
+    )
+
+
+def _has_explicit_asin_mismatch(data: dict[str, Any], expected_asin: str) -> bool:
+    expected = expected_asin.upper()
+    parsed = str(data.get("asin") or "").upper()
+    canonical_url = data.get("canonical_url")
+    canonical = _canonical_asin(canonical_url)
+    return bool(
+        (parsed and parsed != expected)
+        or (canonical_url and not _valid_amazon_canonical(canonical_url))
+        or (canonical and canonical != expected and not _is_canonical_parent_child(data, expected))
+    )
 
 
 def _valid_product_identity(data: dict[str, Any], expected_asin: str) -> bool:
-    expected = expected_asin.upper()
-    canonical = urlsplit(str(data.get("canonical_url") or ""))
     return bool(
-        str(data.get("asin") or "").upper() == expected
+        _valid_asin_identity(data, expected_asin)
         and str(data.get("title") or "").strip()
-        and canonical.scheme == "https"
-        and (canonical.hostname or "").lower().removeprefix("www.") == "amazon.com"
-        and _canonical_asin(data.get("canonical_url")) == expected
     )
 
 
@@ -2106,6 +2187,19 @@ def _evidence_context(base_context: dict[str, Any] | None, adapter: Any) -> dict
         if bridge_error:
             bridge["error_code"] = str(bridge_error)
         context["cookie_bridge"] = bridge
+    return context
+
+
+def _product_evidence_context(
+    base_context: dict[str, Any] | None,
+    adapter: Any,
+    data: dict[str, Any],
+    expected_asin: str,
+) -> dict[str, Any]:
+    context = _evidence_context(base_context, adapter)
+    if _is_canonical_parent_child(data, expected_asin):
+        context["parent_asin"] = str(data.get("parent_asin") or "").upper()
+        context["identity_relation"] = "child_of_canonical_parent"
     return context
 
 
@@ -2371,7 +2465,7 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
             and hasattr(adapter, "commit_browser_context")
         ):
             _commit_browser_context_safely(adapter, run_id)
-        _write_product_action(conn, run_id, row, data, body, response_status, reason, error_code=error_code, source_type=source_type, raw_html_dir=raw_html_dir, context=_evidence_context(config.get("context"), adapter), cooldown_seconds=cooldown, transfer_bytes=transfer_bytes)
+        _write_product_action(conn, run_id, row, data, body, response_status, reason, error_code=error_code, source_type=source_type, raw_html_dir=raw_html_dir, context=_product_evidence_context(config.get("context"), adapter, data, row["asin"]), cooldown_seconds=cooldown, transfer_bytes=transfer_bytes)
         if refresh_job_id and row["asin"] == refresh_asin:
             _finish_refresh_request(conn, refresh_job_id, "queued" if reason == "http_429" else "failed" if reason else "completed")
         blocked = blocked or bool(reason)
@@ -2640,7 +2734,8 @@ def run_postgres_actions(
         transfer_bytes = getattr(adapter, "last_transfer_bytes", None)
         error_code = "context_mismatch:" + ",".join(context_errors) if context_errors else None
         evidence = _postgres_evidence(
-            run_id, task, body, response_status, source_type, raw_html_dir, _evidence_context(config.get("context"), adapter), transfer_bytes,
+            run_id, task, body, response_status, source_type, raw_html_dir,
+            _product_evidence_context(config.get("context"), adapter, data, task["asin"]), transfer_bytes,
             block_reason=reason, error_code=error_code,
         )
         if reason or context_errors:
@@ -2669,15 +2764,7 @@ def run_postgres_actions(
                 storage.finish_refresh_request(refresh_job_id, "failed")
             actions += 1
             continue
-        canonical = urlsplit(data.get("canonical_url") or "")
-        path_match = re.search(r"/(?:dp|clp)/([A-Za-z0-9]{10})(?:/|$)", canonical.path)
-        if (
-            (data.get("asin") or "").upper() != task["asin"]
-            or canonical.scheme != "https"
-            or (canonical.hostname or "").lower().removeprefix("www.") != "amazon.com"
-            or not path_match
-            or path_match.group(1).upper() != task["asin"]
-        ):
+        if not _valid_asin_identity(data, task["asin"]):
             evidence["error_code"] = "asin_mismatch"
             storage.save_failure(task=task, reason="asin_mismatch", error="asin_mismatch", evidence=evidence)
             if refresh_job_id:
