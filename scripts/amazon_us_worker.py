@@ -71,7 +71,6 @@ STOP_PHRASES = (
     "too many requests",
 )
 LOGIN_WALL_DOM_MARKERS = (
-    "/ap/signin",
     "id=\"ap_email\"",
     "id='ap_email'",
     "id=\"ap_password\"",
@@ -178,20 +177,34 @@ def classify_block(status: int | None = None, text: str = "", title: str = "") -
     title_match = re.search(r"<title[^>]*>(.*?)</title>", text, flags=re.IGNORECASE | re.DOTALL)
     page_title = _clean(f"{title} {title_match.group(1) if title_match else ''}").lower()
     auth_title = "amazon sign-in" in page_title or "amazon sign in" in page_title
-    auth_dom = any(marker in raw_text for marker in LOGIN_WALL_DOM_MARKERS)
-    canonical_asin = re.search(
-        r"<link\b(?=[^>]*\brel\s*=\s*['\"]canonical['\"])(?=[^>]*\bhref\s*=\s*['\"][^'\"]*/(?:dp|clp)/([a-z0-9]{10})(?:/|['\"?#]))[^>]*>",
+    auth_form = re.search(
+        r"<form\b(?=[^>]*\baction\s*=\s*['\"][^'\"]*/ap/signin(?:[?'\"]|$))[^>]*>",
         raw_text,
     )
+    auth_dom = bool(auth_form) or any(marker in raw_text for marker in LOGIN_WALL_DOM_MARKERS)
+    canonical_tag = re.search(
+        r"<link\b(?=[^>]*\brel\s*=\s*['\"]canonical['\"])[^>]*>", raw_text
+    )
+    canonical_href = re.search(r"\bhref\s*=\s*['\"]([^'\"]+)['\"]", canonical_tag.group(0)) if canonical_tag else None
+    canonical_url = html_module.unescape(canonical_href.group(1)) if canonical_href else ""
+    canonical_parts = urlsplit(canonical_url)
+    canonical_asin = re.search(r"/(?:dp|clp)/([a-z0-9]{10})(?:/|$)", canonical_parts.path)
     input_asin = re.search(
         r"<input\b(?=[^>]*(?:\bid|\bname)\s*=\s*['\"]asin['\"])(?=[^>]*\bvalue\s*=\s*['\"]([a-z0-9]{10})['\"])[^>]*>",
         raw_text,
     )
+    product_title = re.search(
+        r"<([a-z0-9]+)\b(?=[^>]*\bid\s*=\s*['\"]producttitle['\"])[^>]*>(.*?)</\1\s*>",
+        raw_text,
+        flags=re.DOTALL,
+    )
     product_identity = bool(
-        re.search(r"id\s*=\s*['\"]producttitle['\"]", raw_text)
+        product_title
+        and _clean(re.sub(r"<[^>]+>", " ", product_title.group(2)))
         and canonical_asin
+        and canonical_parts.scheme == "https"
+        and (canonical_parts.hostname or "").removeprefix("www.") == "amazon.com"
         and input_asin
-        and canonical_asin.group(1) == input_asin.group(1)
     )
     if auth_title or (auth_dom and not product_identity):
         return "login_wall"

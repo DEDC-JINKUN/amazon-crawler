@@ -1088,6 +1088,7 @@ def test_trade_in_sign_in_prompt_on_product_page_is_not_a_login_wall_and_keeps_a
     [
         "<html><title>Amazon Sign-In</title><body>Sign in to continue</body></html>",
         "<html><title>Account</title><body><form action='/ap/signin'><input id='ap_email'><button id='signInSubmit'>Sign in</button></form></body></html>",
+        "<html><head><link rel='canonical' href='https://example.com/dp/B00RCPDCQU'></head><body><input id='ASIN' value='B00RCPDCQU'><span id='productTitle'></span><form action='/ap/signin'>Sign in</form></body></html>",
     ],
 )
 def test_explicit_authentication_page_remains_a_login_wall(login_html):
@@ -1099,11 +1100,14 @@ def test_postgres_explicit_asin_mismatch_precedes_context_fallback():
     worker = load_worker()
     html = """
     <html><head><link rel="canonical" href="https://www.amazon.com/example/dp/B01FSJD0ZO"></head><body>
-      <input id="ASIN" value="B01FSJD0ZO"><span id="productTitle">Different product</span>
+      <input id="ASIN" value="B07Q2S1LQ3"><span id="productTitle">Different product</span>
+      <nav><a href="/ap/signin?openid.return_to=%2Fdp%2FB01FSJD0ZO">Account</a></nav>
       <span class="a-price"><span class="a-offscreen">HKD117.52</span></span>
       <div id="desktop_buybox">Delivering to Hong Kong</div>
     </body></html>
     """
+
+    assert worker.classify_block(200, html) is None
 
     class Storage(OneProductStorage):
         def claim_task(self, worker_id, lease_seconds=None):
@@ -1156,11 +1160,14 @@ def test_sqlite_explicit_asin_mismatch_precedes_context_fallback():
     worker = load_worker()
     html = """
     <html><head><link rel="canonical" href="https://www.amazon.com/example/dp/B01FSJD0ZO"></head><body>
-      <input id="ASIN" value="B01FSJD0ZO"><span id="productTitle">Different product</span>
+      <input id="ASIN" value="B07Q2S1LQ3"><span id="productTitle">Different product</span>
+      <nav><a href="/ap/signin?openid.return_to=%2Fdp%2FB01FSJD0ZO">Account</a></nav>
       <span class="a-price"><span class="a-offscreen">HKD117.52</span></span>
       <div id="desktop_buybox">Delivering to Hong Kong</div>
     </body></html>
     """
+
+    assert worker.classify_block(200, html) is None
 
     class Adapter:
         source_type = "http_html"

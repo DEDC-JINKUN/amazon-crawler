@@ -246,7 +246,7 @@ driver.network.add_event_handler("fetch_error", fetch_error_handler)
 - 页面已明确指向其他 ASIN；
 - 只缺 `product_description` 等非核心字段。
 
-`login_wall` 必须由明确认证页证据支持：页面标题为 Amazon Sign-In，或在没有完整商品身份三锚点（`productTitle`、ASIN input、同 ASIN `/dp`/`/clp` canonical）时出现 `/ap/signin`、`ap_email`、`ap_password`、`signInSubmit` 等认证 DOM。普通商品页隐藏 trade-in/feedback 组件中的 `Sign in to continue` 不是登录墙，不能抢在 ASIN 质量门之前触发熔断。
+`login_wall` 必须由明确认证页证据支持：页面标题为 Amazon Sign-In，或在没有商品身份三锚点（非空可见 `productTitle`、ASIN input、`https://amazon.com` 或 `https://www.amazon.com` 的 `/dp`/`/clp` canonical）时出现以 `/ap/signin` 为 action 的认证表单、`ap_email`、`ap_password`、`signInSubmit` 等强认证 DOM。普通导航中的 `/ap/signin` 链接及商品页隐藏 trade-in/feedback 组件中的 `Sign in to continue` 都不是充分证据；canonical 与 input ASIN 不一致属于后续 `asin_mismatch` 质量门，不能先误触登录墙熔断。
 
 HTTP 网络权限错误、连接错误和响应截断属于 `fetch_error`/`http_transport_error`，不是 Amazon `block_reason`。如果 HTTP 和 Firefox fallback 都失败，PostgreSQL 与 SQLite runner 都必须写一条 body 可空的 action evidence、把任务从 `running` 终结为失败并保留有限重试语义；不能依赖租约过期来掩盖未捕获异常。Windows `WinError 10013` 表示当前执行环境或出口权限失败，代码不得将其改写成 403/429/CAPTCHA/WAF，也不得通过绕过沙箱修复。
 
