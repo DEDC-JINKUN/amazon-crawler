@@ -949,6 +949,7 @@ def test_product_fallback_reason_and_nullable_browser_traffic_are_persisted_in_e
 
         def __init__(self):
             self.browser_calls = []
+            self.commit_calls = 0
 
         def fetch(self, url):
             return """
@@ -958,6 +959,10 @@ def test_product_fallback_reason_and_nullable_browser_traffic_are_persisted_in_e
               <div id="desktop_buybox">Delivering to Portland 97230</div>
             </body></html>
             """, 200
+
+        def commit_browser_context(self, run_id, *, context_confirmed):
+            self.commit_calls += 1
+            return 1
 
         def fetch_browser(self, url, *, fallback_reason, run_id, asin):
             self.browser_calls.append((fallback_reason.value, run_id, asin))
@@ -994,7 +999,11 @@ def test_product_fallback_reason_and_nullable_browser_traffic_are_persisted_in_e
     assert worker.run_postgres_actions(storage, adapter, config, limit=1, run_id="run-1", worker_id="worker-a") == 1
 
     assert adapter.browser_calls == [("context_mismatch", "run-1", "B00RCPDCQU")]
+    assert adapter.commit_calls == 1
     context = storage.saved[0]["evidence"]["context_json"]
+    assert context["context_quality"] == "full"
+    assert context["postal_confirmed"] is True
+    assert context["cookie_bridge"]["status"] == "committed"
     assert context["fallback_reason"] == "context_mismatch"
     assert context["fallback_reasons"] == ["context_mismatch"]
     assert context["traffic"]["http_compressed_response_bytes"] == 100
@@ -1003,6 +1012,237 @@ def test_product_fallback_reason_and_nullable_browser_traffic_are_persisted_in_e
     assert context["traffic"]["blocked_resource_counts"] == {"image": 3}
     assert context["traffic"]["blocked_request_race_count"] == 2
     assert context["traffic"]["continued_request_race_count"] == 4
+
+
+def _portland_usd_product_html():
+    return """
+    <html><head><link rel="canonical" href="https://www.amazon.com/dp/B00RCPDCQU"></head><body>
+      <input id="ASIN" value="B00RCPDCQU"><span id="productTitle">Example</span>
+      <span class="a-price"><span class="a-offscreen">$19.99</span></span>
+      <div id="desktop_buybox">Delivering to Portland 97230</div>
+    </body></html>
+    """
+
+
+class PostalPartialAdapter:
+    source_type = "http_html"
+    last_transfer_bytes = 100
+    action_http_transfer_bytes = 100
+    last_retry_after_seconds = None
+
+    def __init__(self, worker):
+        self.worker = worker
+        self.browser_calls = 0
+        self.commit_calls = 0
+        self.last_browser_traffic = None
+
+    def fetch(self, url):
+        return _portland_usd_product_html(), 200
+
+    def fetch_browser(self, *args, **kwargs):
+        self.browser_calls += 1
+        self.last_browser_traffic = {
+            "main_document_bytes": None,
+            "subresource_bytes": None,
+            "main_document_unknown_count": 1,
+            "subresource_unknown_count": 1,
+        }
+        raise self.worker.AdapterFetchError("ZIP confirmation unavailable")
+
+    def commit_browser_context(self, *args, **kwargs):
+        self.commit_calls += 1
+        raise AssertionError("partial context must not bridge cookies")
+
+
+def test_postgres_postal_only_mismatch_saves_partial_product_without_cookie_bridge():
+    worker = load_worker()
+    storage = OneProductStorage()
+    adapter = PostalPartialAdapter(worker)
+    config = {
+        **worker.DEFAULTS,
+        "max_actions_per_run": 1,
+        "raw_html_dir": None,
+        "context": {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
+    }
+
+    assert worker.run_postgres_actions(
+        storage, adapter, config, limit=1, run_id="run-partial", worker_id="worker-a"
+    ) == 1
+
+    payload = storage.saved[0]
+    context = payload["evidence"]["context_json"]
+    assert adapter.browser_calls == 1
+    assert adapter.commit_calls == 0
+    assert "product" in payload
+    assert payload["evidence"]["error_code"] is None
+    assert context["context_quality"] == "partial"
+    assert context["postal_confirmed"] is False
+    assert context["expected_postal"] == "90001"
+    assert context["observed_postal"] == "97230"
+    assert context["location_sensitive_fields_unverified"] == ["price", "availability", "buy_box", "delivery"]
+
+
+def test_sqlite_postal_only_mismatch_saves_partial_product_without_cookie_bridge():
+    worker = load_worker()
+    adapter = PostalPartialAdapter(worker)
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        manifest = root / "manifest.csv"
+        manifest.write_text(
+            "\ufeffasin,url,marketplace,source_site_label,source_workbook\n"
+            "B00RCPDCQU,https://www.amazon.com/dp/B00RCPDCQU,US,test,fixture.xlsx\n",
+            encoding="utf-8",
+        )
+        conn = worker.init_db(root / "state.sqlite3")
+        config = {
+            **worker.DEFAULTS,
+            "max_actions_per_run": 1,
+            "output_dir": root / "out",
+            "raw_html_dir": None,
+            "context": {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
+        }
+        worker.initialize_manifest(conn, manifest, config)
+
+        assert worker.run_actions(conn, adapter, config, limit=1, run_id="run-partial") == 1
+        state = conn.execute("SELECT status,last_error FROM item_state WHERE asin='B00RCPDCQU'").fetchone()
+        product = conn.execute("SELECT asin,price FROM product_snapshot WHERE asin='B00RCPDCQU'").fetchone()
+        evidence = conn.execute(
+            "SELECT error_code,context_json FROM collection_evidence WHERE asin='B00RCPDCQU' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+
+    context = json.loads(evidence["context_json"])
+    assert adapter.browser_calls == 1
+    assert adapter.commit_calls == 0
+    assert tuple(state) == ("succeeded", None)
+    assert tuple(product) == ("B00RCPDCQU", "$19.99")
+    assert evidence["error_code"] is None
+    assert context["context_quality"] == "partial"
+    assert context["postal_confirmed"] is False
+    assert context["expected_postal"] == "90001"
+    assert context["observed_postal"] == "97230"
+
+
+def test_postgres_explicit_us_without_postal_saves_partial_after_firefox_failure():
+    worker = load_worker()
+
+    class Adapter(PostalPartialAdapter):
+        def fetch(self, url):
+            return """
+            <html><head><link rel="canonical" href="https://www.amazon.com/dp/B00RCPDCQU"></head><body>
+              <input id="ASIN" value="B00RCPDCQU"><span id="productTitle">Example</span>
+              <span class="a-price"><span class="a-offscreen">$19.99</span></span>
+              <div id="desktop_buybox">Delivering to United States</div>
+            </body></html>
+            """, 200
+
+    storage = OneProductStorage()
+    adapter = Adapter(worker)
+    config = {
+        **worker.DEFAULTS,
+        "max_actions_per_run": 1,
+        "raw_html_dir": None,
+        "context": {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
+    }
+
+    assert worker.run_postgres_actions(
+        storage, adapter, config, limit=1, run_id="run-partial-no-postal", worker_id="worker-a"
+    ) == 1
+    context = storage.saved[0]["evidence"]["context_json"]
+    assert "product" in storage.saved[0]
+    assert context["context_quality"] == "partial"
+    assert context["postal_confirmed"] is False
+    assert context["observed_postal"] is None
+
+
+@pytest.mark.parametrize(
+    ("price", "delivery", "expected_error"),
+    [
+        ("HKD117.52", "Delivering to Portland 97230", "currency_mismatch"),
+        ("$19.99", "Delivering to Hong Kong", "delivery_country_mismatch"),
+        ("", "Delivering to Portland 97230", "currency_not_observed"),
+        ("$19.99", "", "delivery_country_not_observed"),
+    ],
+)
+def test_postgres_hard_context_errors_remain_failed_when_firefox_is_unavailable(price, delivery, expected_error):
+    worker = load_worker()
+
+    class Adapter(PostalPartialAdapter):
+        def fetch(self, url):
+            return f"""
+            <html><head><link rel="canonical" href="https://www.amazon.com/dp/B00RCPDCQU"></head><body>
+              <input id="ASIN" value="B00RCPDCQU"><span id="productTitle">Example</span>
+              <span class="a-price"><span class="a-offscreen">{price}</span></span>
+              <div id="desktop_buybox">{delivery}</div>
+            </body></html>
+            """, 200
+
+    storage = OneProductStorage()
+    adapter = Adapter(worker)
+    config = {
+        **worker.DEFAULTS,
+        "max_actions_per_run": 1,
+        "raw_html_dir": None,
+        "context": {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
+    }
+
+    assert worker.run_postgres_actions(
+        storage, adapter, config, limit=1, run_id="run-hard-context", worker_id="worker-a"
+    ) == 1
+
+    payload = storage.saved[0]
+    assert adapter.browser_calls == 1
+    assert adapter.commit_calls == 0
+    assert payload["reason"] == "context_mismatch"
+    assert expected_error in payload["error"]
+    assert payload["evidence"]["context_json"]["context_quality"] == "invalid"
+
+
+def test_sqlite_missing_us_evidence_remains_failed_after_firefox_is_unavailable():
+    worker = load_worker()
+
+    class Adapter(PostalPartialAdapter):
+        def fetch(self, url):
+            return """
+            <html><head><link rel="canonical" href="https://www.amazon.com/dp/B00RCPDCQU"></head><body>
+              <input id="ASIN" value="B00RCPDCQU"><span id="productTitle">Example</span>
+              <span class="a-price"><span class="a-offscreen">$19.99</span></span>
+            </body></html>
+            """, 200
+
+    adapter = Adapter(worker)
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        manifest = root / "manifest.csv"
+        manifest.write_text(
+            "\ufeffasin,url,marketplace,source_site_label,source_workbook\n"
+            "B00RCPDCQU,https://www.amazon.com/dp/B00RCPDCQU,US,test,fixture.xlsx\n",
+            encoding="utf-8",
+        )
+        conn = worker.init_db(root / "state.sqlite3")
+        config = {
+            **worker.DEFAULTS,
+            "max_actions_per_run": 1,
+            "output_dir": root / "out",
+            "raw_html_dir": None,
+            "context": {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
+        }
+        worker.initialize_manifest(conn, manifest, config)
+
+        assert worker.run_actions(conn, adapter, config, limit=1, run_id="run-country-unknown") == 1
+        state = conn.execute("SELECT status,last_error FROM item_state WHERE asin='B00RCPDCQU'").fetchone()
+        product = conn.execute("SELECT asin FROM product_snapshot WHERE asin='B00RCPDCQU'").fetchone()
+        context = json.loads(
+            conn.execute("SELECT context_json FROM collection_evidence ORDER BY id DESC LIMIT 1").fetchone()[0]
+        )
+        conn.close()
+
+    assert adapter.browser_calls == 1
+    assert adapter.commit_calls == 0
+    assert state["status"] == "failed"
+    assert "delivery_country_not_observed" in state["last_error"]
+    assert product is None
+    assert context["context_quality"] == "invalid"
 
 
 @pytest.mark.parametrize(

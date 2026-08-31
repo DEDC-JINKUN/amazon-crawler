@@ -1126,6 +1126,7 @@ def parse_product_html(source_html: str, page_url: str = "") -> dict[str, Any]:
     canonical = _first_attr(parser, [{"tag": "link", "attr": ("rel", "canonical")}], "href") or _meta(parser, "og:url") or page_url
     parent_asin, identity_child_asins = _product_identity_metadata(source_html)
     title = _first_text(parser, [{"id_value": "productTitle"}, {"tag": "h1", "class_name": "product-title"}])
+    delivery_context = _first_text(parser, [{"id_value": "glow-ingress-line1"}, {"id_value": "glow-ingress-line2"}])
     review_summary_text = _first_text(parser, [{"id_value": "acrCustomerReviewLink"}, {"attr": ("data-hook", "total-review-count")}])
     reported_rating_text = _first_text(parser, [{"id_value": "acrPopover"}, {"attr": ("data-hook", "rating-out-of-five")}])
     reported_rating_count_text = _first_text(parser, [{"attr": ("data-hook", "rating-count")}, {"id_value": "ratingCount"}])
@@ -1164,6 +1165,7 @@ def parse_product_html(source_html: str, page_url: str = "") -> dict[str, Any]:
     return {
         "asin": asin.upper(), "marketplace": "US", "canonical_url": canonical,
         "parent_asin": parent_asin, "identity_child_asins": identity_child_asins,
+        "delivery_context": delivery_context,
         "availability": _first_text(parser, [{"id_value": "availability"}, {"id_value": "outOfStock"}]),
         "title": title, "brand": _normalize_brand(_first_text(parser, [{"id_value": "bylineInfo"}, {"id_value": "brand"}])),
         "rating": reported_rating_text, "reported_ratings": _count_from_text(review_summary_text), "reported_rating_count": reported_rating_count,
@@ -1761,27 +1763,36 @@ class SeleniumFirefoxAdapter:
         field = WebDriverWait(self.driver, 10).until(EC.presence_of_element_located((By.ID, "GLUXZipUpdateInput")))
         field.clear()
         field.send_keys(postal_code)
-        self.driver.find_element(By.CSS_SELECTOR, "#GLUXZipUpdate input[type='submit']").click()
-        # Amazon may show a second confirmation modal after Apply. The visible
-        # Done button is the commit point; GLUXConfirmClose is only a fallback
-        # for older page variants where that button is rendered as an input.
-        try:
-            visible_done = WebDriverWait(self.driver, 10).until(
-                lambda driver: [
-                    button for button in driver.find_elements(By.CSS_SELECTOR, "button[name='glowDoneButton']")
-                    if button.is_displayed()
-                ]
-            )
-            # Amazon's current location modal renders a visible button whose
-            # native WebDriver click can be acknowledged without firing the
-            # page handler. A DOM click is the observed commit action.
-            self.driver.execute_script("arguments[0].click()", visible_done[-1])
-        except Exception:
+        apply_button = WebDriverWait(self.driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "#GLUXZipUpdate input[type='submit']"))
+        )
+        # Native Firefox clicks can be acknowledged without firing Amazon's
+        # location handlers. Use the same DOM click for Apply and confirmation.
+        self.driver.execute_script("arguments[0].click()", apply_button)
+
+        def commit_state(driver: Any) -> tuple[str, Any | None] | bool:
+            if delivery_context_confirmed(driver, postal_code):
+                return ("confirmed", None)
+            candidates = [
+                *driver.find_elements(By.CSS_SELECTOR, "button[name='glowDoneButton']"),
+            ]
             try:
-                self.driver.find_element(By.ID, "GLUXConfirmClose").click()
+                candidates.append(
+                    driver.find_element(By.XPATH, "//button[normalize-space()='Done' or normalize-space()='完成']")
+                )
             except Exception:
                 pass
-        WebDriverWait(self.driver, 15).until(lambda driver: delivery_context_confirmed(driver, postal_code))
+            try:
+                candidates.append(driver.find_element(By.ID, "GLUXConfirmClose"))
+            except Exception:
+                pass
+            visible = [candidate for candidate in candidates if candidate.is_displayed()]
+            return ("control", visible[-1]) if visible else False
+
+        state, control = WebDriverWait(self.driver, 10).until(commit_state)
+        if state == "control":
+            self.driver.execute_script("arguments[0].click()", control)
+            WebDriverWait(self.driver, 15).until(lambda driver: delivery_context_confirmed(driver, postal_code))
         # The modal updates the header before product modules are repainted.
         # Reload once after the location is committed, then confirm the ZIP
         # survived the navigation before taking page_source.
@@ -1896,6 +1907,7 @@ class HttpFirstAdapter:
         self.last_transfer_bytes: int | None = None
         self.action_http_transfer_bytes = 0
         self.last_browser_traffic: dict[str, Any] | None = None
+        self.last_browser_context_confirmed = False
         self.last_fallback_reason: str | None = None
         self.action_fallback_reasons: list[str] = []
         self.browser_attempted = False
@@ -1922,6 +1934,7 @@ class HttpFirstAdapter:
     def begin_action(self) -> None:
         self.action_http_transfer_bytes = 0
         self.last_browser_traffic = None
+        self.last_browser_context_confirmed = False
         self.last_fallback_reason = None
         self.action_fallback_reasons = []
         self.browser_attempted = False
@@ -1944,6 +1957,7 @@ class HttpFirstAdapter:
         self.last_transfer_bytes = 0
         self.last_browser_traffic = None
         self.last_fallback_reason = None
+        self.last_browser_context_confirmed = False
         self.source_type = "http_html"
         max_attempts = max(1, min(int(self.config.get("http_max_attempts", 2)), 3))
         backoff = max(0.0, min(float(self.config.get("http_retry_backoff_seconds", 0.5)), 5.0))
@@ -2030,6 +2044,7 @@ class HttpFirstAdapter:
             body, status = browser.fetch(url)
         except AdapterFetchError:
             self.last_browser_traffic = dict(getattr(browser, "last_traffic", None) or {})
+            self.last_browser_context_confirmed = False
             try:
                 close_browser = getattr(browser, "close", None)
                 if close_browser is not None:
@@ -2042,6 +2057,7 @@ class HttpFirstAdapter:
         self.source_type = "selenium_dom"
         self.last_transfer_bytes = None
         self.last_browser_traffic = dict(self.browser.last_traffic)
+        self.last_browser_context_confirmed = bool(self.browser._context_initialized)
         return body, status
 
     def commit_browser_context(self, run_id: str, *, context_confirmed: bool) -> int:
@@ -2224,10 +2240,55 @@ def _product_evidence_context(
     expected_asin: str,
 ) -> dict[str, Any]:
     context = _evidence_context(base_context, adapter)
+    _, quality = _assess_product_context(data, base_context, adapter)
+    context.update(quality)
     if _is_canonical_parent_child(data, expected_asin):
         context["parent_asin"] = str(data.get("parent_asin") or "").upper()
         context["identity_relation"] = "child_of_canonical_parent"
     return context
+
+
+def _assess_product_context(
+    data: dict[str, Any],
+    expected_context: dict[str, Any] | None,
+    adapter: Any,
+) -> tuple[list[str], dict[str, Any]]:
+    expected = dict(expected_context or {})
+    expected_country = str(expected.get("expected_country") or "").strip().upper()
+    expected_currency = str(expected.get("expected_currency") or "").strip().upper()
+    expected_postal = str(expected.get("postal_code") or "").strip()[:5]
+    browser_confirmed = bool(getattr(adapter, "last_browser_context_confirmed", False))
+    errors = validate_context(data, expected)
+    hard_errors = [error for error in errors if error != "delivery_postal_mismatch"]
+
+    price = str(data.get("price") or "").strip().upper()
+    if expected_currency == "USD" and not browser_confirmed and not ("$" in price or "USD" in price):
+        if "currency_mismatch" not in hard_errors:
+            hard_errors.append("currency_not_observed")
+    page_text = " ".join(
+        str(data.get(key) or "")
+        for key in ("availability", "buy_box", "product_description", "delivery_context")
+    )
+    observed_postals = sorted(set(re.findall(r"(?<!\d)(\d{5})(?:-\d{4})?(?!\d)", page_text)))
+    explicit_us = bool(
+        re.search(r"(?:\bunited states\b|\busa\b|\bu\.s\.(?:\s|$))", page_text, flags=re.IGNORECASE)
+        or re.search(r"deliver(?:ing)?\s+to.{0,80}(?<!\d)\d{5}(?:-\d{4})?(?!\d)", page_text, flags=re.IGNORECASE)
+    )
+    if expected_country == "US" and not browser_confirmed and not explicit_us:
+        if "delivery_country_mismatch" not in hard_errors:
+            hard_errors.append("delivery_country_not_observed")
+    postal_confirmed = bool(not expected_postal or browser_confirmed or expected_postal in observed_postals)
+    observed_postal = expected_postal if expected_postal in observed_postals else (observed_postals[0] if observed_postals else None)
+    context_quality = "invalid" if hard_errors else "full" if postal_confirmed else "partial"
+    quality: dict[str, Any] = {
+        "context_quality": context_quality,
+        "postal_confirmed": postal_confirmed,
+        "expected_postal": expected_postal or None,
+        "observed_postal": observed_postal,
+    }
+    if context_quality == "partial":
+        quality["location_sensitive_fields_unverified"] = ["price", "availability", "buy_box", "delivery"]
+    return list(dict.fromkeys(hard_errors)), quality
 
 
 def _commit_browser_context_safely(adapter: Any, run_id: str) -> None:
@@ -2458,8 +2519,10 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                 _finish_refresh_request(conn, refresh_job_id, "failed")
             actions += 1
             continue
-        context_errors = validate_context(data, config.get("context")) if not reason else []
-        if context_errors:
+        context_errors, context_quality = (
+            _assess_product_context(data, config.get("context"), adapter) if not reason else ([], {})
+        )
+        if not reason and (context_errors or not context_quality.get("postal_confirmed", True)):
             try:
                 browser_result = _fetch_browser_once(
                     adapter, row["url"], fallback_reason=FallbackReason.CONTEXT_MISMATCH,
@@ -2471,11 +2534,18 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                 browser_body, browser_status = browser_result if browser_result is not None else (None, None)
                 browser_reason = classify_block(browser_status, browser_body or "") if browser_result is not None else None
                 browser_data = parse_product_html(browser_body, row["url"]) if browser_result is not None and not browser_reason else data
-                browser_context_errors = validate_context(browser_data, config.get("context")) if browser_result is not None and not browser_reason else context_errors
+                browser_context_errors, browser_context_quality = (
+                    _assess_product_context(browser_data, config.get("context"), adapter)
+                    if browser_result is not None and not browser_reason else (context_errors, context_quality)
+                )
                 if browser_reason:
-                    body, response_status, data, reason, context_errors = browser_body, browser_status, {"asin": "", "canonical_url": ""}, browser_reason, []
-                elif browser_result is not None and not browser_context_errors:
-                    body, response_status, data, reason, context_errors = browser_body, browser_status, browser_data, browser_reason, []
+                    body, response_status, data, reason = browser_body, browser_status, {"asin": "", "canonical_url": ""}, browser_reason
+                elif browser_result is not None and not browser_context_errors and browser_context_quality.get("postal_confirmed"):
+                    body, response_status, data, reason = browser_body, browser_status, browser_data, browser_reason
+        if not reason:
+            context_errors, context_quality = _assess_product_context(data, config.get("context"), adapter)
+        else:
+            context_errors, context_quality = [], {}
         if context_errors:
             error_code = "context_mismatch:" + ",".join(context_errors)
         else:
@@ -2487,6 +2557,7 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
         if (
             not reason
             and not context_errors
+            and context_quality.get("context_quality") == "full"
             and source_type == "selenium_dom"
             and _valid_product_identity(data, row["asin"])
             and hasattr(adapter, "commit_browser_context")
@@ -2741,8 +2812,10 @@ def run_postgres_actions(
                 storage.finish_refresh_request(refresh_job_id, "failed")
             actions += 1
             continue
-        context_errors = validate_context(data, config.get("context")) if not reason else []
-        if context_errors:
+        context_errors, context_quality = (
+            _assess_product_context(data, config.get("context"), adapter) if not reason else ([], {})
+        )
+        if not reason and (context_errors or not context_quality.get("postal_confirmed", True)):
             try:
                 browser_result = _fetch_browser_once(
                     adapter, task["url"], fallback_reason=FallbackReason.CONTEXT_MISMATCH,
@@ -2754,11 +2827,18 @@ def run_postgres_actions(
                 browser_body, browser_status = browser_result if browser_result is not None else (None, None)
                 browser_reason = classify_block(browser_status, browser_body or "") if browser_result is not None else None
                 browser_data = parse_product_html(browser_body, task["url"]) if browser_result is not None and not browser_reason else data
-                browser_context_errors = validate_context(browser_data, config.get("context")) if browser_result is not None and not browser_reason else context_errors
+                browser_context_errors, browser_context_quality = (
+                    _assess_product_context(browser_data, config.get("context"), adapter)
+                    if browser_result is not None and not browser_reason else (context_errors, context_quality)
+                )
                 if browser_reason:
-                    body, response_status, data, reason, context_errors = browser_body, browser_status, {"asin": "", "canonical_url": ""}, browser_reason, []
-                elif browser_result is not None and not browser_context_errors:
-                    body, response_status, data, reason, context_errors = browser_body, browser_status, browser_data, browser_reason, []
+                    body, response_status, data, reason = browser_body, browser_status, {"asin": "", "canonical_url": ""}, browser_reason
+                elif browser_result is not None and not browser_context_errors and browser_context_quality.get("postal_confirmed"):
+                    body, response_status, data, reason = browser_body, browser_status, browser_data, browser_reason
+        if not reason:
+            context_errors, context_quality = _assess_product_context(data, config.get("context"), adapter)
+        else:
+            context_errors, context_quality = [], {}
         source_type = getattr(adapter, "source_type", "http_html")
         transfer_bytes = getattr(adapter, "last_transfer_bytes", None)
         error_code = "context_mismatch:" + ",".join(context_errors) if context_errors else None
@@ -2808,9 +2888,15 @@ def run_postgres_actions(
                 storage.finish_refresh_request(refresh_job_id, "failed")
             actions += 1
             continue
-        if source_type == "selenium_dom" and hasattr(adapter, "commit_browser_context"):
+        if (
+            context_quality.get("context_quality") == "full"
+            and source_type == "selenium_dom"
+            and hasattr(adapter, "commit_browser_context")
+        ):
             _commit_browser_context_safely(adapter, run_id)
-            evidence["context_json"] = _evidence_context(config.get("context"), adapter)
+            evidence["context_json"] = _product_evidence_context(
+                config.get("context"), adapter, data, task["asin"]
+            )
         review_url = data.get("review_link") or None
         media = []
         for item in data.get("media", []):

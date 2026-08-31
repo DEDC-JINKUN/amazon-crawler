@@ -13,7 +13,7 @@
 - HTTP 使用 `urllib`、内存 `CookieJar`、`HTTPCookieProcessor` 和 gzip；
 - Firefox 使用 Selenium `4.47.0`、正式 Mozilla Firefox、geckodriver 和 WebDriver BiDi；
 - Firefox 只在枚举化原因获准时使用，屏蔽 image、font、media 和明确广告/遥测请求；
-- ZIP `90001` 与 USD、目标 ASIN、canonical URL 和标题通过门禁后，才把隔离 Firefox 会话中的 Amazon Cookie 提交给本次 HTTP 会话；
+- 商品身份、Amazon.com、US、USD 是硬门；ZIP `90001` 是字段级软门。ZIP 未确认时可保存 partial 商品，但只有 Firefox 明确确认 ZIP/US/USD 后才把隔离 Cookie 提交给本次 HTTP 会话；
 - 商品、独立评论分页和媒体二进制是不同状态/成本口径；默认只保存媒体 URL 与元数据；
 - PostgreSQL 保存当前状态、追加快照、评论断点和 evidence；原始 HTML 保存到本地 evidence 目录；
 - 本地只读 Console 展示任务、商品、evidence 和四类流量。
@@ -28,7 +28,7 @@
 
 ### 1.4 当前结论
 
-低流量控制、Cookie 桥接、fallback 去重和 nullable 流量口径已通过离线测试。2026-08-31 的真实 3-ASIN 探针尚未形成成功批次：第一次受执行环境 `WinError 10013` 阻断；第二次暴露 trade-in 文案误报登录墙和旧 Console 流量口径；第三次已验证 receipt v2 能以 `3/3 failed` 返回 `quality_failed/exit 4`，同时暴露“明确其他 ASIN 仍先走 context fallback”的顺序错误。上述缺陷均进入永久回归，但不等于商品采集成功。当前进程没有 `AMAZON_TEST_POSTGRES_DSN`，因此真实 PostgreSQL 集成测试明确跳过，也没有代理供应商后台 `U1-U0` 账单证据；不能从离线结果或失败探针推断成本承诺。
+低流量控制、Cookie 桥接、fallback 去重、nullable 流量和 full/partial 上下文合同已通过离线测试。2026-08-31 的真实小批次已验证 HTTP/Firefox 混合采集、Cookie bridge 与 terminal failure；后续 10-ASIN run 暴露 Firefox 地址弹窗未把 Portland 97230 提交为 90001，本轮已增加 DOM click 与弹窗变体回归，但修复后的真实 Amazon 批次尚未运行。当前进程没有 `AMAZON_TEST_POSTGRES_DSN`，真实 PostgreSQL 集成测试明确跳过，也没有代理供应商后台 `U1-U0` 账单证据；不能从离线结果推断实机 ZIP 成功率或成本承诺。
 
 ## 2. 系统架构
 
@@ -181,6 +181,8 @@ Firefox 选项固定启用：
 
 初始化必须同时获得 `driver.network` 并成功注册全部 handler。缺少 BiDi、handler 注册失败或 WebSocket 不可用时，适配器关闭 driver、清理 profile 并 fail closed；不会无拦截地继续 Firefox。
 
+配送上下文提交使用隔离 Firefox 内的 Amazon 地址弹窗：填写 `GLUXZipUpdateInput` 后，Apply 与确认控件都通过 DOM click 触发页面 handler。确认控件兼容 `button[name=glowDoneButton]`、文本型 `Done/完成` button 和旧 `GLUXConfirmClose`；若 Apply 后页面已直接更新为目标 ZIP，则不要求二次按钮。页面必须在提交后、以及刷新商品模块后两次明确满足配送头含 `90001` 且 `currencyOfPreference=USD`，才设置 `context_initialized` 并允许 Cookie 桥接。任一步无控件、点击未生效、等待超时或刷新后退回其他 ZIP，均关闭 Firefox、返回固定 browser-unavailable 错误并保留原 HTTP evidence；runner 只在身份、Amazon.com、US、USD 硬门可信时把该商品保存为 partial，否则仍失败。
+
 `current_window_handle`、导航、ZIP 设置、DOM 和响应状态读取处于同一个受保护生命周期。窗口已丢失或 browsing context 已销毁时，适配器先把浏览器流量保守标为 unknown，幂等清理 BiDi handler、driver 和临时 profile，再只向 runner 返回固定的 `Firefox browser session is unavailable`；原始 WebDriver 异常不进入任务错误或 evidence。
 
 ### 5.2 事件与计量
@@ -232,7 +234,7 @@ driver.network.add_event_handler("fetch_error", fetch_error_handler)
 | `missing_asin` | HTTP HTML 缺 ASIN，且没有明确指向其他 ASIN | 再解析目标 ASIN |
 | `missing_canonical_url` | HTTP HTML 缺 canonical | canonical 必须为 HTTPS amazon.com `/dp` 或 `/clp`；可为任务 ASIN，或有严格页面证据的 Parent ASIN |
 | `missing_title` | 只缺核心标题 | 浏览器必须补出标题 |
-| `context_mismatch` | ZIP/国家/币种不符合配置 | 必须确认 ZIP 与 USD |
+| `context_mismatch` | ZIP 不符/缺证据，或国家/币种不可信 | 最多一次 Firefox；US/USD失败仍拒绝，只有ZIP失败可降为 partial |
 | `review_empty` | 独立评论页无 review DOM，且 reported count > 0 | 不允许伪造评论成功 |
 
 `BrowserFallbackLedger.claim(run_id, asin, reason)` 保证同一 run、ASIN、reason 最多一次。Evidence 保存最后一个 `fallback_reason` 和本 action 的 `fallback_reasons` 列表。
@@ -267,7 +269,15 @@ HTTP 网络权限错误、连接错误和响应截断属于 `fetch_error`/`http_
 - 媒体：图片/视频 URL、placement、entry_type、ordinal 等元数据
 - 评论入口：`review_link`, `review_section_anchor`
 
-商品事务前必须满足目标 ASIN、canonical host/path、标题和配置的地域/币种上下文。严格 Child/Parent 成功时商品仍按 Child ASIN 保存，canonical 保留 Parent URL，evidence context 仅记录脱敏 `parent_asin` 与 `identity_relation=child_of_canonical_parent`。失败 evidence 不覆盖已有有效商品快照。
+商品事务前必须满足目标 ASIN、canonical host/path、标题、Amazon.com、US 与 USD 硬门。严格 Child/Parent 成功时商品仍按 Child ASIN 保存，canonical 保留 Parent URL。ZIP 上下文写入现有 evidence `context_json`，无需 schema migration：
+
+- `context_quality=full`：目标 ZIP 已由页面或受控 Firefox 明确确认；`postal_confirmed=true`；
+- `context_quality=partial`：Firefox 已尝试但 ZIP 仍未确认，且身份/US/USD可信；商品、媒体 URL、A+、参数和 top reviews 正常保存，`postal_confirmed=false`，记录 `expected_postal`、`observed_postal` 与 `location_sensitive_fields_unverified=[price,availability,buy_box,delivery]`；
+- `context_quality=invalid`：明确非 US、明确非 USD，或缺少 US/USD可信证据；仍按 `context_mismatch:*` 失败。
+
+US 正向证据必须来自已确认 Firefox 上下文、配送字段明确写出 `United States/USA/U.S.`，或配送短语与美国 5 位 ZIP 的组合；Amazon.com 域名或 `$` 价格单独都不构成 US 证据。USD 正向证据来自明确 `$`/`USD` 价格或已确认 Firefox `currencyOfPreference=USD`。
+
+Partial 不等于 90001 结果，不能用于断言价格、库存、buy box 或配送适用于目标 ZIP。Cookie bridge 只允许 full Firefox action。失败 evidence 不覆盖已有有效商品快照。
 
 ### 7.2 独立评论
 
@@ -462,6 +472,7 @@ Console 只在三项同时成立时复用：`.console.lock.json` 中的 PID+Star
 - HTTP compressed、Firefox main、Firefox subresources 的 known/unknown；
 - 403、429、CAPTCHA、WAF、login、ASIN mismatch；
 - ZIP `90001`、country `US`、currency `USD`；
+- `context_quality` 的 full/partial/invalid 数量，partial 的 expected/observed postal 与受影响字段；
 - 标题、价格、A+、媒体 URL、内容模块和 top reviews 覆盖；
 - `reviews_pending`、独立评论失败与商品成功的分离；
 - 代理后台 `U1-U0`（仅付费流量校准时）。
@@ -473,7 +484,7 @@ Console 只在三项同时成立时复用：`.console.lock.json` 中的 PID+Star
 - 访问控制信号；
 - Cookie、fallback_reason 或 traffic evidence 缺失；
 - 浏览器 bytes 被写成伪造 0；
-- ZIP/币种不正确；
+- 明确非 US/非 USD，或 partial 风险未在 evidence/Console 显示；
 - 明确其他 ASIN 仍启动 Firefox；
 - 商品成功被评论失败覆盖；
 - 媒体/A+字段相对离线 fixture 回归；
@@ -489,7 +500,8 @@ Console 只在三项同时成立时复用：`.console.lock.json` 中的 PID+Star
 | 已验证 | fallback enum、run/ASIN/reason 去重、阻断/登录/跳转不升级 | 离线 runner 测试 |
 | 已验证 | 商品、评论断点、媒体 URL/A+解析不回归 | fixture/存储测试 |
 | 目标值 | 商品成功率 | `>= 95%`，待真实批次 |
-| 目标值 | ZIP/国家/币种正确率 | `100%`，待真实批次 |
+| 目标值 | US/USD 硬门正确率 | `100%`，待真实批次 |
+| 目标值 | full/partial 可解释率 | `100%` evidence 与 Console 显示；ZIP full 比例待真实批次 |
 | 目标值 | Firefox action 比例 | `<= 20%`，待真实批次 |
 | 目标值 | 媒体 URL 与内容模块保留率 | `>= 95%`，待真实双跑 |
 | 目标值 | 代理计费流量 | `<= 4 MB / successful ASIN`，待供应商账单 |

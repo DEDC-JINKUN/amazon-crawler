@@ -160,6 +160,7 @@ class PostalFallbackAdapter(Adapter):
     def fetch_browser(self, url):
         self.calls.append("browser")
         self.source_type = "selenium_dom"
+        self.last_browser_context_confirmed = True
         return """
         <html><head><link rel="canonical" href="https://www.amazon.com/dp/B00RCPDCQU"></head><body>
           <input id="ASIN" value="B00RCPDCQU"><span id="productTitle">Example</span>

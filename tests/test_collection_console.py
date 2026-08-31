@@ -153,6 +153,27 @@ def test_console_traffic_uses_firefox_context_keys_when_final_source_is_http():
     assert summary["firefox_subresources"] == {"bytes": None, "known_records": 0, "unknown_records": 3}
 
 
+def test_console_context_quality_counts_partial_without_marking_it_failed():
+    module = load_module()
+    rows = [
+        {"error_code": None, "block_reason": None, "context_json": {"context_quality": "full"}},
+        {
+            "error_code": None,
+            "block_reason": None,
+            "context_json": {
+                "context_quality": "partial",
+                "postal_confirmed": False,
+                "expected_postal": "90001",
+                "observed_postal": "97230",
+            },
+        },
+        {"error_code": "context_mismatch:currency_mismatch", "block_reason": None, "context_json": {"context_quality": "invalid"}},
+        {"error_code": None, "block_reason": None, "context_json": {}},
+    ]
+
+    assert module.summarize_context_quality(rows) == {"full": 1, "partial": 1, "invalid": 1, "unknown": 1}
+
+
 def test_console_serves_static_ui_with_security_headers():
     module = load_module()
     server, thread = start_server(module)
@@ -165,10 +186,14 @@ def test_console_serves_static_ui_with_security_headers():
             assert 'id="firefoxMainMetric"' in body
             assert 'id="firefoxSubresourceMetric"' in body
             assert 'id="proxyBillMetric"' in body
+            assert 'id="partialMetric"' in body
             assert "default-src 'self'" in response.headers["Content-Security-Policy"]
             assert response.headers["Cache-Control"] == "no-store"
         with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/app.js", timeout=2) as response:
+            script = response.read().decode("utf-8")
             assert response.headers["Content-Type"].startswith("text/javascript")
+            assert "context_quality" in script
+            assert "location_sensitive_fields_unverified" in script
         with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/readyz", timeout=2) as response:
             ready = json.loads(response.read())
             assert ready["ok"] is True

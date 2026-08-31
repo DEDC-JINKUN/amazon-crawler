@@ -260,6 +260,109 @@ class HttpAdapterTests(unittest.TestCase):
         self.assertTrue(driver.js_clicked)
         self.assertTrue(driver.refreshed)
 
+    def test_firefox_zip_modal_uses_dom_click_and_text_done_variant(self):
+        worker = load_worker()
+
+        class Element:
+            def __init__(self, driver, kind, text="", displayed=True):
+                self.driver, self.kind, self.text, self.displayed = driver, kind, text, displayed
+
+            def click(self):
+                self.driver.native_clicks.append(self.kind)
+
+            def clear(self):
+                pass
+
+            def send_keys(self, value):
+                self.driver.input_value = value
+
+            def is_displayed(self):
+                return self.displayed
+
+            def get_attribute(self, name):
+                return "USD" if self.kind == "currency" and name == "value" else None
+
+        class Driver:
+            page_source = "<html>ok</html>"
+            current_window_handle = "top-context"
+
+            def __init__(self):
+                self.input_value = ""
+                self.modal_open = False
+                self.committed = False
+                self.native_clicks = []
+                self.dom_clicks = []
+                self.refreshed = False
+
+            def get(self, url):
+                pass
+
+            def refresh(self):
+                self.refreshed = True
+
+            def quit(self):
+                pass
+
+            def find_element(self, by, value):
+                if value == "glow-ingress-line1":
+                    return Element(self, "header", "Delivering to Los Angeles 90001" if self.committed else "Delivering to Portland 97230")
+                if value == "glow-ingress-line2":
+                    return Element(self, "header", "Update location")
+                if value == "nav-global-location-popover-link":
+                    return Element(self, "location")
+                if value == "GLUXZipUpdateInput":
+                    return Element(self, "zip")
+                if value == "#GLUXZipUpdate input[type='submit']":
+                    return Element(self, "apply")
+                if value == "currencyOfPreference":
+                    return Element(self, "currency")
+                if value == "//button[normalize-space()='Done' or normalize-space()='完成']" and self.modal_open:
+                    return Element(self, "done", "Done")
+                raise LookupError(value)
+
+            def find_elements(self, by, value):
+                return []
+
+            def execute_script(self, script, element=None):
+                if element is None:
+                    return []
+                self.dom_clicks.append(element.kind)
+                if element.kind == "apply":
+                    self.modal_open = True
+                elif element.kind == "done":
+                    self.committed = True
+
+        class Wait:
+            def __init__(self, driver, timeout):
+                self.driver = driver
+
+            def until(self, condition):
+                value = condition(self.driver)
+                if not value:
+                    raise TimeoutError("condition not met")
+                return value
+
+        driver = Driver()
+        adapter = object.__new__(worker.SeleniumFirefoxAdapter)
+        adapter.config = {**worker.DEFAULTS, "context": {"postal_code": "90001"}}
+        adapter.driver = driver
+        adapter._context_initialized = False
+
+        import selenium.webdriver.support.expected_conditions as expected_conditions
+        import selenium.webdriver.support.ui as support_ui
+
+        with patch.object(support_ui, "WebDriverWait", Wait), patch.object(
+            expected_conditions, "presence_of_element_located", lambda locator: lambda current: current.find_element(*locator)
+        ), patch.object(worker.time, "sleep", lambda seconds: None):
+            body, _ = adapter.fetch("https://www.amazon.com/dp/B0BLVBQVKS")
+
+        self.assertEqual(body, "<html>ok</html>")
+        self.assertEqual(driver.input_value, "90001")
+        self.assertEqual(driver.dom_clicks, ["apply", "done"])
+        self.assertTrue(driver.committed)
+        self.assertTrue(driver.refreshed)
+        self.assertTrue(adapter._context_initialized)
+
     def test_failed_browser_fallback_does_not_relabel_http_body_as_selenium(self):
         worker = load_worker()
 

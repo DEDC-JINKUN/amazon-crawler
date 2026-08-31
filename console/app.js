@@ -48,6 +48,7 @@ function renderOverview(data) {
   $('progressMetric').textContent = `${data.progress.percent}%`;
   $('progressSub').textContent = `${number(data.progress.touched)} / ${number(data.progress.total)} ASIN`;
   $('productsMetric').textContent = number(data.progress.successful_products);
+  $('partialMetric').textContent = number(data.context_quality_counts?.partial);
   $('blockedMetric').textContent = number(data.status_counts.blocked);
   $('failedMetric').textContent = number(data.status_counts.failed);
   $('actionsMetric').textContent = number(data.four_scale_metrics.page_actions);
@@ -76,7 +77,7 @@ function renderOverview(data) {
   const runs = $('runList'); clear(runs);
   for (const run of data.recent_runs || []) {
     const node = text('div', '', 'run-item');
-    node.append(text('strong', run.run_id), text('small', `${number(run.actions)} actions · ${dateTime(run.ended_at)} · blocked ${number(run.blocked)}`));
+    node.append(text('strong', run.run_id), text('small', `${number(run.actions)} actions · ${dateTime(run.ended_at)} · blocked ${number(run.blocked)} · partial ${number(run.partial)}`));
     node.tabIndex = 0; node.addEventListener('click', () => selectRun(run.run_id));
     runs.append(node);
   }
@@ -85,13 +86,13 @@ function renderOverview(data) {
 
 function renderRun(data) {
   state.selectedRun = data.run_id;
-  $('runSummary').textContent = `${data.run_id} · ${number(data.items.length)}项（evidence ${number(data.recorded_actions)}，历史推断 ${number(data.inferred_actions)}）· ${dateTime(data.started_at)} → ${dateTime(data.ended_at)} · HTTP ${trafficBytes(data.traffic?.http_compressed_response)} · Firefox主文档 ${trafficBytes(data.traffic?.firefox_main_document)} · Firefox子资源 ${trafficBytes(data.traffic?.firefox_subresources)}`;
-  $('runWarning').textContent = data.inferred_actions ? '⚠ 历史网络失败没有run evidence；黄色归属为按本run时间窗口推断。新运行已永久修复。' : '全部结果均有不可变run evidence。';
+  $('runSummary').textContent = `${data.run_id} · ${number(data.items.length)}项（evidence ${number(data.recorded_actions)}，历史推断 ${number(data.inferred_actions)}）· context full ${number(data.context_quality_counts?.full)} / partial ${number(data.context_quality_counts?.partial)} / invalid ${number(data.context_quality_counts?.invalid)} · ${dateTime(data.started_at)} → ${dateTime(data.ended_at)} · HTTP ${trafficBytes(data.traffic?.http_compressed_response)} · Firefox主文档 ${trafficBytes(data.traffic?.firefox_main_document)} · Firefox子资源 ${trafficBytes(data.traffic?.firefox_subresources)}`;
+  $('runWarning').textContent = data.context_quality_counts?.partial ? '⚠ 本run含ZIP未确认的partial商品；price、availability、buy_box/配送等位置敏感字段不可视为90001结果。' : data.inferred_actions ? '⚠ 历史网络失败没有run evidence；黄色归属为按本run时间窗口推断。新运行已永久修复。' : '全部结果均有不可变run evidence。';
   const body = $('runRows'); clear(body);
   for (const item of data.items || []) {
     const row = document.createElement('tr'); row.dataset.asin = item.asin;
     row.append(taskCell(item.asin, 'asin'));
-    const outcome = document.createElement('td'); outcome.append(text('span', item.outcome, `status-badge ${item.outcome}`)); row.append(outcome);
+    const outcome = document.createElement('td'); const outcomeLabel = item.context_quality === 'partial' && item.outcome === 'completed' ? 'completed · partial' : item.outcome; outcome.append(text('span', outcomeLabel, `status-badge ${item.context_quality === 'partial' ? 'partial' : item.outcome}`)); row.append(outcome);
     row.append(taskCell(item.title || '—', 'product-cell'), taskCell(item.source_type), taskCell(item.http_status));
     const runReason = item.error_code || item.block_reason || (item.attribution === 'evidence' ? '' : item.last_error) || '—';
     row.append(taskCell(runReason, 'product-cell'));
@@ -168,11 +169,12 @@ async function openDetail(asin) {
     const data = await request(`/api/items/${encodeURIComponent(asin)}`); clear(root);
     const task = detailSection('任务状态'); task.append(fieldGrid({ status: data.task.status, stage: data.task.task_stage, attempts: `${data.task.attempts}/${data.task.max_attempts}`, last_error: data.task.last_error, block_reason: data.task.block_reason, updated_at: dateTime(data.task.updated_at) })); root.append(task);
     const product = detailSection('商品快照');
+    const partialContext = (data.evidence || []).find((value) => value.context_json?.context_quality === 'partial')?.context_json; if (partialContext) product.append(text('p', `⚠ ZIP ${partialContext.expected_postal || '目标值'} 未确认（观测 ${partialContext.observed_postal || 'unknown'}）；${(partialContext.location_sensitive_fields_unverified || []).join(', ')} 不可视为目标ZIP结果。`, 'table-summary'));
     if (data.product) product.append(fieldGrid({ title: data.product.title, brand: data.product.brand, price: data.product.price, availability: data.product.availability, rating: data.product.rating, reviews: data.product.reported_review_count }), jsonBlock({ bullets: data.product.bullets, specs: data.product.specs, buy_box: data.product.buy_box }));
     else product.append(text('p', '尚无有效商品快照', 'muted')); root.append(product);
     const media = detailSection(`媒体 URL · ${(data.media || []).length}`); const mediaList = text('div', '', 'detail-list'); for (const value of data.media || []) mediaList.append(linkItem(value.display_url || value.asset_url || value.thumbnail_url, `${value.placement || 'media'} · ${value.entry_type || ''}`)); media.append(mediaList); root.append(media);
     const topReviews = detailSection(`商品页 Top Reviews · ${(data.top_reviews || []).length}`); for (const review of data.top_reviews || []) { const item = text('div', '', 'detail-item'); item.append(text('strong', review.title || review.rating || 'Review'), text('p', review.body || review.text || JSON.stringify(review))); topReviews.append(item); } if (!(data.top_reviews || []).length) topReviews.append(text('p', '无商品页评论摘要', 'muted')); root.append(topReviews);
-    const evidence = detailSection(`Evidence · ${(data.evidence || []).length}`); for (const value of data.evidence || []) { const traffic = value.context_json?.traffic || {}; const bridge = value.context_json?.cookie_bridge || {}; evidence.append(fieldGrid({ source: value.source_type, fallback_reason: value.context_json?.fallback_reason, fallback_reasons: (value.context_json?.fallback_reasons || []).join(', '), cookie_bridge: bridge.status, cookie_bridge_error: bridge.error_code, http: value.http_status, error: value.error_code, block: value.block_reason, retrieved: dateTime(value.retrieved_at), raw_html_path: value.raw_html_path, http_compressed_bytes: traffic.http_compressed_response_bytes, firefox_main_bytes: traffic.firefox_main_document_bytes ?? 'unknown', firefox_subresource_bytes: traffic.firefox_subresource_bytes ?? 'unknown' })); } root.append(evidence);
+    const evidence = detailSection(`Evidence · ${(data.evidence || []).length}`); for (const value of data.evidence || []) { const traffic = value.context_json?.traffic || {}; const bridge = value.context_json?.cookie_bridge || {}; evidence.append(fieldGrid({ source: value.source_type, context_quality: value.context_json?.context_quality, postal_confirmed: value.context_json?.postal_confirmed, expected_postal: value.context_json?.expected_postal, observed_postal: value.context_json?.observed_postal, location_sensitive_fields_unverified: (value.context_json?.location_sensitive_fields_unverified || []).join(', '), fallback_reason: value.context_json?.fallback_reason, fallback_reasons: (value.context_json?.fallback_reasons || []).join(', '), cookie_bridge: bridge.status, cookie_bridge_error: bridge.error_code, http: value.http_status, error: value.error_code, block: value.block_reason, retrieved: dateTime(value.retrieved_at), raw_html_path: value.raw_html_path, http_compressed_bytes: traffic.http_compressed_response_bytes, firefox_main_bytes: traffic.firefox_main_document_bytes ?? 'unknown', firefox_subresource_bytes: traffic.firefox_subresource_bytes ?? 'unknown' })); } root.append(evidence);
     const content = detailSection(`内容模块 · ${(data.content_modules || []).length}`); content.append(jsonBlock(data.content_modules || [])); root.append(content);
     const reviews = detailSection('独立评论状态'); reviews.append(jsonBlock({ summary: data.review_summary, records: data.reviews || [] })); root.append(reviews);
   } catch (error) { clear(root); root.append(text('p', `详情读取失败：${error.message}`, 'error-banner')); }

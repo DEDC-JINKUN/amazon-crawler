@@ -43,6 +43,24 @@ def _json_default(value: Any) -> str:
     return str(value)
 
 
+def _context_value(row: dict[str, Any]) -> dict[str, Any]:
+    context = row.get("context_json") or {}
+    if isinstance(context, str):
+        try:
+            context = json.loads(context)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+    return context if isinstance(context, dict) else {}
+
+
+def summarize_context_quality(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {"full": 0, "partial": 0, "invalid": 0, "unknown": 0}
+    for row in rows:
+        quality = str(_context_value(row).get("context_quality") or "unknown")
+        counts[quality if quality in counts else "unknown"] += 1
+    return counts
+
+
 def summarize_traffic(rows: list[dict[str, Any]]) -> dict[str, dict[str, int | None]]:
     accumulators = {
         "http_compressed_response": {"known_bytes": 0, "known_records": 0, "unknown_records": 0},
@@ -50,12 +68,7 @@ def summarize_traffic(rows: list[dict[str, Any]]) -> dict[str, dict[str, int | N
         "firefox_subresources": {"known_bytes": 0, "known_records": 0, "unknown_records": 0},
     }
     for row in rows:
-        context = row.get("context_json") or {}
-        if isinstance(context, str):
-            try:
-                context = json.loads(context)
-            except (TypeError, ValueError, json.JSONDecodeError):
-                context = {}
+        context = _context_value(row)
         context_traffic = context.get("traffic") if isinstance(context, dict) else {}
         context_traffic = context_traffic if isinstance(context_traffic, dict) else {}
         source = str(row.get("source_type") or "unknown")
@@ -175,7 +188,9 @@ class PostgresConsoleRepository:
                 "SELECT source_type,transfer_bytes,context_json FROM amazon_us.collection_evidence WHERE tenant_id=%s",
                 params,
             )
-            traffic_summary = summarize_traffic([dict(row) for row in cursor.fetchall()])
+            evidence_rows = [dict(row) for row in cursor.fetchall()]
+            traffic_summary = summarize_traffic(evidence_rows)
+            context_quality_counts = summarize_context_quality(evidence_rows)
             table_counts: dict[str, int] = {}
             for name, table in (
                 ("products", "product_latest"),
@@ -194,7 +209,8 @@ class PostgresConsoleRepository:
             running = [dict(row) for row in cursor.fetchall()]
             cursor.execute(
                 "SELECT run_id,COUNT(*) AS actions,MIN(retrieved_at) AS started_at,MAX(retrieved_at) AS ended_at,"
-                "COUNT(*) FILTER (WHERE block_reason IS NOT NULL) AS blocked "
+                "COUNT(*) FILTER (WHERE block_reason IS NOT NULL) AS blocked,"
+                "COUNT(*) FILTER (WHERE context_json->>'context_quality'='partial') AS partial "
                 "FROM amazon_us.collection_evidence WHERE tenant_id=%s GROUP BY run_id "
                 "ORDER BY MAX(retrieved_at) DESC LIMIT 10",
                 params,
@@ -214,6 +230,7 @@ class PostgresConsoleRepository:
             "status_counts": status_counts,
             "stage_counts": stage_counts,
             "source_counts": source_counts,
+            "context_quality_counts": context_quality_counts,
             "error_counts": error_counts,
             "block_counts": block_counts,
             "progress": {
@@ -351,7 +368,8 @@ class PostgresConsoleRepository:
             items: list[dict[str, Any]] = []
             for row in evidence_rows:
                 outcome = "blocked" if row.get("block_reason") else "failed" if row.get("error_code") else "completed"
-                items.append({**row, "outcome": outcome, "attribution": "evidence"})
+                quality = str(_context_value(row).get("context_quality") or "unknown")
+                items.append({**row, "context_quality": quality, "outcome": outcome, "attribution": "evidence"})
             cursor.execute(
                 """
                 SELECT s.asin,s.subject_type,s.url,s.status AS current_status,s.task_stage,s.last_error,s.block_reason,
@@ -372,6 +390,7 @@ class PostgresConsoleRepository:
                 items.append({**row, "outcome": outcome, "attribution": "time_window_inference"})
         items.sort(key=lambda item: (item.get("retrieved_at") or item.get("updated_at"), item["asin"]))
         traffic_summary = summarize_traffic(evidence_rows)
+        context_quality_counts = summarize_context_quality(evidence_rows)
         return {
             "schema_version": "amazon-us-console-v1",
             "tenant_id": self.tenant_id,
@@ -382,6 +401,7 @@ class PostgresConsoleRepository:
             "inferred_actions": sum(1 for item in items if item["attribution"] == "time_window_inference"),
             "known_transfer_bytes": sum(int(item.get("transfer_bytes") or 0) for item in evidence_rows),
             "traffic": traffic_summary,
+            "context_quality_counts": context_quality_counts,
             "items": items,
             "warning": "time_window_inference is legacy fallback; new network failures write run evidence",
         }

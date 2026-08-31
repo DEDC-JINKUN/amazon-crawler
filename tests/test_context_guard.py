@@ -33,6 +33,14 @@ class ContextGuardTests(unittest.TestCase):
         )
         self.assertEqual(errors, ["delivery_postal_mismatch"])
 
+    def test_rejects_explicit_foreign_country_in_delivery_header_variant(self):
+        guard = load("context_guard")
+        errors = guard.validate_context(
+            {"price": "$19.99", "delivery_context": "Delivering to Hong Kong"},
+            {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
+        )
+        self.assertEqual(errors, ["delivery_country_mismatch"])
+
         self.assertEqual(
             guard.validate_context(
                 {"price": "$23.99", "buy_box": {"delivery": "Delivering to Los Angeles 90001"}},

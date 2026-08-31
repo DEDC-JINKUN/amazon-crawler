@@ -75,6 +75,7 @@ class BatchCheckpointTests(unittest.TestCase):
             def fetch_browser(self, url):
                 self.calls.append(("browser", url))
                 self.source_type = "selenium_dom"
+                self.last_browser_context_confirmed = True
                 return worker_html, 200
 
         with tempfile.TemporaryDirectory() as directory:
@@ -99,6 +100,7 @@ class BatchCheckpointTests(unittest.TestCase):
 
             def fetch_browser(self, url):
                 self.source_type = "selenium_dom"
+                self.last_browser_context_confirmed = True
                 return worker_html, 200
 
         with tempfile.TemporaryDirectory() as directory:
