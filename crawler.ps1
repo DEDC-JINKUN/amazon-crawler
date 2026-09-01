@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('probe', 'run', 'status', 'console', 'stop', 'help')]
+    [ValidateSet('probe', 'run', 'reviews', 'status', 'console', 'stop', 'help')]
     [string]$Command = 'help',
     [int]$Limit = 0,
     [string]$TenantId = 'real_batch_20260828_500_04',
@@ -19,6 +19,8 @@ $workerScript = Join-Path $projectRoot 'scripts\amazon_us_worker.py'
 $processHostScript = Join-Path $projectRoot 'scripts\crawler_process_host.py'
 $preflightScript = Join-Path $projectRoot 'scripts\preflight.py'
 $consoleScript = Join-Path $projectRoot 'scripts\collection_console.py'
+$runLedgerScript = Join-Path $projectRoot 'scripts\postgres_run_ledger.py'
+$identityBackfillScript = Join-Path $projectRoot 'scripts\backfill_identity_evidence.py'
 $consoleUrl = "http://127.0.0.1:${Port}"
 $script:promptedForPassword = $false
 $script:setDefaultDsn = $false
@@ -160,38 +162,62 @@ function Start-ManagedHost([string]$RequestPath, [string]$Stdout, [string]$Stder
         -WindowStyle Hidden -PassThru -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr
 }
 
-function Get-ConsoleReady([string]$ExpectedRawHtml, [string]$ConsoleLock) {
+function Get-ConsoleReady([string]$ConsoleLock) {
     $lock = Read-Lock $ConsoleLock
     if ($null -eq $lock -or $null -eq (Get-VerifiedProcess $lock)) { return $null }
     $fingerprint = Get-ConsoleFingerprint
     if ([string]$lock.runtime_fingerprint -ne $fingerprint) { return $null }
-    if ([string]$lock.tenant_id -ne $TenantId) { return $null }
     try {
         $ready = Invoke-RestMethod -Uri "${consoleUrl}/readyz" -TimeoutSec 2
-        if (-not $ready.ok -or $ready.tenant_id -ne $TenantId) { return $null }
-        $expected = (Resolve-Path -LiteralPath $ExpectedRawHtml).Path
-        if ([string]$ready.raw_html_dir -ne $expected) { return $null }
-        if ([string]$lock.raw_html_dir -ne $expected) { return $null }
+        if (-not $ready.ok) { return $null }
         if ([string]$ready.runtime_fingerprint -ne $fingerprint) { return $null }
         return $ready
     }
     catch { return $null }
 }
 
-function Ensure-Console([string]$ResolvedOutput, [string]$ConsoleLock) {
-    $rawHtml = Join-Path $ResolvedOutput 'raw_html'
-    if (-not (Test-Path -LiteralPath $rawHtml)) { New-Item -ItemType Directory -Path $rawHtml | Out-Null }
+function Invoke-RunLedger([string[]]$Arguments) {
+    & $python $runLedgerScript @Arguments
+    if ($LASTEXITCODE -ne 0) { throw "PostgreSQL run ledger failed with exit code $LASTEXITCODE" }
+}
+
+function Ensure-RunLedgerSchema { Invoke-RunLedger @('ensure-schema') }
+
+function Update-LegacyIdentityEvidence {
+    & $python $identityBackfillScript --dsn-env AMAZON_US_POSTGRES_DSN
+    if ($LASTEXITCODE -ne 0) { throw "Legacy identity evidence backfill failed with exit code $LASTEXITCODE" }
+}
+
+function Start-RunLedger([string]$RunId, [string]$Mode, [int]$ActionLimit, [string]$WorkerId) {
+    Invoke-RunLedger @(
+        'start','--tenant-id',$TenantId,'--run-id',$RunId,'--command',$Mode,
+        '--requested-actions',[string]$ActionLimit,'--worker-id',$WorkerId,'--controller-pid',[string]$PID
+    )
+}
+
+function Finish-RunLedger([string]$RunId, [string]$Status, [int]$ControllerExitCode, [object]$WorkerExitCode, [string]$Reason, [object]$Receipt) {
+    $arguments = [Collections.Generic.List[string]]::new()
+    foreach ($value in @('finish','--tenant-id',$TenantId,'--run-id',$RunId,'--status',$Status,
+            '--controller-exit-code',[string]$ControllerExitCode)) { $arguments.Add([string]$value) }
+    if ($null -ne $WorkerExitCode) { $arguments.Add('--worker-exit-code'); $arguments.Add([string]$WorkerExitCode) }
+    if ($Reason) { $arguments.Add('--termination-reason'); $arguments.Add($Reason) }
+    $nativeArguments = $arguments.ToArray()
+    $Receipt | ConvertTo-Json -Depth 12 -Compress | & $python $runLedgerScript @nativeArguments
+    if ($LASTEXITCODE -ne 0) { throw "PostgreSQL run ledger failed with exit code $LASTEXITCODE" }
+}
+
+function Ensure-Console([string]$ConsoleLock) {
     $liveLock = Remove-StaleLock $ConsoleLock
     if ($null -ne $liveLock) {
-        if ($null -ne (Get-ConsoleReady $rawHtml $ConsoleLock)) {
+        if ($null -ne (Get-ConsoleReady $ConsoleLock)) {
             Write-Host "Console ready: $consoleUrl"
             return
         }
         for ($index = 0; $index -lt 20; $index++) {
-            if ($null -ne (Get-ConsoleReady $rawHtml $ConsoleLock)) { Write-Host "Console ready: $consoleUrl"; return }
+            if ($null -ne (Get-ConsoleReady $ConsoleLock)) { Write-Host "Console ready: $consoleUrl"; return }
             Start-Sleep -Milliseconds 250
         }
-        Write-Host 'Managed Console identity does not match; restarting it for the requested tenant.'
+        Write-Host 'Managed Console runtime does not match; restarting it.'
         Stop-Locked $ConsoleLock 'Console'
     }
     try {
@@ -206,6 +232,8 @@ function Ensure-Console([string]$ResolvedOutput, [string]$ConsoleLock) {
         throw 'Port is occupied by an unmanaged or stale Console. Stop it outside this controller or choose another -Port.'
     }
     Ensure-Credentials
+    Ensure-RunLedgerSchema
+    Update-LegacyIdentityEvidence
     $controlDir = Split-Path -Parent $ConsoleLock
     $stdout = Join-Path $controlDir 'console.stdout.log'
     $stderr = Join-Path $controlDir 'console.stderr.log'
@@ -216,7 +244,7 @@ function Ensure-Console([string]$ResolvedOutput, [string]$ConsoleLock) {
     Write-JsonAtomic ([ordered]@{
         python = $python
         working_directory = $projectRoot
-        arguments = @($consoleScript,'--tenant-id',$TenantId,'--raw-html-dir',$rawHtml,'--host','127.0.0.1','--port',[string]$Port)
+        arguments = @($consoleScript,'--host','127.0.0.1','--port',[string]$Port)
         gate_path = $gatePath
         cancel_path = $cancelPath
     }) $requestPath
@@ -225,8 +253,6 @@ function Ensure-Console([string]$ResolvedOutput, [string]$ConsoleLock) {
         Write-JsonAtomic ([ordered]@{
             pid = $process.Id
             start_time = $process.StartTime.ToUniversalTime().ToString('o')
-            tenant_id = $TenantId
-            raw_html_dir = $rawHtml
             runtime_fingerprint = Get-ConsoleFingerprint
             url = $consoleUrl
             stdout = $stdout
@@ -234,7 +260,7 @@ function Ensure-Console([string]$ResolvedOutput, [string]$ConsoleLock) {
         }) $ConsoleLock
         New-Item -ItemType File -Path $gatePath | Out-Null
         for ($index = 0; $index -lt 30; $index++) {
-            if ($null -ne (Get-ConsoleReady $rawHtml $ConsoleLock)) {
+            if ($null -ne (Get-ConsoleReady $ConsoleLock)) {
                 Remove-Item -LiteralPath $requestPath,$gatePath,$cancelPath -Force -ErrorAction SilentlyContinue
                 Write-Host "Console started: $consoleUrl"
                 return
@@ -254,7 +280,7 @@ function Ensure-Console([string]$ResolvedOutput, [string]$ConsoleLock) {
     }
 }
 
-function Show-Status([string]$WorkerLock, [string]$ConsoleLock, [string]$ResolvedOutput) {
+function Show-Status([string]$WorkerLock, [string]$ConsoleLock) {
     $worker = Read-Lock $WorkerLock
     $workerProcess = Get-VerifiedProcess $worker
     if ($null -ne $workerProcess) {
@@ -263,21 +289,21 @@ function Show-Status([string]$WorkerLock, [string]$ConsoleLock, [string]$Resolve
     else { Write-Host 'Worker: stopped' }
     $console = Read-Lock $ConsoleLock
     $consoleProcess = Get-VerifiedProcess $console
-    $rawHtml = Join-Path $ResolvedOutput 'raw_html'
-    $ready = if (Test-Path -LiteralPath $rawHtml) { Get-ConsoleReady $rawHtml $ConsoleLock } else { $null }
-    Write-Host ("Console: " + ($(if ($null -ne $ready) { "ready $consoleUrl" } elseif ($null -ne $consoleProcess) { 'process alive but not ready' } else { 'stopped or wrong tenant' })))
+    $ready = Get-ConsoleReady $ConsoleLock
+    Write-Host ("Console: " + ($(if ($null -ne $ready) { "ready $consoleUrl" } elseif ($null -ne $consoleProcess) { 'process alive but not ready' } else { 'stopped' })))
     if ($null -eq $ready) { return 1 }
-    $overview = Invoke-RestMethod -Uri "${consoleUrl}/api/overview" -TimeoutSec 5
+    $tenantQuery = [Uri]::EscapeDataString($TenantId)
+    $overview = Invoke-RestMethod -Uri "${consoleUrl}/api/overview?tenant=${tenantQuery}" -TimeoutSec 5
     Write-Host "Tenant: $($overview.tenant_id)"
     Write-Host "Progress: $($overview.progress.touched)/$($overview.progress.total) ($($overview.progress.percent)%)"
     Write-Host "Products: $($overview.progress.successful_products)"
     Write-Host ('Status: ' + (($overview.status_counts.psobject.Properties | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ', '))
-    $runs = Invoke-RestMethod -Uri "${consoleUrl}/api/runs?limit=3" -TimeoutSec 5
+    $runs = Invoke-RestMethod -Uri "${consoleUrl}/api/runs?limit=3&tenant=${tenantQuery}" -TimeoutSec 5
     if ($runs.items.Count -gt 0) {
         Write-Host 'Recent runs:'
         foreach ($run in $runs.items) {
-            Write-Host ("  {0} actions={1} failed={2} blocked={3} ended={4}" -f `
-                $run.run_id,$run.evidence_actions,$run.failed,$run.blocked,$run.ended_at)
+            Write-Host ("  {0} requested/recorded={1}/{2} success={3} variant={4} failed={5} blocked={6} terminal={7}" -f `
+                $run.run_id,$run.requested_actions,$run.recorded_actions,$run.product_succeeded,$run.variant_redirect,$run.failed,$run.blocked,$run.terminal_status)
         }
     }
     return 0
@@ -304,7 +330,8 @@ function Get-FinalRunSnapshot([string]$RunId, [int]$ExpectedActions, [int]$MaxAt
     $latest = $null
     for ($index = 0; $index -lt $MaxAttempts; $index++) {
         try {
-            $latest = Invoke-RestMethod -Uri "${consoleUrl}/api/runs/${RunId}" -TimeoutSec 2
+            $tenantQuery = [Uri]::EscapeDataString($TenantId)
+            $latest = Invoke-RestMethod -Uri "${consoleUrl}/api/runs/${RunId}?tenant=${tenantQuery}" -TimeoutSec 2
             if ([int]$latest.recorded_actions -ge $ExpectedActions) {
                 return [pscustomobject][ordered]@{ run = $latest; verification_reason = $null }
             }
@@ -349,12 +376,31 @@ function Test-ProbeRunQuality([object]$Run, [int]$ExpectedActions) {
     }
 }
 
+function Test-RunCompleteness([object]$Run, [int]$ExpectedActions) {
+    $items = if ($null -eq $Run) { @() } else { @($Run.items) }
+    $recorded = if ($null -eq $Run -or $null -eq $Run.recorded_actions) { 0 } else { [int]$Run.recorded_actions }
+    $inferred = if ($null -eq $Run -or $null -eq $Run.inferred_actions) { 0 } else { [int]$Run.inferred_actions }
+    $nonEvidence = @($items | Where-Object { $_.attribution -ne 'evidence' }).Count
+    $reasons = [Collections.Generic.List[string]]::new()
+    if ($recorded -ne $ExpectedActions) { $reasons.Add("recorded_actions:$recorded/$ExpectedActions") }
+    if ($inferred -ne 0) { $reasons.Add("inferred_actions:$inferred") }
+    if ($nonEvidence -ne 0) { $reasons.Add("non_evidence_items:$nonEvidence") }
+    if ($items.Count -ne $recorded) { $reasons.Add("item_count:$($items.Count)/$recorded") }
+    return [pscustomobject][ordered]@{
+        completion_gate_ok = $reasons.Count -eq 0
+        completion_gate_reason = ($reasons -join ';')
+    }
+}
+
 function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest, [string]$ResolvedConfig, [string]$ResolvedOutput, [string]$WorkerLock, [string]$ConsoleLock) {
     if ($Mode -eq 'probe' -and ($ActionLimit -lt 1 -or $ActionLimit -gt 5)) {
         throw 'probe limit must be between 1 and 5'
     }
     if ($Mode -eq 'run' -and ($ActionLimit -lt 1 -or $ActionLimit -gt 500)) {
         throw 'run limit must be between 1 and 500'
+    }
+    if ($Mode -eq 'reviews' -and ($ActionLimit -lt 1 -or $ActionLimit -gt 3)) {
+        throw 'reviews limit must be between 1 and 3'
     }
     if ($ActionLimit -gt 100 -and -not $ConfirmLargeBatch) {
         throw 'Limits above 100 require -ConfirmLargeBatch'
@@ -375,12 +421,16 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
     $requestPath = Join-Path $runDir 'worker.request.json'
     $gatePath = Join-Path $runDir 'worker.start.gate'
     $cancelPath = Join-Path $runDir 'worker.cancel'
+    $heartbeatPath = Join-Path $runDir 'controller.heartbeat'
     $startedAt = [DateTime]::UtcNow
+    $controllerStartTime = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o')
+    $runLedgerStarted = $false
+    $runLedgerFinished = $false
     Reserve-Worker $WorkerLock $runId $Mode $ActionLimit
     $process = $null
     try {
         Ensure-Credentials
-        Ensure-Console $ResolvedOutput $ConsoleLock
+        Ensure-Console $ConsoleLock
         Write-Host "Preflight: tenant=$TenantId mode=$Mode limit=$ActionLimit"
         $preflightOutput = & $python $preflightScript --manifest $ResolvedManifest --config $ResolvedConfig `
             --backend postgres --dsn-env AMAZON_US_POSTGRES_DSN --require-live
@@ -388,13 +438,16 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
         $preflightOutput | Out-String | Set-Content -LiteralPath $preflightLog -Encoding UTF8
         $preflightOutput | ForEach-Object { Write-Host $_ }
         if ($preflightExit -ne 0) { throw "Preflight failed with exit code $preflightExit" }
+        Start-RunLedger $runId $Mode $ActionLimit $workerId
+        $runLedgerStarted = $true
+        $stageOnlyArgument = if ($Mode -eq 'reviews') { '--reviews-only' } else { '--product-only' }
         $workerArguments = @(
             $workerScript, '--config', $ResolvedConfig,
             '--backend', 'postgres', '--dsn-env', 'AMAZON_US_POSTGRES_DSN',
             '--tenant-id', $TenantId, '--subject-type', 'own',
             '--worker-id', $workerId, '--lease-seconds', '600',
             '--manifest', $ResolvedManifest, '--output-dir', $ResolvedOutput,
-            '--run-id', $runId, '--live', '--once', '--limit', [string]$ActionLimit, '--product-only'
+            '--run-id', $runId, '--live', '--once', '--limit', [string]$ActionLimit, $stageOnlyArgument
         )
         Write-JsonAtomic ([ordered]@{
             python = $python
@@ -402,7 +455,20 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             arguments = $workerArguments
             gate_path = $gatePath
             cancel_path = $cancelPath
+            owner_pid = $PID
+            owner_start_time = $controllerStartTime
+            owner_heartbeat_path = $heartbeatPath
+            owner_heartbeat_timeout_seconds = 15
+            lifecycle = [ordered]@{
+                dsn_env = 'AMAZON_US_POSTGRES_DSN'
+                tenant_id = $TenantId
+                run_id = $runId
+                command = $Mode
+                requested_actions = $ActionLimit
+                receipt_path = $receiptPath
+            }
         }) $requestPath
+        [IO.File]::WriteAllText($heartbeatPath, [DateTime]::UtcNow.ToString('o'))
         $process = Start-ManagedHost $requestPath $stdout $stderr
         Write-JsonAtomic ([ordered]@{
             pid = $process.Id
@@ -421,8 +487,10 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
         Write-Host "Console: $consoleUrl"
         Write-Host "Logs: $runDir"
         while (-not $process.HasExited) {
+            [IO.File]::WriteAllText($heartbeatPath, [DateTime]::UtcNow.ToString('o'))
             try {
-                $run = Invoke-RestMethod -Uri "${consoleUrl}/api/runs/${runId}" -TimeoutSec 2
+                $tenantQuery = [Uri]::EscapeDataString($TenantId)
+                $run = Invoke-RestMethod -Uri "${consoleUrl}/api/runs/${runId}?tenant=${tenantQuery}" -TimeoutSec 2
                 $completed = $run.items.Count
                 $failed = @($run.items | Where-Object { $_.outcome -eq 'failed' }).Count
                 $blocked = @($run.items | Where-Object { $_.outcome -eq 'blocked' }).Count
@@ -433,25 +501,34 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             $process.Refresh()
         }
         $workerExitCode = $process.ExitCode
-        $finalAttempts = if ($Mode -eq 'probe') { 20 } else { 1 }
+        $finalAttempts = 20
         $finalSnapshot = Get-FinalRunSnapshot $runId $ActionLimit $finalAttempts
         $quality = Test-ProbeRunQuality $finalSnapshot.run $ActionLimit
+        $completion = Test-RunCompleteness $finalSnapshot.run $ActionLimit
         $reasonParts = [Collections.Generic.List[string]]::new()
         if ($finalSnapshot.verification_reason) { $reasonParts.Add([string]$finalSnapshot.verification_reason) }
-        if ($quality.quality_gate_reason) { $reasonParts.Add([string]$quality.quality_gate_reason) }
+        if ($Mode -in @('probe', 'reviews')) {
+            if ($quality.quality_gate_reason) { $reasonParts.Add([string]$quality.quality_gate_reason) }
+        }
+        elseif ($completion.completion_gate_reason) { $reasonParts.Add([string]$completion.completion_gate_reason) }
         $runVerificationReason = $reasonParts -join ';'
-        $qualityGateOk = $null -eq $finalSnapshot.verification_reason -and [bool]$quality.quality_gate_ok
+        $completionGateOk = $null -eq $finalSnapshot.verification_reason -and [bool]$completion.completion_gate_ok
+        $qualityGateOk = $completionGateOk -and [bool]$quality.quality_gate_ok
         $controllerExitCode = $workerExitCode
         $outcome = if ($workerExitCode -eq 0) { 'completed' } elseif ($workerExitCode -eq 3) { 'blocked' } else { 'failed' }
-        if ($Mode -eq 'probe' -and ($workerExitCode -ne 0 -or -not $qualityGateOk)) {
+        if ($Mode -in @('probe', 'reviews') -and ($workerExitCode -ne 0 -or -not $qualityGateOk)) {
             $outcome = 'quality_failed'
+            $controllerExitCode = 4
+        }
+        elseif ($Mode -eq 'run' -and $workerExitCode -eq 0 -and -not $completionGateOk) {
+            $outcome = 'failed'
             $controllerExitCode = 4
         }
         $finishedAt = [DateTime]::UtcNow
         Write-Host ("Final: {0}/{1} completed={2} failed={3} blocked={4} inferred={5} quality_gate_ok={6}" -f $quality.recorded_actions,$ActionLimit,$quality.completed_actions,$quality.failed_actions,$quality.blocked_actions,$quality.inferred_actions,$qualityGateOk)
         if ($runVerificationReason) { Write-Host "Final verification: $runVerificationReason" }
         $receipt = [ordered]@{
-            schema_version = 'amazon-us-control-receipt-v2'
+            schema_version = 'amazon-us-control-receipt-v3'
             run_id = $runId
             worker_id = $workerId
             tenant_id = $TenantId
@@ -467,6 +544,7 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             inferred_actions = $quality.inferred_actions
             traffic = $quality.traffic
             quality_gate_ok = $qualityGateOk
+            completion_gate_ok = $completionGateOk
             run_verification_reason = $runVerificationReason
             started_at = $startedAt.ToString('o')
             finished_at = $finishedAt.ToString('o')
@@ -476,6 +554,8 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             preflight_log = $preflightLog
             console_url = $consoleUrl
         }
+        Finish-RunLedger $runId $outcome $controllerExitCode $workerExitCode $runVerificationReason $receipt
+        $runLedgerFinished = $true
         Write-JsonAtomic $receipt $receiptPath
         Write-Host "Worker finished: status=$outcome exit=$controllerExitCode worker_exit=$workerExitCode receipt=$receiptPath"
         if (Test-Path -LiteralPath $stdout) {
@@ -488,15 +568,21 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
         return $controllerExitCode
     }
     catch {
+        $caughtError = $_.Exception.Message
+        if ($null -ne $process -and -not $process.HasExited) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            try { $process.WaitForExit(5000) | Out-Null } catch { }
+            $process.Refresh()
+        }
         $finishedAt = [DateTime]::UtcNow
-        Write-JsonAtomic ([ordered]@{
-            schema_version = 'amazon-us-control-receipt-v2'
+        $failedReceipt = [ordered]@{
+            schema_version = 'amazon-us-control-receipt-v3'
             run_id = $runId
             worker_id = $workerId
             tenant_id = $TenantId
             command = $Mode
             requested_limit = $ActionLimit
-            status = 'failed_before_completion'
+            status = 'failed'
             exit_code = 2
             worker_exit_code = if ($null -ne $process -and $process.HasExited) { $process.ExitCode } else { $null }
             recorded_actions = 0
@@ -507,7 +593,8 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             traffic = $null
             quality_gate_ok = $false
             run_verification_reason = 'controller_exception'
-            error = $_.Exception.Message
+            termination_reason = 'controller_exception'
+            error = $caughtError
             started_at = $startedAt.ToString('o')
             finished_at = $finishedAt.ToString('o')
             elapsed_seconds = [Math]::Round(($finishedAt - $startedAt).TotalSeconds, 2)
@@ -515,7 +602,12 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             stderr_log = $stderr
             preflight_log = $preflightLog
             console_url = $consoleUrl
-        }) $receiptPath
+        }
+        if ($runLedgerStarted -and -not $runLedgerFinished) {
+            Finish-RunLedger $runId 'failed' 2 $failedReceipt.worker_exit_code 'controller_exception' $failedReceipt
+            $runLedgerFinished = $true
+        }
+        Write-JsonAtomic $failedReceipt $receiptPath
         throw
     }
     finally {
@@ -525,7 +617,7 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             Remove-Item -LiteralPath $WorkerLock -Force -ErrorAction SilentlyContinue
         }
         if (-not $processStillRunning) {
-            Remove-Item -LiteralPath $requestPath,$gatePath,$cancelPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $requestPath,$gatePath,$cancelPath,$heartbeatPath -Force -ErrorAction SilentlyContinue
         }
     }
     }
@@ -569,12 +661,13 @@ Amazon crawler control
 
   .\crawler.ps1 probe
   .\crawler.ps1 run -Limit 10
+  .\crawler.ps1 reviews -Limit 3
   .\crawler.ps1 status
   .\crawler.ps1 console
   .\crawler.ps1 stop
   .\crawler.ps1 stop -All
 
-probe defaults to 3 product actions. run defaults to 10.
+probe defaults to 3 product actions. run defaults to 10. reviews defaults to 3 review actions.
 Limits above 100 require -ConfirmLargeBatch.
 Blocked tasks are never requeued automatically.
 '@
@@ -586,12 +679,20 @@ try {
         Show-Help
         exit 0
     }
-    $resolvedOutput = Resolve-ProjectPath $OutputDir
-    $controlDir = Join-Path $resolvedOutput 'control'
-    New-Item -ItemType Directory -Path $controlDir -Force | Out-Null
-    $workerLock = Join-Path $controlDir '.worker.lock.json'
-    $consoleLock = Join-Path $controlDir '.console.lock.json'
-    switch ($Command) {
+    $consoleControlDir = Join-Path $projectRoot 'data\console_control'
+    New-Item -ItemType Directory -Path $consoleControlDir -Force | Out-Null
+    $consoleLock = Join-Path $consoleControlDir '.console.lock.json'
+    if ($Command -eq 'console') {
+        if (-not (Test-Path -LiteralPath $python)) { throw 'Run setup_windows.bat first.' }
+        Ensure-Console $consoleLock
+        Write-Host ("Open: {0}/?tenant={1}" -f $consoleUrl,[Uri]::EscapeDataString($TenantId))
+    }
+    else {
+        $resolvedOutput = Resolve-ProjectPath $OutputDir
+        $workerControlDir = Join-Path $resolvedOutput 'control'
+        New-Item -ItemType Directory -Path $workerControlDir -Force | Out-Null
+        $workerLock = Join-Path $workerControlDir '.worker.lock.json'
+        switch ($Command) {
         'probe' {
             if (-not (Test-Path -LiteralPath $python)) { throw 'Run setup_windows.bat first.' }
             $resolvedManifest = Resolve-ProjectPath $ManifestPath
@@ -606,12 +707,14 @@ try {
             $actualLimit = if ($Limit -gt 0) { $Limit } else { 10 }
             $exitCode = Start-Crawl 'run' $actualLimit $resolvedManifest $resolvedConfig $resolvedOutput $workerLock $consoleLock
         }
-        'status' { $exitCode = Show-Status $workerLock $consoleLock $resolvedOutput }
-        'console' {
+        'reviews' {
             if (-not (Test-Path -LiteralPath $python)) { throw 'Run setup_windows.bat first.' }
-            Ensure-Console $resolvedOutput $consoleLock
-            Write-Host "Open: $consoleUrl"
+            $resolvedManifest = Resolve-ProjectPath $ManifestPath
+            $resolvedConfig = Resolve-ProjectPath $ConfigPath
+            $actualLimit = if ($Limit -gt 0) { $Limit } else { 3 }
+            $exitCode = Start-Crawl 'reviews' $actualLimit $resolvedManifest $resolvedConfig $resolvedOutput $workerLock $consoleLock
         }
+        'status' { $exitCode = Show-Status $workerLock $consoleLock }
         'stop' {
             Stop-Locked $workerLock 'Worker'
             if ($All) {
@@ -619,6 +722,7 @@ try {
                 Report-UnmanagedConsoleListener $consoleLock
             }
         }
+    }
     }
 }
 catch {

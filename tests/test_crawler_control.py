@@ -1,6 +1,11 @@
 import json
+import importlib.util
+import os
 import shutil
 import subprocess
+import sys
+import tempfile
+import time
 from pathlib import Path
 
 
@@ -9,14 +14,29 @@ SCRIPT = ROOT / "crawler.ps1"
 HOST = ROOT / "scripts" / "crawler_process_host.py"
 
 
+def load_host():
+    spec = importlib.util.spec_from_file_location("crawler_process_host_test", HOST)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_control_script_exposes_small_safe_command_surface():
     text = SCRIPT.read_text(encoding="utf-8")
-    assert "ValidateSet('probe', 'run', 'status', 'console', 'stop', 'help')" in text
+    assert "ValidateSet('probe', 'run', 'reviews', 'status', 'console', 'stop', 'help')" in text
     assert "Read-Host" in text and "-AsSecureString" in text
     assert "--product-only" in text
+    assert "--reviews-only" in text
     assert "--run-id" in text
     assert "--probe-egress" not in text
     assert "include-blocked" not in text.lower()
+
+
+def test_reviews_command_is_bounded_and_selects_only_review_stage():
+    text = SCRIPT.read_text(encoding="utf-8")
+    assert "reviews limit must be between 1 and 3" in text
+    assert "if ($Mode -eq 'reviews') { '--reviews-only' } else { '--product-only' }" in text
 
 
 def test_control_script_has_locks_logs_receipts_and_safe_stop():
@@ -52,11 +72,20 @@ def test_control_script_has_locks_logs_receipts_and_safe_stop():
         "Final: {0}/{1}",
         "unmanaged listener remains",
         "Get-NetTCPConnection",
+        "postgres_run_ledger.py",
+        "backfill_identity_evidence.py",
+        "owner_pid",
+        "owner_start_time",
+        "amazon-us-control-receipt-v3",
     ):
         assert expected in text
     assert "PGPASSWORD" in text
     assert "Remove-Item Env:PGPASSWORD" in text
     assert "123456" not in text
+    normal_finish = text[text.index("$receipt = [ordered]@{"):text.index('Write-Host "Worker finished:')]
+    assert normal_finish.index("Finish-RunLedger") < normal_finish.index("Write-JsonAtomic $receipt")
+    progress_loop = text[text.index("while (-not $process.HasExited)"):text.index("$workerExitCode =")]
+    assert "?tenant=${tenantQuery}" in progress_loop
 
 
 def test_console_reuse_requires_verified_lock_and_matching_runtime_fingerprint():
@@ -70,6 +99,10 @@ def test_console_reuse_requires_verified_lock_and_matching_runtime_fingerprint()
     report = text[text.index("function Report-UnmanagedConsoleListener"):text.index("function Show-Help")]
     assert "Get-NetTCPConnection" in report
     assert "Stop-Process" not in report
+    assert "raw_html_dir" not in ready
+    assert "ready.tenant_id" not in ready
+    assert "arguments = @($consoleScript,'--host','127.0.0.1'" in ensure
+    assert "data\\console_control" in text
 
 
 def test_probe_quality_function_requires_complete_successful_evidence():
@@ -114,6 +147,27 @@ $partial = Test-ProbeRunQuality ([pscustomobject]@{{recorded_actions=2;inferred_
     assert payload["bad"]["failed_actions"] == 3
     assert payload["partial"]["quality_gate_ok"] is False
     assert "recorded_actions" in payload["partial"]["quality_gate_reason"]
+
+
+def test_normal_run_completeness_requires_requested_evidence_but_allows_terminal_variants():
+    powershell = shutil.which("powershell") or shutil.which("powershell.exe")
+    assert powershell is not None
+    script_path = str(SCRIPT).replace("'", "''")
+    command = rf"""
+$tokens = $null; $errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile('{script_path}', [ref]$tokens, [ref]$errors)
+$fn = $ast.FindAll({{ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-RunCompleteness' }}, $true) | Select-Object -First 1
+Invoke-Expression $fn.Extent.Text
+$short = Test-RunCompleteness ([pscustomobject]@{{recorded_actions=3;inferred_actions=0;items=@([pscustomobject]@{{attribution='evidence'}},[pscustomobject]@{{attribution='evidence'}},[pscustomobject]@{{attribution='evidence'}})}}) 10
+$completeWithVariants = Test-RunCompleteness ([pscustomobject]@{{recorded_actions=2;inferred_actions=0;items=@([pscustomobject]@{{attribution='evidence';outcome='completed'}},[pscustomobject]@{{attribution='evidence';outcome='variant_redirect'}})}}) 2
+[ordered]@{{short=$short;complete=$completeWithVariants}} | ConvertTo-Json -Depth 5 -Compress
+"""
+    result = subprocess.run([powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command], cwd=ROOT, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr or result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["short"]["completion_gate_ok"] is False
+    assert "recorded_actions:3/10" in payload["short"]["completion_gate_reason"]
+    assert payload["complete"]["completion_gate_ok"] is True
 
 
 def test_verified_process_accepts_json_datetime_and_iso_but_rejects_unsafe_locks():
@@ -212,3 +266,152 @@ def test_worker_host_waits_for_registration_gate_and_uses_kill_on_close_job():
     assert "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE" in text
     assert "AssignProcessToJobObject" in text
     assert "return process.wait()" in text
+    assert text.index("open_owner_monitor(") < text.index("wait_for_gate(gate, cancel, owner_monitor=owner_monitor)")
+
+
+def test_managed_host_terminates_worker_when_controller_process_exits():
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        gate = root / "gate"
+        cancel = root / "cancel"
+        heartbeat = root / "heartbeat"
+        child_pid = root / "child.pid"
+        owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            if os.name == "nt":
+                owner_started = subprocess.check_output(
+                    ["powershell", "-NoProfile", "-Command", f"(Get-Process -Id {owner.pid}).StartTime.ToUniversalTime().ToString('o')"],
+                    text=True,
+                ).strip()
+            else:
+                owner_started = ""
+            child_code = (
+                "import os,pathlib,time; "
+                f"pathlib.Path(r'{child_pid}').write_text(str(os.getpid())); "
+                f"p=pathlib.Path(r'{heartbeat}'); "
+                "\nwhile True: p.write_text(str(time.time())); time.sleep(.05)"
+            )
+            request = root / "request.json"
+            request.write_text(json.dumps({
+                "python": sys.executable,
+                "working_directory": str(ROOT),
+                "arguments": ["-c", child_code],
+                "gate_path": str(gate),
+                "cancel_path": str(cancel),
+                "owner_pid": owner.pid,
+                "owner_start_time": owner_started,
+            }), encoding="utf-8")
+            host = subprocess.Popen([sys.executable, str(HOST), "--request", str(request)])
+            gate.touch()
+            deadline = time.time() + 5
+            while time.time() < deadline and not heartbeat.exists():
+                time.sleep(.05)
+            assert heartbeat.exists(), "controlled worker never started"
+            owner.terminate()
+            owner.wait(timeout=5)
+            assert host.wait(timeout=8) != 0
+            before = heartbeat.stat().st_mtime_ns
+            time.sleep(.3)
+            assert heartbeat.stat().st_mtime_ns == before
+            pid = int(child_pid.read_text())
+            if os.name == "nt":
+                probe = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", f"if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 1 }}"],
+                    timeout=5,
+                )
+                assert probe.returncode == 0
+        finally:
+            if owner.poll() is None:
+                owner.kill()
+                owner.wait(timeout=5)
+
+
+def test_owner_loss_finalizes_database_receipt_after_worker_termination():
+    module = load_host()
+    events = []
+
+    class Process:
+        returncode = None
+        def poll(self): return None if not events else -15
+        def terminate(self): events.append("terminated")
+        def wait(self, timeout=None): self.returncode = -15; return -15
+
+    module.owner_is_alive = lambda _monitor: False
+    module.finalize_interrupted_run = lambda lifecycle, worker_exit, python: events.append(
+        (lifecycle["run_id"], worker_exit)
+    )
+
+    assert module.wait_for_process(Process(), object(), {"run_id": "run-owner-loss"}, sys.executable) == 130
+    assert events == ["terminated", ("run-owner-loss", -15)]
+
+
+def test_managed_host_stops_worker_when_controller_heartbeat_stales_but_shell_lives():
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        gate = root / "gate"
+        heartbeat = root / "controller.heartbeat"
+        worker_heartbeat = root / "worker.heartbeat"
+        owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        host = None
+        try:
+            if os.name == "nt":
+                owner_started = subprocess.check_output(
+                    ["powershell", "-NoProfile", "-Command", f"(Get-Process -Id {owner.pid}).StartTime.ToUniversalTime().ToString('o')"],
+                    text=True,
+                ).strip()
+            else:
+                owner_started = "owner"
+            heartbeat.touch()
+            child_code = f"import pathlib,time; p=pathlib.Path(r'{worker_heartbeat}');\nwhile True: p.write_text(str(time.time())); time.sleep(.05)"
+            request = root / "request.json"
+            request.write_text(json.dumps({
+                "python": sys.executable, "working_directory": str(ROOT), "arguments": ["-c", child_code],
+                "gate_path": str(gate), "cancel_path": str(root / "cancel"),
+                "owner_pid": owner.pid, "owner_start_time": owner_started,
+                "owner_heartbeat_path": str(heartbeat), "owner_heartbeat_timeout_seconds": .5,
+            }), encoding="utf-8")
+            host = subprocess.Popen([sys.executable, str(HOST), "--request", str(request)])
+            gate.touch()
+            deadline = time.time() + 5
+            while time.time() < deadline and not worker_heartbeat.exists(): time.sleep(.05)
+            assert worker_heartbeat.exists()
+            assert host.wait(timeout=8) == 130
+            assert owner.poll() is None, "the shell/controller process should still be alive in this reproduction"
+            before = worker_heartbeat.stat().st_mtime_ns
+            time.sleep(.3)
+            assert worker_heartbeat.stat().st_mtime_ns == before
+        finally:
+            if host is not None and host.poll() is None:
+                host.kill(); host.wait(timeout=5)
+            if owner.poll() is None:
+                owner.kill(); owner.wait(timeout=5)
+
+
+def test_managed_host_aborts_before_gate_when_controller_heartbeat_stales():
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        heartbeat = root / "controller.heartbeat"
+        owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        host = None
+        try:
+            owner_started = subprocess.check_output(
+                ["powershell", "-NoProfile", "-Command", f"(Get-Process -Id {owner.pid}).StartTime.ToUniversalTime().ToString('o')"],
+                text=True,
+            ).strip() if os.name == "nt" else "owner"
+            heartbeat.touch()
+            request = root / "request.json"
+            request.write_text(json.dumps({
+                "python": sys.executable, "working_directory": str(ROOT),
+                "arguments": ["-c", "raise SystemExit('must not start')"],
+                "gate_path": str(root / "never-created-gate"), "cancel_path": str(root / "cancel"),
+                "owner_pid": owner.pid, "owner_start_time": owner_started,
+                "owner_heartbeat_path": str(heartbeat), "owner_heartbeat_timeout_seconds": .4,
+            }), encoding="utf-8")
+            host = subprocess.Popen([sys.executable, str(HOST), "--request", str(request)])
+            assert host.wait(timeout=8) == 130
+            assert owner.poll() is None
+        finally:
+            if host is not None and host.poll() is None:
+                host.kill(); host.wait(timeout=5)
+            if owner.poll() is None:
+                owner.kill(); owner.wait(timeout=5)

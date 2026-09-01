@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import os
 from pathlib import Path
+import tempfile
 import uuid
 
 import pytest
@@ -33,9 +34,18 @@ def load_console():
     return module
 
 
+def load_script(name):
+    spec = importlib.util.spec_from_file_location(name, ROOT / "scripts" / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
 @pytest.mark.skipif(not DSN, reason="AMAZON_TEST_POSTGRES_DSN is not configured")
 def test_two_workers_claim_distinct_tasks_from_real_postgres():
     import psycopg
+    from psycopg.rows import dict_row
 
     storage = load_storage()
     tenant_id = f"test-{uuid.uuid4().hex}"
@@ -197,10 +207,63 @@ def test_two_workers_claim_distinct_tasks_from_real_postgres():
         assert run_detail["recorded_actions"] == 2
         assert run_detail["inferred_actions"] == 0
         assert {item["asin"] for item in run_detail["items"]} == {"B00RCPDCQU", "B00RCPDI50"}
+
+        ledger = load_script("postgres_run_ledger")
+        connect = lambda: psycopg.connect(DSN)
+        ledger.start_run(
+            connect, tenant_id=tenant_id, run_id="ledger-run", command="run", requested_actions=2,
+            worker_id="integration-worker", controller_pid=123,
+        )
+        ledger.finish_run(
+            connect, tenant_id=tenant_id, run_id="ledger-run", status="interrupted",
+            controller_exit_code=130, worker_exit_code=-15, termination_reason="controller_exited",
+            receipt={"status": "interrupted"},
+        )
+        ledger_detail = console.load_run("ledger-run")
+        assert ledger_detail["requested_actions"] == 2
+        assert ledger_detail["recorded_actions"] == 0
+        assert ledger_detail["terminal_status"] == "interrupted"
+
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            raw_path = Path(temporary) / "mismatch.html"
+            raw_path.write_text("""
+              <html><head><link rel='canonical' href='https://www.amazon.com/dp/B0B9ZFZZZZ'></head>
+              <body><input id='ASIN' value='B0B9ZFZZZZ'><span id='productTitle'>Sibling</span>
+              <script>var x={parentAsin:'B0PARENT01',landingAsin:'B0B9ZFZZZZ',
+              dimensionValuesDisplayData:{'B0B9ZFDZNJ':['A'],'B0B9ZFZZZZ':['B']}};</script></body></html>
+            """, encoding="utf-8")
+            with psycopg.connect(DSN) as connection:
+                connection.execute(
+                    "INSERT INTO amazon_us.collection_evidence"
+                    "(tenant_id,marketplace,asin,subject_type,run_id,url,error_code,raw_html_path,context_json) "
+                    "VALUES (%s,'US','B0B9ZFDZNJ','own','identity-backfill','https://www.amazon.com/dp/B0B9ZFDZNJ',"
+                    "'asin_mismatch',%s,'{}'::jsonb)",
+                    (tenant_id, str(raw_path)),
+                )
+                connection.commit()
+            backfill = load_script("backfill_identity_evidence")
+            result = backfill.backfill_identity_evidence(
+                lambda: psycopg.connect(DSN, row_factory=dict_row)
+            )
+            assert result["updated"] >= 1
+            with psycopg.connect(DSN) as connection:
+                identity = connection.execute(
+                    "SELECT context_json->'identity' FROM amazon_us.collection_evidence "
+                    "WHERE tenant_id=%s AND run_id='identity-backfill'",
+                    (tenant_id,),
+                ).fetchone()[0]
+            assert identity["requested_asin"] == "B0B9ZFDZNJ"
+            assert identity["observed_asin"] == "B0B9ZFZZZZ"
+
+        batches = load_console().PostgresConsoleRepository(DSN).list_tenants()
+        batch = next(item for item in batches if item["tenant_id"] == tenant_id)
+        assert batch["requested"] == 2
+        assert batch["recorded"] >= 2
+        assert batch["product_succeeded"] == 1
     finally:
         with psycopg.connect(DSN) as connection:
             for table in (
-                "state_history", "review_page_state", "refresh_request", "collection_evidence", "media_asset", "content_module",
+                "collection_run", "state_history", "review_page_state", "refresh_request", "collection_evidence", "media_asset", "content_module",
                 "review_summary", "review_record", "product_snapshot", "item_state", "asin_master",
             ):
                 connection.execute(f"DELETE FROM amazon_us.{table} WHERE tenant_id=%s", (tenant_id,))

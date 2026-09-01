@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import http.server
 import importlib.util
+import threading
 from pathlib import Path
 
 import pytest
@@ -110,3 +113,41 @@ def test_probe_rejects_embedded_credentials_and_partial_auth():
         module.probe("http://user:pass@127.0.0.1:8080", "https://example.test")
     with pytest.raises(ValueError, match="supplied together"):
         module.probe("http://127.0.0.1:8080", "https://example.test", username="u")
+    with pytest.raises(ValueError, match="authenticated proxy probes require an HTTPS target"):
+        module.probe("http://127.0.0.1:8080", "http://example.test", username="u", password="p")
+
+
+def test_probe_sends_basic_proxy_auth_only_to_https_connect_proxy():
+    module = load_module()
+    captured = {"authorization": None}
+
+    class ProxyHandler(http.server.BaseHTTPRequestHandler):
+        def do_CONNECT(self):
+            captured["authorization"] = self.headers.get("Proxy-Authorization")
+            self.send_response(502)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            return
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ProxyHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        result = module.probe(
+            f"http://127.0.0.1:{server.server_port}",
+            "https://example.test/robots.txt",
+            username="alice",
+            password="fake-secret",
+            timeout_seconds=2,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    expected = "Basic " + base64.b64encode(b"alice:fake-secret").decode("ascii")
+    assert captured["authorization"] == expected
+    assert result["ok"] is False
+    assert result["block_reason"] == "network_error"

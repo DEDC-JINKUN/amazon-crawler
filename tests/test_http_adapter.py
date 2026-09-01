@@ -506,19 +506,46 @@ class HttpAdapterTests(unittest.TestCase):
 
     def test_proxy_credentials_are_read_from_named_environment_variables(self):
         worker = load_worker()
+        opener = _Opener(_Response(b"<html><title>ok</title></html>"))
         with patch.dict(worker.os.environ, {"PROXY_USER": "alice", "PROXY_PASS": "pw"}, clear=False), \
              patch.object(worker.urllib.request, "ProxyHandler") as proxy_handler, \
-             patch.object(worker.urllib.request, "HTTPPasswordMgrWithDefaultRealm") as manager, \
-             patch.object(worker.urllib.request, "ProxyBasicAuthHandler") as auth_handler, \
-             patch.object(worker.urllib.request, "build_opener"):
-            worker.HttpFirstAdapter({**worker.DEFAULTS, "proxy_url": "http://127.0.0.1:8080", "proxy_username_env": "PROXY_USER", "proxy_password_env": "PROXY_PASS"})
-        manager.return_value.add_password.assert_called_once_with(None, "http://127.0.0.1:8080", "alice", "pw")
-        auth_handler.assert_called_once_with(manager.return_value)
+             patch.object(worker.urllib.request, "build_opener", return_value=opener) as build_opener:
+            adapter = worker.HttpFirstAdapter({**worker.DEFAULTS, "proxy_url": "http://127.0.0.1:8080", "proxy_username_env": "PROXY_USER", "proxy_password_env": "PROXY_PASS"})
+            adapter.fetch("https://www.amazon.com/dp/B00RCPDCQU")
+        proxy_handler.assert_called_once_with({"http": "http://127.0.0.1:8080", "https": "http://127.0.0.1:8080"})
+        self.assertTrue(any(isinstance(handler, worker.ProxyTunnelAuthHTTPSHandler) for handler in build_opener.call_args.args))
+        self.assertIsNone(opener.request.get_header("Proxy-authorization"))
+        adapter.close()
 
     def test_proxy_credentials_require_both_environment_names(self):
         worker = load_worker()
         with self.assertRaises(ValueError):
             worker.HttpFirstAdapter({**worker.DEFAULTS, "proxy_url": "http://127.0.0.1:8080", "proxy_username_env": "PROXY_USER"})
+
+    def test_http_first_rejects_proxy_url_with_embedded_credentials(self):
+        worker = load_worker()
+        with self.assertRaisesRegex(ValueError, "credentials must not be embedded"):
+            worker.HttpFirstAdapter({**worker.DEFAULTS, "proxy_url": "http://user:secret@127.0.0.1:8080"})
+
+    def test_authenticated_proxy_browser_fallback_fails_before_firefox_starts(self):
+        worker = load_worker()
+        with patch.dict(worker.os.environ, {"PROXY_USER": "alice", "PROXY_PASS": "pw"}, clear=False), \
+             patch.object(worker, "SeleniumFirefoxAdapter") as firefox:
+            adapter = worker.HttpFirstAdapter({
+                **worker.DEFAULTS,
+                "proxy_url": "http://127.0.0.1:8080",
+                "proxy_username_env": "PROXY_USER",
+                "proxy_password_env": "PROXY_PASS",
+            })
+            with self.assertRaisesRegex(worker.AdapterFetchError, "Firefox proxy authentication is unavailable"):
+                adapter.fetch_browser(
+                    "https://www.amazon.com/dp/B00RCPDCQU",
+                    fallback_reason=worker.FallbackReason.CONTEXT_MISMATCH,
+                    run_id="run-a",
+                    asin="B00RCPDCQU",
+                )
+        firefox.assert_not_called()
+        adapter.close()
 
 
 if __name__ == "__main__":

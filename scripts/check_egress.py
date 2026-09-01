@@ -5,12 +5,19 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
 from typing import Any
+
+try:
+    from proxy_tunnel_auth import ProxyTunnelAuthHTTPSHandler
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from proxy_tunnel_auth import ProxyTunnelAuthHTTPSHandler
 
 
 def _validate_proxy_url(value: str) -> str:
@@ -59,10 +66,10 @@ def probe(
     handlers: list[Any] = [urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})]
     if (username is None) != (password is None):
         raise ValueError("proxy username and password must be supplied together")
+    if username is not None and target.scheme != "https":
+        raise ValueError("authenticated proxy probes require an HTTPS target")
     if username is not None:
-        manager = urllib.request.HTTPPasswordMgrWithDefaultRealm()
-        manager.add_password(None, proxy_url, username, password)
-        handlers.append(urllib.request.ProxyBasicAuthHandler(manager))
+        handlers.append(ProxyTunnelAuthHTTPSHandler(username, password or ""))
     opener = (opener_factory or urllib.request.build_opener)(*handlers)
     request = urllib.request.Request(
         target_url,

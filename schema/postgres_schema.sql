@@ -127,6 +127,27 @@ CREATE TABLE IF NOT EXISTS collection_evidence (
 ALTER TABLE collection_evidence ADD COLUMN IF NOT EXISTS context_json jsonb NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE collection_evidence ADD COLUMN IF NOT EXISTS transfer_bytes bigint;
 
+CREATE TABLE IF NOT EXISTS collection_run (
+    tenant_id text NOT NULL,
+    run_id text NOT NULL,
+    command text NOT NULL,
+    requested_actions integer NOT NULL CHECK (requested_actions > 0),
+    status text NOT NULL CHECK (status IN ('starting','running','completed','blocked','quality_failed','failed','interrupted')),
+    worker_id text,
+    controller_pid integer,
+    controller_exit_code integer,
+    worker_exit_code integer,
+    termination_reason text,
+    started_at timestamptz NOT NULL DEFAULT now(),
+    finished_at timestamptz,
+    receipt_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, run_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_collection_run_tenant_started
+    ON collection_run (tenant_id, started_at DESC);
+
 CREATE TABLE IF NOT EXISTS product_snapshot (
     snapshot_id bigserial PRIMARY KEY,
     tenant_id text NOT NULL DEFAULT 'default',
@@ -234,6 +255,8 @@ CREATE INDEX IF NOT EXISTS idx_item_state_status ON item_state (tenant_id, marke
 CREATE INDEX IF NOT EXISTS idx_item_state_lease_expiry ON item_state (tenant_id, marketplace, subject_type, lease_expires_at)
     WHERE lease_expires_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_evidence_asin_time ON collection_evidence (tenant_id, marketplace, asin, retrieved_at DESC);
+CREATE INDEX IF NOT EXISTS idx_evidence_tenant_identity_latest
+    ON collection_evidence (tenant_id, marketplace, asin, subject_type, id DESC);
 CREATE INDEX IF NOT EXISTS idx_snapshot_latest ON product_snapshot (tenant_id, marketplace, asin, subject_type, collected_at DESC);
 CREATE INDEX IF NOT EXISTS idx_history_asin_time ON state_history (tenant_id, marketplace, asin, changed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_review_page_state_asin ON review_page_state (tenant_id, marketplace, asin, subject_type, page);

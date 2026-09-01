@@ -144,6 +144,67 @@ class ProductOnlyStorage(Storage):
         return super().claim_task(worker_id, lease_seconds)
 
 
+class ReviewsOnlyStorage(ReviewStorage):
+    def claim_refresh_task(self, worker_id, lease_seconds=None):
+        raise AssertionError("reviews-only batches must not claim refresh tasks")
+
+    def claim_task(self, worker_id, lease_seconds=None, task_stage=None):
+        assert task_stage == "reviews"
+        return super().claim_task(worker_id, lease_seconds)
+
+
+class MalformedReviewsOnlyStorage(Storage):
+    def __init__(self, *, task_stage, next_review_url):
+        super().__init__()
+        self.task_stage = task_stage
+        self.next_review_url = next_review_url
+
+    def claim_refresh_task(self, worker_id, lease_seconds=None):
+        raise AssertionError("reviews-only batches must not claim refresh tasks")
+
+    def claim_task(self, worker_id, lease_seconds=None, task_stage=None):
+        assert task_stage == "reviews"
+        self.claims += 1
+        if self.claims > 1:
+            return None
+        return {
+            "asin": "B00RCPDCQU", "marketplace": "US",
+            "url": "https://www.amazon.com/dp/B00RCPDCQU",
+            "status": "running", "task_stage": self.task_stage,
+            "next_review_page": 1, "next_review_url": self.next_review_url,
+            "lease_token": "token-1", "lease_owner": worker_id,
+            "reported_review_count": 1, "fetched_review_count": 0, "review_pages_fetched": 0,
+        }
+
+
+class NoFetchAdapter(Adapter):
+    def fetch(self, url):
+        raise AssertionError("malformed reviews-only tasks must fail before network fetch")
+
+
+class IdentityMismatchStorage(Storage):
+    def claim_task(self, worker_id, lease_seconds=None, task_stage=None):
+        self.claims += 1
+        if self.claims > 1:
+            return None
+        return {
+            "asin": "B0B9ZFDZNJ", "marketplace": "US",
+            "url": "https://www.amazon.com/dp/B0B9ZFDZNJ",
+            "status": "running", "task_stage": "product",
+            "lease_token": "token-1", "lease_owner": worker_id,
+        }
+
+
+class IdentityMismatchAdapter(Adapter):
+    def fetch(self, _url):
+        return """
+          <html><head><link rel='canonical' href='https://www.amazon.com/dp/B0B9ZFZZZZ'></head>
+          <body><input id='ASIN' value='B0B9ZFZZZZ'><span id='productTitle'>Sibling</span>
+          <script>var x={parentAsin:'B0PARENT01',landingAsin:'B0B9ZFZZZZ',
+          dimensionValuesDisplayData:{'B0B9ZFDZNJ':['A'],'B0B9ZFZZZZ':['B']}};</script></body></html>
+        """, 200
+
+
 class PostalFallbackAdapter(Adapter):
     def __init__(self):
         self.calls = []
@@ -266,9 +327,32 @@ def test_worker_parser_supports_product_only_batches():
     assert args.run_id == "run-control-1"
 
 
+def test_worker_parser_supports_reviews_only_batches():
+    worker = load_worker()
+    args = worker.build_parser().parse_args(["--reviews-only", "--run-id", "run-reviews-1"])
+
+    assert args.reviews_only is True
+    assert args.run_id == "run-reviews-1"
+
+
+def test_stage_only_flags_are_mutually_exclusive():
+    worker = load_worker()
+
+    with pytest.raises(SystemExit):
+        worker.build_parser().parse_args(["--product-only", "--reviews-only"])
+
+
 def test_product_only_rejects_legacy_sqlite_backend():
     worker = load_worker()
     args = worker.build_parser().parse_args(["--backend", "sqlite", "--product-only"])
+
+    with pytest.raises(ValueError, match="PostgreSQL"):
+        worker.validate_runtime_args(args)
+
+
+def test_reviews_only_rejects_legacy_sqlite_backend():
+    worker = load_worker()
+    args = worker.build_parser().parse_args(["--backend", "sqlite", "--reviews-only"])
 
     with pytest.raises(ValueError, match="PostgreSQL"):
         worker.validate_runtime_args(args)
@@ -292,6 +376,59 @@ def test_postgres_runner_product_only_claims_only_product_stage():
         storage, Adapter(), config, limit=1, worker_id="worker-a", product_only=True
     ) == 1
     assert storage.saved[0]["next_status"] == "succeeded"
+
+
+def test_postgres_runner_reviews_only_claims_only_review_stage():
+    worker = load_worker()
+    storage = ReviewsOnlyStorage()
+    config = dict(worker.DEFAULTS)
+    config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}, "review_page_limit": 1})
+
+    assert worker.run_postgres_actions(
+        storage, ReviewAdapter(), config, limit=1, worker_id="worker-a", reviews_only=True
+    ) == 1
+    assert len(storage.saved) == 1
+    assert storage.saved[0]["reason"] == "reviews_exhausted"
+
+
+@pytest.mark.parametrize(
+    ("task_stage", "next_review_url"),
+    [("reviews", None), ("product", "https://www.amazon.com/product-reviews/B00RCPDCQU")],
+)
+def test_postgres_runner_reviews_only_fails_closed_on_malformed_task(task_stage, next_review_url):
+    worker = load_worker()
+    storage = MalformedReviewsOnlyStorage(task_stage=task_stage, next_review_url=next_review_url)
+    config = dict(worker.DEFAULTS)
+    config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}})
+
+    assert worker.run_postgres_actions(
+        storage, NoFetchAdapter(), config, limit=1, worker_id="worker-a", reviews_only=True
+    ) == 1
+    assert len(storage.saved) == 1
+    assert storage.saved[0]["reason"] == "invalid_review_task"
+    assert storage.saved[0]["evidence"]["error_code"] == "invalid_review_task"
+
+
+def test_postgres_runner_persists_explicit_sibling_identity_without_product_data():
+    worker = load_worker()
+    storage = IdentityMismatchStorage()
+    config = dict(worker.DEFAULTS)
+    config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}})
+
+    assert worker.run_postgres_actions(
+        storage, IdentityMismatchAdapter(), config, limit=1, worker_id="worker-a", product_only=True
+    ) == 1
+    assert len(storage.saved) == 1
+    saved = storage.saved[0]
+    assert saved["reason"] == "asin_mismatch"
+    assert saved["evidence"]["context_json"]["identity"] == {
+        "requested_asin": "B0B9ZFDZNJ",
+        "observed_asin": "B0B9ZFZZZZ",
+        "canonical_asin": "B0B9ZFZZZZ",
+        "parent_asin": "B0PARENT01",
+        "child_asins": ["B0B9ZFDZNJ", "B0B9ZFZZZZ"],
+    }
+    assert all("product" not in entry for entry in storage.saved)
 
 
 def test_product_fetch_failure_persists_run_evidence():

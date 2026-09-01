@@ -44,6 +44,12 @@ except ModuleNotFoundError:
     sys.path.insert(0, str(ROOT / "scripts"))
     from context_guard import validate_context
 
+try:
+    from proxy_tunnel_auth import ProxyTunnelAuthHTTPSHandler
+except ModuleNotFoundError:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from proxy_tunnel_auth import ProxyTunnelAuthHTTPSHandler
+
 DEFAULT_CONFIG = ROOT / "config" / "amazon_us.example.toml"
 DEFAULT_MANIFEST = ROOT / "amazon_us_asin_manifest.csv"
 DEFAULT_DB = ROOT / "state" / "amazon_us.sqlite3"
@@ -1882,8 +1888,14 @@ class HttpFirstAdapter:
         self.timeout = int(self.config.get("request_timeout_seconds", 30))
         self.user_agent = str(self.config.get("user_agent") or "")
         self._opener_handlers: list[Any] = []
+        self._proxy_auth_configured = False
         proxy_url = str(self.config.get("proxy_url") or "").strip()
         if proxy_url:
+            proxy_parts = urlsplit(proxy_url)
+            if proxy_parts.scheme not in {"http", "https"} or not proxy_parts.hostname:
+                raise ValueError("proxy_url must be an explicit http(s) URL")
+            if proxy_parts.username or proxy_parts.password:
+                raise ValueError("proxy credentials must not be embedded in proxy_url")
             proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
             self._opener_handlers.append(proxy_handler)
             username_env = str(self.config.get("proxy_username_env") or "").strip()
@@ -1895,10 +1907,8 @@ class HttpFirstAdapter:
                 password = os.environ.get(password_env, "")
                 if not username or not password:
                     raise ValueError("proxy credential environment variables are not both populated")
-                password_manager = urllib.request.HTTPPasswordMgrWithDefaultRealm()
-                password_manager.add_password(None, proxy_url, username, password)
-                auth_handler = urllib.request.ProxyBasicAuthHandler(password_manager)
-                self._opener_handlers.append(auth_handler)
+                self._opener_handlers.append(ProxyTunnelAuthHTTPSHandler(username, password))
+                self._proxy_auth_configured = True
         self.cookie_session = RunScopedAmazonCookieSession(
             "adapter-instance", str(self.config.get("tenant_id") or "local"), str(self.config.get("worker_id") or "worker")
         )
@@ -2041,6 +2051,8 @@ class HttpFirstAdapter:
         if not isinstance(fallback_reason, FallbackReason):
             raise TypeError("fallback reason must be a FallbackReason")
         self.last_fallback_reason = fallback_reason.value
+        if getattr(self, "_proxy_auth_configured", False):
+            raise AdapterFetchError("Firefox proxy authentication is unavailable")
         if self.browser is None:
             try:
                 self.browser = SeleniumFirefoxAdapter(self.config)
@@ -2252,6 +2264,24 @@ def _product_evidence_context(
     if _is_canonical_parent_child(data, expected_asin):
         context["parent_asin"] = str(data.get("parent_asin") or "").upper()
         context["identity_relation"] = "child_of_canonical_parent"
+    return context
+
+
+def _identity_mismatch_evidence_context(
+    base_context: dict[str, Any] | None,
+    adapter: Any,
+    data: dict[str, Any],
+    expected_asin: str,
+) -> dict[str, Any]:
+    """Persist identity evidence only; never project sibling product fields onto the requested ASIN."""
+    context = _evidence_context(base_context, adapter)
+    context["identity"] = {
+        "requested_asin": expected_asin.upper(),
+        "observed_asin": str(data.get("asin") or "").upper(),
+        "canonical_asin": str(_canonical_asin(data.get("canonical_url")) or "").upper(),
+        "parent_asin": str(data.get("parent_asin") or "").upper(),
+        "child_asins": sorted({str(value).upper() for value in data.get("identity_child_asins") or [] if value}),
+    }
     return context
 
 
@@ -2643,8 +2673,11 @@ def run_postgres_actions(
     worker_id: str = "amazon-us-worker",
     lease_seconds: int = 600,
     product_only: bool = False,
+    reviews_only: bool = False,
 ) -> int:
     """Run a bounded production batch using PostgreSQL task leases."""
+    if product_only and reviews_only:
+        raise ValueError("product_only and reviews_only are mutually exclusive")
     run_id = run_id or f"run-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
     fallback_ledger = BrowserFallbackLedger()
     if hasattr(adapter, "begin_run"):
@@ -2655,17 +2688,34 @@ def run_postgres_actions(
     actions = 0
     blocked = False
     while actions < max_actions:
-        task = storage.claim_refresh_task(worker_id, lease_seconds=lease_seconds) if not product_only and hasattr(storage, "claim_refresh_task") else None
+        stage_filter = "product" if product_only else "reviews" if reviews_only else None
+        task = storage.claim_refresh_task(worker_id, lease_seconds=lease_seconds) if stage_filter is None and hasattr(storage, "claim_refresh_task") else None
         if task is None:
             task = (
-                storage.claim_task(worker_id, lease_seconds=lease_seconds, task_stage="product")
-                if product_only
+                storage.claim_task(worker_id, lease_seconds=lease_seconds, task_stage=stage_filter)
+                if stage_filter is not None
                 else storage.claim_task(worker_id, lease_seconds=lease_seconds)
             )
         if task is None:
             break
         if hasattr(adapter, "begin_action"):
             adapter.begin_action()
+        if reviews_only and (
+            task.get("task_stage") != "reviews" or not str(task.get("next_review_url") or "").strip()
+        ):
+            evidence = _postgres_evidence(
+                run_id, task, None, None, getattr(adapter, "source_type", "http_html"),
+                raw_html_dir, _evidence_context(config.get("context"), adapter),
+                getattr(adapter, "last_transfer_bytes", None), error_code="invalid_review_task",
+            )
+            storage.save_failure(
+                task=task,
+                reason="invalid_review_task",
+                error="reviews-only claim requires task_stage=reviews and next_review_url",
+                evidence=evidence,
+            )
+            actions += 1
+            continue
         refresh_job_id = task.get("job_id")
         if task.get("task_stage") == "reviews" and task.get("next_review_url"):
             page = int(task.get("next_review_page") or 1)
@@ -2831,7 +2881,7 @@ def run_postgres_actions(
             transfer_bytes = getattr(adapter, "last_transfer_bytes", None)
             evidence = _postgres_evidence(
                 run_id, task, body, response_status, source_type, raw_html_dir,
-                _evidence_context(config.get("context"), adapter), transfer_bytes,
+                _identity_mismatch_evidence_context(config.get("context"), adapter, data, task["asin"]), transfer_bytes,
                 error_code="asin_mismatch",
             )
             storage.save_failure(
@@ -2935,6 +2985,9 @@ def run_postgres_actions(
             actions += 1
             continue
         if not _valid_asin_identity(data, task["asin"]):
+            evidence["context_json"] = _identity_mismatch_evidence_context(
+                config.get("context"), adapter, data, task["asin"]
+            )
             evidence["error_code"] = "asin_mismatch"
             storage.save_failure(
                 task=task, reason="asin_mismatch", error="asin_mismatch", evidence=evidence, terminal=True
@@ -3032,7 +3085,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--subject-type", choices=("own", "competitor", "candidate"), default="own")
     parser.add_argument("--worker-id", default=f"amazon-us-worker-{os.getpid()}")
     parser.add_argument("--lease-seconds", type=int, default=600)
-    parser.add_argument("--product-only", action="store_true", help="claim only product-stage PostgreSQL tasks")
+    stage_group = parser.add_mutually_exclusive_group()
+    stage_group.add_argument("--product-only", action="store_true", help="claim only product-stage PostgreSQL tasks")
+    stage_group.add_argument("--reviews-only", action="store_true", help="claim only review-stage PostgreSQL tasks")
     parser.add_argument("--run-id", help="explicit run identifier for logs and evidence")
     return parser
 
@@ -3072,7 +3127,8 @@ def run(args: argparse.Namespace) -> int:
         try:
             action_result = run_postgres_actions(
                 storage, adapter, config, limit=args.limit, worker_id=args.worker_id,
-                lease_seconds=args.lease_seconds, product_only=args.product_only, run_id=args.run_id,
+                lease_seconds=args.lease_seconds, product_only=args.product_only,
+                reviews_only=args.reviews_only, run_id=args.run_id,
             )
             return 3 if action_result == -1 else 0
         finally:
@@ -3107,6 +3163,8 @@ def run(args: argparse.Namespace) -> int:
 def validate_runtime_args(args: argparse.Namespace) -> None:
     if args.product_only and args.backend != "postgres":
         raise ValueError("--product-only is supported only with the PostgreSQL backend")
+    if args.reviews_only and args.backend != "postgres":
+        raise ValueError("--reviews-only is supported only with the PostgreSQL backend")
     if args.run_id and args.backend != "postgres":
         raise ValueError("--run-id is supported only with the PostgreSQL backend")
     if args.run_id and not re.fullmatch(r"[A-Za-z0-9_-]{1,120}", args.run_id):

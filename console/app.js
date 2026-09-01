@@ -1,4 +1,5 @@
-const state = { overview: null, items: [], selectedRun: '', timer: null, loading: false };
+const initialTenant = new URL(window.location.href).searchParams.get('tenant') || '';
+const state = { overview: null, batches: [], items: [], tenant: initialTenant, selectedRun: '', timer: null, loading: false };
 const $ = (id) => document.getElementById(id);
 const number = (value) => new Intl.NumberFormat('zh-CN').format(Number(value || 0));
 const dateTime = (value) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
@@ -22,7 +23,9 @@ const clear = (node) => { while (node.firstChild) node.removeChild(node.firstChi
 function apiKey() { return sessionStorage.getItem('amazonConsoleApiKey') || ''; }
 async function request(path) {
   const headers = apiKey() ? { 'X-Collection-API-Key': apiKey() } : {};
-  const response = await fetch(path, { headers, cache: 'no-store' });
+  const target = new URL(path, window.location.origin);
+  if (state.tenant && target.pathname !== '/api/tenants') target.searchParams.set('tenant', state.tenant);
+  const response = await fetch(target, { headers, cache: 'no-store' });
   if (response.status === 401) {
     const supplied = window.prompt('该控制台需要本地API Key。Key只保存在当前标签页。');
     if (supplied) {
@@ -34,6 +37,52 @@ async function request(path) {
   return response.json();
 }
 
+function selectTenant(tenantId, refreshNow = true) {
+  state.tenant = tenantId;
+  state.selectedRun = '';
+  const url = new URL(window.location.href);
+  if (tenantId) url.searchParams.set('tenant', tenantId); else url.searchParams.delete('tenant');
+  window.history.replaceState({}, '', url);
+  $('tenantSelector').value = tenantId;
+  if (refreshNow) refresh();
+}
+
+function renderBatches(data) {
+  state.batches = data.items || [];
+  const selector = $('tenantSelector'); clear(selector);
+  for (const batch of state.batches) selector.append(new Option(batch.tenant_id, batch.tenant_id));
+  if (!state.tenant && state.batches.length) state.tenant = state.batches[0].tenant_id;
+  if (state.tenant) selector.value = state.tenant;
+  const body = $('batchRows'); clear(body);
+  for (const batch of state.batches) {
+    const row = document.createElement('tr');
+    if (batch.tenant_id === state.tenant) row.classList.add('selected');
+    row.append(
+      taskCell(batch.tenant_id, 'asin'),
+      taskCell(`${number(batch.requested)} / ${number(batch.recorded)}`),
+      taskCell(number(batch.product_succeeded)),
+      taskCell(number(batch.variant_redirect)),
+      taskCell(number(batch.failed)),
+      taskCell(number(batch.blocked)),
+      taskCell(`${number(batch.pending)} / ${number(batch.running)}`),
+      taskCell(`${bytes(batch.known_transfer_bytes)}${batch.unknown_transfer_records ? ` · ${number(batch.unknown_transfer_records)} unknown` : ''}`),
+      taskCell(batch.duration_seconds === null ? '—' : `${number(batch.duration_seconds)}s`),
+      taskCell(batch.terminal_status),
+    );
+    row.addEventListener('click', () => selectTenant(batch.tenant_id));
+    body.append(row);
+  }
+  if (!state.batches.length) {
+    const row = document.createElement('tr'); const cell = taskCell('PostgreSQL中没有可见tenant', 'muted'); cell.colSpan = 10; row.append(cell); body.append(row);
+  }
+}
+
+async function loadBatches() {
+  const data = await request('/api/tenants');
+  renderBatches(data);
+  return data;
+}
+
 function renderChips(id, values, alert = false) {
   const root = $(id); clear(root);
   const entries = Object.entries(values || {}).sort((a, b) => b[1] - a[1]);
@@ -43,18 +92,19 @@ function renderChips(id, values, alert = false) {
 
 function renderOverview(data) {
   state.overview = data;
+  const selectedBatch = state.batches.find((batch) => batch.tenant_id === data.tenant_id) || {};
   $('tenantLabel').textContent = `Tenant · ${data.tenant_id}`;
   $('observedAt').textContent = `更新 ${dateTime(data.observed_at)}`;
   $('progressMetric').textContent = `${data.progress.percent}%`;
   $('progressSub').textContent = `${number(data.progress.touched)} / ${number(data.progress.total)} ASIN`;
   $('productsMetric').textContent = number(data.progress.successful_products);
   $('partialMetric').textContent = number(data.context_quality_counts?.partial);
-  $('blockedMetric').textContent = number(data.status_counts.blocked);
-  $('failedMetric').textContent = number(data.status_counts.failed);
+  $('blockedMetric').textContent = number(selectedBatch.blocked ?? data.status_counts.blocked);
+  $('failedMetric').textContent = number(selectedBatch.failed ?? data.status_counts.failed);
   $('actionsMetric').textContent = number(data.four_scale_metrics.page_actions);
   $('rowsMetric').textContent = number(data.four_scale_metrics.database_rows);
-  $('rawMetric').textContent = bytes(data.traffic.saved_raw_html_bytes);
-  $('rawSub').textContent = `${number(data.traffic.raw_html_files)} files`;
+  $('rawMetric').textContent = data.traffic.saved_raw_html_bytes === null ? 'unknown' : bytes(data.traffic.saved_raw_html_bytes);
+  $('rawSub').textContent = data.traffic.raw_html_files === null ? '跨输出目录不聚合；以evidence路径为准' : `${number(data.traffic.raw_html_files)} files`;
   $('httpTrafficMetric').textContent = trafficBytes(data.traffic.http_compressed_response);
   $('httpTrafficSub').textContent = trafficSub(data.traffic.http_compressed_response);
   $('firefoxMainMetric').textContent = trafficBytes(data.traffic.firefox_main_document);
@@ -86,14 +136,15 @@ function renderOverview(data) {
 
 function renderRun(data) {
   state.selectedRun = data.run_id;
-  $('runSummary').textContent = `${data.run_id} · ${number(data.items.length)}项（evidence ${number(data.recorded_actions)}，历史推断 ${number(data.inferred_actions)}）· context full ${number(data.context_quality_counts?.full)} / partial ${number(data.context_quality_counts?.partial)} / invalid ${number(data.context_quality_counts?.invalid)} · ${dateTime(data.started_at)} → ${dateTime(data.ended_at)} · HTTP ${trafficBytes(data.traffic?.http_compressed_response)} · Firefox主文档 ${trafficBytes(data.traffic?.firefox_main_document)} · Firefox子资源 ${trafficBytes(data.traffic?.firefox_subresources)}`;
+  const outcomes = data.outcome_counts || (data.items || []).reduce((value, item) => { value[item.outcome] = (value[item.outcome] || 0) + 1; return value; }, {});
+  $('runSummary').textContent = `${data.run_id} · requested / recorded ${number(data.requested_actions)} / ${number(data.recorded_actions)} · 商品成功 ${number(outcomes.completed)} · variant redirect ${number(outcomes.variant_redirect)} · failed ${number(outcomes.failed)} · blocked ${number(outcomes.blocked)} · 终态 ${data.terminal_status || '—'} · ${dateTime(data.started_at)} → ${dateTime(data.ended_at)} · HTTP ${trafficBytes(data.traffic?.http_compressed_response)} · Firefox主文档 ${trafficBytes(data.traffic?.firefox_main_document)} · Firefox子资源 ${trafficBytes(data.traffic?.firefox_subresources)}`;
   $('runWarning').textContent = data.context_quality_counts?.partial ? '⚠ 本run含ZIP未确认的partial商品；price、availability、buy_box/配送等位置敏感字段不可视为90001结果。' : data.inferred_actions ? '⚠ 历史网络失败没有run evidence；黄色归属为按本run时间窗口推断。新运行已永久修复。' : '全部结果均有不可变run evidence。';
   const body = $('runRows'); clear(body);
   for (const item of data.items || []) {
     const row = document.createElement('tr'); row.dataset.asin = item.asin;
     row.append(taskCell(item.asin, 'asin'));
     const outcome = document.createElement('td'); const outcomeLabel = item.context_quality === 'partial' && item.outcome === 'completed' ? 'completed · partial' : item.outcome; outcome.append(text('span', outcomeLabel, `status-badge ${item.context_quality === 'partial' ? 'partial' : item.outcome}`)); row.append(outcome);
-    row.append(taskCell(item.title || '—', 'product-cell'), taskCell(item.source_type), taskCell(item.http_status));
+    row.append(taskCell(item.title || '—', 'product-cell'), taskCell(item.price_status), taskCell(item.source_type), taskCell(item.http_status));
     const runReason = item.error_code || item.block_reason || (item.attribution === 'evidence' ? '' : item.last_error) || '—';
     row.append(taskCell(runReason, 'product-cell'));
     const attribution = document.createElement('td'); attribution.append(text('span', item.attribution === 'evidence' ? 'evidence' : '时间推断', `status-badge ${item.attribution === 'evidence' ? '' : 'inferred'}`)); row.append(attribution);
@@ -119,7 +170,7 @@ async function loadRuns() {
   const selector = $('runSelector');
   const desired = state.selectedRun || selector.value || data.items?.[0]?.run_id || '';
   clear(selector); selector.append(new Option('选择 run_id', ''));
-  for (const run of data.items || []) selector.append(new Option(`${run.run_id} · ${run.evidence_actions} evidence`, run.run_id));
+  for (const run of data.items || []) selector.append(new Option(`${run.run_id} · ${run.requested_actions}/${run.recorded_actions} · ${run.terminal_status}`, run.run_id));
   if (desired && (data.items || []).some((run) => run.run_id === desired)) {
     selector.value = desired; await loadRun(desired);
   }
@@ -133,13 +184,13 @@ function renderItems(data) {
     const row = document.createElement('tr'); row.dataset.asin = item.asin;
     row.append(taskCell(item.asin, 'asin'), taskCell(item.title || '—', 'product-cell'));
     const statusCell = document.createElement('td'); statusCell.append(text('span', item.status, `status-badge ${item.status}`)); row.append(statusCell);
-    row.append(taskCell(item.task_stage), taskCell(item.source_type), taskCell(item.http_status));
+    row.append(taskCell(item.task_stage), taskCell(item.price_status), taskCell(item.source_type), taskCell(item.http_status));
     row.append(taskCell(item.last_error || item.evidence_error || item.block_reason || item.evidence_block || '—', 'product-cell'));
     row.append(taskCell(dateTime(item.updated_at)));
     row.addEventListener('click', () => openDetail(item.asin)); body.append(row);
   }
   if (!state.items.length) {
-    const row = document.createElement('tr'); const cell = taskCell('没有符合条件的任务', 'muted'); cell.colSpan = 8; row.append(cell); body.append(row);
+    const row = document.createElement('tr'); const cell = taskCell('没有符合条件的任务', 'muted'); cell.colSpan = 9; row.append(cell); body.append(row);
   }
   $('taskSummary').textContent = `显示 ${number(state.items.length)} / ${number(data.total)} 条`;
 }
@@ -170,11 +221,11 @@ async function openDetail(asin) {
     const task = detailSection('任务状态'); task.append(fieldGrid({ status: data.task.status, stage: data.task.task_stage, attempts: `${data.task.attempts}/${data.task.max_attempts}`, last_error: data.task.last_error, block_reason: data.task.block_reason, updated_at: dateTime(data.task.updated_at) })); root.append(task);
     const product = detailSection('商品快照');
     const partialContext = (data.evidence || []).find((value) => value.context_json?.context_quality === 'partial')?.context_json; if (partialContext) product.append(text('p', `⚠ ZIP ${partialContext.expected_postal || '目标值'} 未确认（观测 ${partialContext.observed_postal || 'unknown'}）；${(partialContext.location_sensitive_fields_unverified || []).join(', ')} 不可视为目标ZIP结果。`, 'table-summary'));
-    if (data.product) product.append(fieldGrid({ title: data.product.title, brand: data.product.brand, price: data.product.price, availability: data.product.availability, rating: data.product.rating, reviews: data.product.reported_review_count }), jsonBlock({ bullets: data.product.bullets, specs: data.product.specs, buy_box: data.product.buy_box }));
+    if (data.product) product.append(fieldGrid({ title: data.product.title, brand: data.product.brand, price: data.product.price, price_status: data.product.price_status, availability: data.product.availability, rating: data.product.rating, reviews: data.product.reported_review_count }), jsonBlock({ bullets: data.product.bullets, specs: data.product.specs, buy_box: data.product.buy_box }));
     else product.append(text('p', '尚无有效商品快照', 'muted')); root.append(product);
     const media = detailSection(`媒体 URL · ${(data.media || []).length}`); const mediaList = text('div', '', 'detail-list'); for (const value of data.media || []) mediaList.append(linkItem(value.display_url || value.asset_url || value.thumbnail_url, `${value.placement || 'media'} · ${value.entry_type || ''}`)); media.append(mediaList); root.append(media);
     const topReviews = detailSection(`商品页 Top Reviews · ${(data.top_reviews || []).length}`); for (const review of data.top_reviews || []) { const item = text('div', '', 'detail-item'); item.append(text('strong', review.title || review.rating || 'Review'), text('p', review.body || review.text || JSON.stringify(review))); topReviews.append(item); } if (!(data.top_reviews || []).length) topReviews.append(text('p', '无商品页评论摘要', 'muted')); root.append(topReviews);
-    const evidence = detailSection(`Evidence · ${(data.evidence || []).length}`); for (const value of data.evidence || []) { const traffic = value.context_json?.traffic || {}; const bridge = value.context_json?.cookie_bridge || {}; evidence.append(fieldGrid({ source: value.source_type, context_quality: value.context_json?.context_quality, postal_confirmed: value.context_json?.postal_confirmed, expected_postal: value.context_json?.expected_postal, observed_postal: value.context_json?.observed_postal, location_sensitive_fields_unverified: (value.context_json?.location_sensitive_fields_unverified || []).join(', '), fallback_reason: value.context_json?.fallback_reason, fallback_reasons: (value.context_json?.fallback_reasons || []).join(', '), cookie_bridge: bridge.status, cookie_bridge_error: bridge.error_code, http: value.http_status, error: value.error_code, block: value.block_reason, retrieved: dateTime(value.retrieved_at), raw_html_path: value.raw_html_path, http_compressed_bytes: traffic.http_compressed_response_bytes, firefox_main_bytes: traffic.firefox_main_document_bytes ?? 'unknown', firefox_subresource_bytes: traffic.firefox_subresource_bytes ?? 'unknown' })); } root.append(evidence);
+    const evidence = detailSection(`Evidence · ${(data.evidence || []).length}`); for (const value of data.evidence || []) { const traffic = value.context_json?.traffic || {}; const bridge = value.context_json?.cookie_bridge || {}; evidence.append(fieldGrid({ outcome: value.outcome, source: value.source_type, context_quality: value.context_json?.context_quality, identity_relation: value.context_json?.identity ? `${value.context_json.identity.requested_asin} → ${value.context_json.identity.observed_asin} · parent ${value.context_json.identity.parent_asin}` : null, postal_confirmed: value.context_json?.postal_confirmed, expected_postal: value.context_json?.expected_postal, observed_postal: value.context_json?.observed_postal, location_sensitive_fields_unverified: (value.context_json?.location_sensitive_fields_unverified || []).join(', '), fallback_reason: value.context_json?.fallback_reason, fallback_reasons: (value.context_json?.fallback_reasons || []).join(', '), cookie_bridge: bridge.status, cookie_bridge_error: bridge.error_code, http: value.http_status, error: value.error_code, block: value.block_reason, retrieved: dateTime(value.retrieved_at), raw_html_path: value.raw_html_path, http_compressed_bytes: traffic.http_compressed_response_bytes, firefox_main_bytes: traffic.firefox_main_document_bytes ?? 'unknown', firefox_subresource_bytes: traffic.firefox_subresource_bytes ?? 'unknown' })); } root.append(evidence);
     const content = detailSection(`内容模块 · ${(data.content_modules || []).length}`); content.append(jsonBlock(data.content_modules || [])); root.append(content);
     const reviews = detailSection('独立评论状态'); reviews.append(jsonBlock({ summary: data.review_summary, records: data.reviews || [] })); root.append(reviews);
   } catch (error) { clear(root); root.append(text('p', `详情读取失败：${error.message}`, 'error-banner')); }
@@ -192,6 +243,8 @@ async function loadItems() {
 async function refresh() {
   if (state.loading) return; state.loading = true;
   try {
+    await loadBatches();
+    if (!state.tenant) throw new Error('PostgreSQL中没有可见tenant');
     const [overview] = await Promise.all([request('/api/overview'), loadItems(), loadRuns()]);
     renderOverview(overview); $('errorBanner').hidden = true; $('liveBadge').classList.remove('offline');
   } catch (error) {
@@ -200,6 +253,7 @@ async function refresh() {
 }
 
 $('refreshButton').addEventListener('click', refresh);
+$('tenantSelector').addEventListener('change', (event) => selectTenant(event.target.value));
 $('runSelector').addEventListener('change', (event) => selectRun(event.target.value));
 $('filterForm').addEventListener('submit', (event) => { event.preventDefault(); loadItems().catch((error) => { $('errorBanner').textContent = error.message; $('errorBanner').hidden = false; }); });
 $('apiKeyButton').addEventListener('click', () => { const value = window.prompt('输入新的本地API Key；留空将清除当前Key。', apiKey()); if (value === null) return; if (value) sessionStorage.setItem('amazonConsoleApiKey', value); else sessionStorage.removeItem('amazonConsoleApiKey'); refresh(); });

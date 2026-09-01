@@ -16,7 +16,7 @@
 - 商品身份、Amazon.com、US、USD 是硬门；ZIP `90001` 是字段级软门。ZIP 未确认时可保存 partial 商品，但只有 Firefox 明确确认 ZIP/US/USD 后才把隔离 Cookie 提交给本次 HTTP 会话；
 - 商品、独立评论分页和媒体二进制是不同状态/成本口径；默认只保存媒体 URL 与元数据；
 - PostgreSQL 保存当前状态、追加快照、评论断点和 evidence；原始 HTML 保存到本地 evidence 目录；
-- 本地只读 Console 展示任务、商品、evidence 和四类流量。
+- 默认 `127.0.0.1:8770` 的统一只读 Console 从 PostgreSQL 枚举可见 tenant/批次/run，展示任务、商品、evidence、领域分类和四类流量；切换 tenant 不重启服务，也不依赖浏览器缓存或单一输出目录。
 
 ### 1.3 明确不做
 
@@ -29,6 +29,8 @@
 ### 1.4 当前结论
 
 低流量控制、Cookie 桥接、fallback 去重、nullable 流量、terminal failure 和 full/partial 上下文合同已通过离线测试，最新完整结果为 `261 passed, 1 skipped`。2026-08-31 修复后的真实 Amazon 阶梯已验证3/10/20；继续扩到100-ASIN时在第73条首次出现HTTP 200 CAPTCHA，`stop_on_block`立即以73/100熔断，剩余27条未请求。已完成73条中60个商品全部为full，12条均为同Parent内跳向活跃Sibling Child的`asin_mismatch/variant_redirect`，1条为CAPTCHA；没有新的代码失败或stderr。60个商品页已保存338条真实top reviews，其中54条进入`reviews_pending`，但独立评论分页尚未执行。用户连接手机热点后的短探针3/3通过，但随后的100-run在第2条再次命中同型CAPTCHA；Windows路由核对发现`EFan tun2socks Tunnel`仍为Up并持有覆盖绝大多数公网地址的低metric路由，证明热点只更换底层WLAN，Amazon流量仍经过原VPN隧道。当前必须先关闭EFan或切到真正不同的合规美国出口，不能继续试探；测试账户不得用于绕过挑战。结合2026-09-01周会完成的评论分析专项调研已写入7.3：正确方法、工具候选、Customer Feedback API权限清单和测试账户Worker设计均为**研究结论**，尚未采购、授权、开发或实机验证。
+
+2026-09-01最新美国VPN隔离100条自有ASIN验收已替代上述“当前必须等待新出口”的运行结论：100/100均形成evidence，92个商品成功、8个同Parent兄弟变体跳转、0 blocked，未出现403/429/CAPTCHA/WAF/login；详见11.6。统一Console、run ledger、Ctrl+C/heartbeat、reviews-only和DataImpulse认证整合后的最新完整离线回归为 `287 passed, 1 skipped`；真实PostgreSQL专项因当前没有`AMAZON_TEST_POSTGRES_DSN`按合同skip。
 
 ## 2. 系统架构
 
@@ -55,7 +57,7 @@ flowchart LR
 
 | 文件/符号 | 职责 | 不负责 |
 |---|---|---|
-| `crawler.ps1` | Windows 统一控制、preflight、run_id、单实例、Console、receipt | 解析页面、直接改数据库 |
+| `crawler.ps1` | Windows 统一控制、preflight、run_id、单实例、统一 Console、PostgreSQL run ledger 与文件receipt镜像 | 解析页面、直接写商品表 |
 | `scripts/amazon_us_worker.py` | HTTP/Firefox 适配、解析、质量门、运行编排 | 保存生产凭据、下载媒体二进制 |
 | `HttpFirstAdapter` | HTTP 请求、gzip 响应体计量、run-scoped CookieJar、Firefox 懒加载 | 跨 run/tenant/worker 会话共享 |
 | `SeleniumFirefoxAdapter` | 隔离临时 profile、ZIP/USD 设置、BiDi 控制、DOM 获取 | 个人 profile、自动登录、反检测 |
@@ -63,7 +65,9 @@ flowchart LR
 | `BrowserFallbackLedger` | `run_id + ASIN + fallback_reason` 去重 | 业务重排队或代理切换 |
 | `RunScopedAmazonCookieSession` | Cookie 筛选、内存存储、scope 校验、销毁 | Cookie 持久化或日志输出 |
 | `scripts/postgres_worker_storage.py` | claim/lease、事务写商品/评论/evidence、状态历史 | 网络访问 |
-| `scripts/collection_console.py` | tenant-scoped 只读查询与流量汇总 | 触发采集、修改状态 |
+| `scripts/collection_console.py` | PostgreSQL tenant枚举、显式tenant-scoped只读查询、批次/run/ASIN领域投影与流量汇总 | 触发采集、修改状态 |
+| `scripts/postgres_run_ledger.py` | 幂等创建`collection_run`，写run请求数、终态与receipt JSON | 商品/evidence事实写入 |
+| `scripts/backfill_identity_evidence.py` | 幂等把旧`asin_mismatch` raw中的严格Parent/Child身份元数据补入既有evidence context | 写兄弟商品快照、改变原始error_code |
 | `scripts/collection_metrics.py` | SQLite 历史 evidence 的离线指标 | PostgreSQL 生产写入 |
 
 ## 3. 单 ASIN 执行与状态
@@ -578,13 +582,15 @@ if (-not $env:AMAZON_US_POSTGRES_DSN) { throw 'AMAZON_US_POSTGRES_DSN is require
 
 每一级必须使用新的 `run_id`。只有上一级无 403/429/CAPTCHA/WAF/login、上下文正确且字段质量稳定时才扩大。出现阻断立即停止，不自动换代理或重排 blocked。
 
-Console 是常驻 Python 进程，代码更新后必须重启旧 Console 才会加载新的分类与汇总逻辑：先执行 `.\crawler.ps1 stop -All`，再由下一次 `probe/run` 自动启动，或单独执行 `.\crawler.ps1 console`。
+Console 是常驻 Python 进程，代码更新后必须重启旧 Console 才会加载新的分类与汇总逻辑：先执行 `.\crawler.ps1 stop -All`，再由下一次 `probe/run` 自动启动，或单独执行 `.\crawler.ps1 console`。新版 Console 的唯一受控锁固定在 `data/console_control/.console.lock.json`，不再随 tenant 输出目录复制；`console` 命令本身也不解析或要求某个批次的 `OutputDir`。页面用 `?tenant=` 显式选择，后端每条overview/items/runs/detail查询仍带tenant条件，跨tenant run/ASIN不可见。
 
 2026-09-01核对发现，旧交接副本曾通过Windows计划任务`Amazon US Collection Hourly`每小时执行`2026-08-25`目录的`run_once_windows.bat`。该旧入口先执行SQLite `--live --once`，即使Worker失败仍继续`--materialize-only`，会造成“先出现联网异常堆栈、随后打印不访问网络”的误导，并可能与正式批次同时占用Amazon出口。用户确认清理后，计划任务已注销，635.7MB旧交接父目录及同名ZIP已移入Windows回收站；复核显示旧路径、任务和旧Worker进程均不存在，当前正式项目完整。正式运行与未来调度只能调用当前目录`crawler.ps1`和PostgreSQL Worker，禁止从回收站恢复后重新启用旧小时任务。
 
-Console 只在三项同时成立时复用：`.console.lock.json` 中的 PID+StartTime 仍指向受控 host、lock 的 tenant/raw HTML 身份匹配、readyz 与当前 `collection_console.py` 的 SHA-256 runtime fingerprint 一致。锁的 `start_time` 可能被 PowerShell `ConvertFrom-Json` 还原为 `DateTime`，也可能保持 ISO string；控制器将两者规范为 UTC 后按 ticks 精确比较，不使用宽松时间容差，也不只凭 PID 接管进程。仅 tenant/raw 目录匹配不足以证明进程受控。端口存在无有效 lock 的 listener 时，控制器 fail closed 并提示由操作者在控制器外处理；`stop -All` 不会任意终止未知 PID。
+Console 只在受控锁的 PID+StartTime 仍指向同一 host、且`readyz` runtime fingerprint等于当前 `collection_console.py` SHA-256时复用。锁的 `start_time` 可能被PowerShell还原为`DateTime`，也可能保持ISO string；控制器统一为UTC ticks精确比较，不只凭PID接管。端口存在无有效锁的listener时继续fail closed；`stop -All`不终止未知PID。tenant和raw目录不再属于Console进程身份，因为一个服务必须可读所有PostgreSQL可见tenant。
 
-`probe` 的 Worker exit 0 只表示完成有界 action 循环，不代表商品质量通过。Worker 退出后，控制器会有界读取最终 run，打印最终 `recorded/requested`、completed、failed、blocked、inferred，并在 receipt v2 保存这些字段、四类 traffic、`worker_exit_code`、`quality_gate_ok` 与失败原因。Probe 只有在 recorded 等于请求数、inferred/failed/blocked 均为 0、且全部 item 为 evidence-attributed completed 时返回 0；否则状态为 `quality_failed` 并返回非零。普通 `run` 保留原 Worker exit 语义，但 receipt 同样提供最终观测字段。
+`probe` 的 Worker exit 0 只表示完成有界 action 循环，不代表商品质量通过。Worker 退出后，控制器有界读取最终run，打印`recorded/requested`、completed、failed、blocked、inferred。Receipt v3同时写入`amazon_us.collection_run.receipt_json`和本地`receipt.json`镜像；数据库run ledger保存requested、command、started/finished、controller/worker exit、termination reason和终态，文件不能替代数据库事实。Probe只有recorded等于请求数、inferred/failed/blocked为0且全部item为evidence-attributed completed才返回0，否则`quality_failed`。
+
+受控Worker host同时持有Windows owner process handle和15秒controller heartbeat。PowerShell收到`Ctrl+C`后即使外层shell PID仍存活，只要脚本不再刷新heartbeat，host会关闭Job Object、终止Worker及其Firefox子树，再使用项目venv中的`psycopg`把run写为`interrupted/controller_exited`，最后生成文件receipt镜像。正常controller异常路径也先终止受控host再写终态。owner PID、StartTime或heartbeat无法验证时fail closed；正式`stop`仍只终止PID+StartTime完全匹配的受控host。
 
 ### 11.4 PostgreSQL 集成测试
 
@@ -593,6 +599,60 @@ Console 只在三项同时成立时复用：`.console.lock.json` 中的 PID+Star
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests\test_postgres_worker_integration.py -q -rs -p no:cacheprovider
 ```
+
+### 11.5 2026-09-01 新版自有 ASIN 清单与隔离 20 条批次
+
+只读来源 `美国仓Asin清单.xlsx` 的 `Sheet2!A2:A1094` 已按文件 SHA-256 `f0b8fb0fb892edcefe188bfd531dd5434387579e1cb4f69fae7657aa69013e0e` 独立复核：1,093 行全部非空、唯一、符合 10 位大写 ASIN。与旧 1,892 条 manifest 比较，重合 1,091、新增 2（`B06VWMP73S`、`B01LWJ0JIC`）、旧清单独有 801；两份清单均无格式错误或重复。
+
+现有只读 Console 可见的 PostgreSQL tenant `real_batch_20260828_500_04` 有 500 条，均来自旧 manifest；其中 109 条与新版清单重合，新版 984 条不在该 tenant，两个新增 ASIN 均不在该 tenant。该结论只覆盖明确 tenant，不代表所有 PostgreSQL tenant；当前进程没有 DSN/密码，因此没有越权枚举或写库。
+
+新批次固定为 tenant `owned_us_asin_20260901_20_01`，目录 `data/owned_us_asin_20260901_20_01/`。样本包含两个新增 ASIN，并从 1,091 个重合项按来源行位置等距选 18 个；manifest、配置和来源元数据均在 Git 忽略边界内。操作者在项目根目录使用：
+
+```powershell
+$batch = @{
+  TenantId = 'owned_us_asin_20260901_20_01'
+  ManifestPath = 'data\owned_us_asin_20260901_20_01\manifest_20.csv'
+  ConfigPath = 'data\owned_us_asin_20260901_20_01\batch20.toml'
+  OutputDir = 'data\owned_us_asin_20260901_20_01'
+}
+.\crawler.ps1 probe -Limit 3 @batch
+.\crawler.ps1 status @batch
+.\crawler.ps1 console @batch
+# 只有 probe 的 3 条质量门通过后，才补齐剩余 17 个商品；product-only 会跳过评论 action。
+.\crawler.ps1 run -Limit 17 @batch
+```
+
+首次命令会隐藏输入数据库密码并初始化新 tenant；这一步不由代理代替操作者执行。`probe` 必须满足 `recorded=requested`、`failed=blocked=inferred=0`、`quality_gate_ok=true`，且没有 403/429/CAPTCHA/WAF/login 才能继续。20 条结束后必须逐条用 Console run 详情、receipt、stdout/stderr 和 evidence 核对 `error_code`、`block_reason`、HTTP 状态、canonical/DOM ASIN 与上下文；任一失败先冻结批次并确认根因，不自动重跑或切换出口。
+
+2026-09-01 代理获授权自行执行后，新 tenant 的两轮 3 商品 probe 均为 0/3。首轮请求被当前沙箱以 WinError 10013 阻止；非沙箱同样本复测排除该因素后，三个根因分别为 DNS 11002、country/currency mismatch 和 asin_mismatch，因此没有继续剩余 17 商品。
+
+为避免评论测试混入商品或 refresh action，现有 Worker/控制器新增对称 `--reviews-only` / `crawler.ps1 reviews`，硬限制每 run 1 至 3 action，PostgreSQL claim 固定 `task_stage=reviews`。独立 reviewer 发现空 `next_review_url` 或错误 stage 可能落入商品分支；补两个红灯后改为联网前写 `invalid_review_task` evidence 并释放租约。修复后专项 33 passed、完整离线 268 passed/1 skipped，PowerShell AST、compileall 和 diff 检查通过。
+
+真实评论 run `run-control-20260901T081012043Z-8980-cd627705b2` 复用已有成功商品状态的 tenant `real_batch_20260828_500_04`，但使用独立输出/锁/日志目录 `data/review_test_20260901_3_01`、专属端口和 `review_page_limit=1`。首个 ASIN `B00RCPDCQU` 的公开评论 URL 返回 HTTP 200/125,959 压缩字节，但页面被明确识别为 `login_wall`；系统保存 raw/evidence、写 `blocked` 并立即熔断，0 条独立评论入库，剩余 2 个 action 未请求。该结果证明匿名独立评论路径当前不可用；继续遵守 7.3.5，不登录、不读取个人 Cookie、不绕验证码、不自动轮换或采购代理。商品页已有 top reviews 保持不受影响。
+
+### 11.6 2026-09-01 美国 VPN 下新版自有 ASIN 100 条商品验收
+
+用户明确切换到美国 VPN 并授权100条真实商品测试后，建立隔离 tenant `owned_us_asin_20260901_100_01`。样本包含新版清单全部2个新增ASIN，以及从1,091个新旧重合项按来源行等距选择的98条；manifest、配置与来源哈希元数据位于 Git 忽略目录，未覆盖旧tenant。本轮只运行商品阶段，评论分页为0。
+
+两个run分别为 `run-control-20260901T083844567Z-7932-496b38fa48`（3条probe）和 `run-control-20260901T084206688Z-26728-3043213c95`（其余97条）。最终100/100均有PostgreSQL evidence：92个商品成功、8个 `asin_mismatch`、0 blocked、0 inferred；全部HTTP状态为200，无403、429、CAPTCHA、WAF或login wall。92个成功商品均为 `context_quality=full`，ZIP 90001、US、USD可信；来源为97条 `http_html`、3条 `selenium_dom`，Firefox只用于上下文fallback。新增ASIN `B06VWMP73S`、`B01LWJ0JIC` 均成功。
+
+8个失败均已离线回放对应raw HTML：任务ASIN仍出现在页面明确Child集合中，但页面当前ASIN和canonical均指向同一Parent下的另一个Sibling Child，分类为真实 `sibling_variant_redirect`，不是代码Bug或访问控制。严格身份门没有把兄弟变体静默保存为原任务商品。失败ASIN为：`B0B9ZFDZNJ`、`B0F2DSZB24`、`B0FKH5FFYT`、`B0G38J7G4W`、`B0GHW9NBXN`、`B0GRVZ1XP3`、`B0GS8L8DSV`、`B0GWZMKXLS`。
+
+字段与内容结果：92/92有标题，91/92有价格；唯一缺价商品 `B0H8NZ2TLT` 的商品页明确显示 `Currently unavailable` / 不知道何时恢复库存，且无Buy Box，因此属于Amazon当前无可售报价，不是价格解析器漏抓。数据库写入92个商品、4,388条媒体URL/元数据、5,587个内容模块和92个页面评论汇总，独立评论记录仍为0。保存100份raw HTML共189,781,940 bytes；HTTP压缩响应共36,019,216 bytes，100条均known，平均约360,192 bytes（0.343 MiB）/ASIN。Firefox主文档与子资源因真实BiDi请求存在unknown，按合同保持null；直连测试没有代理供应商后台账单，不能把本地HTTP字节冒充代理计费流量。两个run的action时间合计约505秒。
+
+运行中曾用`Ctrl+C`终止前台控制器以检查首个普通失败；旧控制面让后台Worker继续至97条上限且没有controller receipt，因而该历史run只能按不可变evidence显示为`legacy_complete`，不能伪造旧receipt。新版owner-handle+heartbeat+Job Object+PostgreSQL run ledger已把该问题关闭：受控复现证明即使shell仍存活但controller heartbeat停止，Worker也会被终止；若在start gate前停止，也会写数据库`interrupted`终态和receipt镜像。正式`crawler.ps1 stop`仍是主动停止入口。
+
+### 11.7 统一 Console、领域分类与 DataImpulse 认证增量
+
+统一Console首页每个tenant/批次一行，字段固定为requested/recorded、商品成功、`variant_redirect`、普通failed、blocked、pending/running、known/unknown流量、耗时和终态；run列表与详情使用同一口径。`owned_us_asin_20260901_100_01`的100份真实raw重新全量回放得到92 completed、8 `variant_redirect`、0普通failed、0 blocked、189,781,940 raw bytes；页面可见验收显示100/100、92、8、0、0、0/0、34.35MiB HTTP和complete。`variant_redirect`只在领域/展示层成立：evidence必须同时有requested ASIN、不同observed/canonical ASIN、唯一Parent ASIN，且requested和observed都在明确Child集合。底层仍保存`asin_mismatch`失败evidence，绝不把兄弟商品price/title/media/content写到原ASIN。旧evidence在启动新版Console前由幂等backfill只补身份元数据；新Worker直接写入该元数据。
+
+价格展示使用独立`price_status`：有报价为`available`；无价格、availability明确`Currently unavailable`/同义状态且没有可操作Add to Cart/Buy Now卖家框时为`unavailable`；其余才是`missing`。真实`B0H8NZ2TLT` raw回放和Console详情均显示`price_status=unavailable`，不再笼统归为字段缺失。统一Console不再依赖单一raw目录；因此跨输出目录raw文件数/字节明确显示`unknown`，不以0冒充，文件定位仍使用PostgreSQL evidence路径。
+
+`collection_run`迁移使用`CREATE TABLE/INDEX IF NOT EXISTS`，tenant首页聚合在PostgreSQL内完成，并有`tenant_id,marketplace,asin,subject_type,id DESC`索引；overview不再重复全tenant扫描。只有run ledger而尚无item/evidence的interrupted run也会出现在tenant列表。普通`run`只要recorded少于requested或含时间窗口推断，就写`failed`并返回非零；已完整记录的variant等终态结果不被误判为action不足。
+
+DataImpulse认证保持HTTP-first和凭据最小暴露：`ProxyTunnelAuthHTTPSHandler`只在HTTPS CONNECT的`tunnel_headers`加入Basic `Proxy-Authorization`，不会把认证头放进origin request、URL、日志或evidence；URL内嵌凭据继续拒绝。认证代理触发Firefox fallback时在Firefox启动前固定fail closed，因为当前Firefox adapter没有用户名/密码代理认证。真实DataImpulse核对中，基础用户名与`__cr.us`均得到Amazon robots HTTP 200，`sid/sessttl`及`sessid`粘性组合在当前套餐为network_error；正式HttpFirstAdapter使用`__cr.us`得到HTTP 200/7,887 bytes。配置只引用凭据环境变量名，忽略目录内测试TOML不纳入Git。
+
+独立R3 review首轮提出3个P1和4个P2：普通run不足仍completed、start gate前退出、文件receipt先于DB、raw伪0、重复全表扫描、ledger-only tenant不可见、进度请求漏tenant。上述7项已全部修复并由专项58 passed、完整287 passed/1 skipped、compileall、Node语法、PowerShell AST和diff检查复验；无遗留P0/P1/P2。
 
 ## 12. 测试矩阵
 
@@ -607,7 +667,10 @@ Console 只在三项同时成立时复用：`.console.lock.json` 中的 PID+Star
 | 真实 PostgreSQL 租约/事务 | `tests/test_postgres_worker_integration.py`（需 DSN） |
 | 标题、价格、A+、媒体 URL、内容模块 | `tests/test_parser_fixtures.py` |
 | 四类流量指标与 Console unknown | `tests/test_collection_metrics.py`, `tests/test_collection_console.py` |
-| Windows 控制入口 | `tests/test_crawler_control.py`, `tests/test_windows_entrypoints.py` |
+| 统一Console tenant隔离、批次/run投影、variant与price_status | `tests/test_collection_console.py`, `tests/test_backfill_identity_evidence.py` |
+| PostgreSQL run ledger schema/终态/receipt | `tests/test_postgres_run_ledger.py`, `tests/test_postgres_worker_integration.py`（需DSN） |
+| Windows控制入口、owner退出和heartbeat停更的Worker终止 | `tests/test_crawler_control.py`, `tests/test_windows_entrypoints.py` |
+| HTTPS CONNECT代理认证与origin header隔离 | `tests/test_check_egress.py`, `tests/test_http_adapter.py` |
 
 ## 13. 可观测指标与操作门
 

@@ -83,6 +83,90 @@ class Repository:
         }
 
 
+class MultiTenantRepository:
+    def __init__(self, selected=None):
+        self.tenant_id = selected
+
+    def list_tenants(self):
+        return [
+            {"tenant_id": "tenant-a", "requested": 1, "recorded": 1},
+            {"tenant_id": "tenant-b", "requested": 1, "recorded": 1},
+        ]
+
+    def for_tenant(self, tenant_id):
+        if tenant_id not in {"tenant-a", "tenant-b"}:
+            return None
+        return MultiTenantRepository(tenant_id)
+
+    def load_identity(self):
+        return {"tenant_count": 2, "default_tenant_id": "tenant-a"}
+
+    def load_overview(self, raw_html_dir=None):
+        return {"tenant_id": self.tenant_id}
+
+    def list_runs(self, limit=20):
+        return [{"run_id": f"run-{self.tenant_id[-1]}", "recorded_actions": 1}]
+
+    def load_run(self, run_id):
+        if run_id != f"run-{self.tenant_id[-1]}":
+            return None
+        return {"tenant_id": self.tenant_id, "run_id": run_id, "items": []}
+
+    def list_items(self, **_kwargs):
+        return {"tenant_id": self.tenant_id, "total": 0, "items": []}
+
+    def load_detail(self, _asin):
+        return None
+
+
+class BatchCursor:
+    def __init__(self, ledger_only=False):
+        self.rows = []
+        self.ledger_only = ledger_only
+
+    def __enter__(self): return self
+    def __exit__(self, exc_type, exc, tb): return False
+
+    def execute(self, sql, _params=()):
+        if "FROM amazon_us.item_state" in sql:
+            self.rows = [] if self.ledger_only else [
+                {"tenant_id": "owned_us_asin_20260901_100_01", "status": "reviews_pending", "count": 92},
+                {"tenant_id": "owned_us_asin_20260901_100_01", "status": "failed", "count": 8},
+            ]
+        elif "FROM amazon_us.product_latest" in sql:
+            self.rows = [] if self.ledger_only else [{"tenant_id": "owned_us_asin_20260901_100_01", "count": 92}]
+        elif "WITH latest AS" in sql:
+            self.rows = [] if self.ledger_only else [{
+                "tenant_id": "owned_us_asin_20260901_100_01", "recorded": 100,
+                "latest_at": None, "blocked": 0, "variant_redirect": 8, "failed": 0,
+            }]
+        elif "COUNT(*) AS evidence_actions" in sql:
+            self.rows = [] if self.ledger_only else [{
+                "tenant_id": "owned_us_asin_20260901_100_01", "evidence_actions": 100,
+                "known_transfer_records": 100, "known_transfer_bytes": 36019216,
+                "started_at": None, "ended_at": None, "http_actions": 97, "firefox_actions": 3,
+            }]
+        elif "to_regclass" in sql:
+            self.rows = [{"relation": "amazon_us.collection_run"}]
+        elif "FROM amazon_us.collection_run" in sql:
+            self.rows = [{
+                "tenant_id": "ledger-only", "requested_actions": 10, "status": "interrupted",
+                "started_at": None, "finished_at": None,
+            }] if self.ledger_only else []
+        else:
+            raise AssertionError(sql)
+
+    def fetchall(self): return self.rows
+    def fetchone(self): return self.rows[0]
+
+
+class BatchConnection:
+    def __init__(self, ledger_only=False): self.cursor_instance = BatchCursor(ledger_only)
+    def __enter__(self): return self
+    def __exit__(self, exc_type, exc, tb): return False
+    def cursor(self): return self.cursor_instance
+
+
 def start_server(module, repository=None, api_key=""):
     server = module.ConsoleServer(("127.0.0.1", 0), repository or Repository(), api_key=api_key)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -172,6 +256,114 @@ def test_console_context_quality_counts_partial_without_marking_it_failed():
     ]
 
     assert module.summarize_context_quality(rows) == {"full": 1, "partial": 1, "invalid": 1, "unknown": 1}
+
+
+def test_variant_redirect_requires_explicit_same_parent_sibling_evidence():
+    module = load_module()
+    explicit = {
+        "error_code": "asin_mismatch",
+        "context_json": {
+            "identity": {
+                "requested_asin": "B0B9ZFDZNJ",
+                "observed_asin": "B0B9ZFZZZZ",
+                "canonical_asin": "B0B9ZFZZZZ",
+                "parent_asin": "B0PARENT01",
+                "child_asins": ["B0B9ZFDZNJ", "B0B9ZFZZZZ"],
+            }
+        },
+    }
+    ambiguous = {"error_code": "asin_mismatch", "context_json": {}}
+
+    assert module.classify_evidence_outcome(explicit) == "variant_redirect"
+    assert module.classify_evidence_outcome(ambiguous) == "failed"
+
+
+def test_price_status_distinguishes_unavailable_without_buy_box_from_missing():
+    module = load_module()
+
+    assert module.project_price_status({
+        "price": None,
+        "availability": "Currently unavailable. We don't know when or if this item will be back in stock.",
+        "buy_box": {},
+    }) == "unavailable"
+    assert module.project_price_status({"price": None, "availability": None, "buy_box": {}}) == "missing"
+    assert module.project_price_status({"price": "$19.99", "availability": "In Stock", "buy_box": {}}) == "available"
+    assert module.project_price_status({
+        "price": "",
+        "availability": "We don't know when or if this item will be back in stock. Currently unavailable.",
+        "buy_box": {"text": "Currently unavailable. Deliver to Los Angeles 90001. Add to List"},
+    }) == "unavailable"
+
+
+def test_batch_summary_projects_real_100_asin_acceptance_counts():
+    module = load_module()
+    repository = module.PostgresConsoleRepository("postgresql://example")
+    repository._connect = lambda: BatchConnection()
+
+    batch = repository.list_tenants()[0]
+
+    assert batch["tenant_id"] == "owned_us_asin_20260901_100_01"
+    assert (batch["requested"], batch["recorded"]) == (100, 100)
+    assert batch["product_succeeded"] == 92
+    assert batch["variant_redirect"] == 8
+    assert batch["failed"] == 0
+    assert batch["blocked"] == 0
+    assert (batch["pending"], batch["running"]) == (0, 0)
+    assert batch["terminal_status"] == "complete"
+
+
+def test_tenant_list_includes_ledger_only_interrupted_run():
+    module = load_module()
+    repository = module.PostgresConsoleRepository("postgresql://example")
+    repository._connect = lambda: BatchConnection(ledger_only=True)
+
+    assert repository.list_tenants() == [{
+        "tenant_id": "ledger-only", "requested": 10, "recorded": 0, "product_succeeded": 0,
+        "variant_redirect": 0, "failed": 0, "blocked": 0, "pending": 10, "running": 0,
+        "evidence_actions": 0, "known_transfer_bytes": 0, "unknown_transfer_records": 0,
+        "http_actions": 0, "firefox_actions": 0, "started_at": None, "ended_at": None,
+        "duration_seconds": None, "terminal_status": "interrupted",
+    }]
+
+
+def test_tenant_summary_uses_database_aggregation_not_python_evidence_scan():
+    source = SCRIPT.read_text(encoding="utf-8")
+    method = source[source.index("    def list_tenants"):source.index("    def load_overview")]
+    assert "WITH latest AS" in method and "classified AS" in method
+    assert "latest_evidence =" not in method
+    assert "idx_evidence_tenant_identity_latest" in (ROOT / "schema" / "postgres_schema.sql").read_text(encoding="utf-8")
+
+
+def test_variant_redirect_requires_explicit_same_parent_sibling_evidence():
+    module = load_module()
+    explicit = {
+        "error_code": "asin_mismatch",
+        "context_json": {
+            "identity": {
+                "requested_asin": "B0B9ZFDZNJ",
+                "observed_asin": "B0B9ZFZZZZ",
+                "canonical_asin": "B0B9ZFZZZZ",
+                "parent_asin": "B0PARENT01",
+                "child_asins": ["B0B9ZFDZNJ", "B0B9ZFZZZZ"],
+            }
+        },
+    }
+    ambiguous = {"error_code": "asin_mismatch", "context_json": {}}
+
+    assert module.classify_evidence_outcome(explicit) == "variant_redirect"
+    assert module.classify_evidence_outcome(ambiguous) == "failed"
+
+
+def test_price_status_distinguishes_unavailable_without_buy_box_from_missing():
+    module = load_module()
+
+    assert module.project_price_status({
+        "price": None,
+        "availability": "Currently unavailable. We don't know when or if this item will be back in stock.",
+        "buy_box": {},
+    }) == "unavailable"
+    assert module.project_price_status({"price": None, "availability": None, "buy_box": {}}) == "missing"
+    assert module.project_price_status({"price": "$19.99", "availability": "In Stock", "buy_box": {}}) == "available"
 
 
 def test_console_serves_static_ui_with_security_headers():
@@ -266,6 +458,52 @@ def test_console_lists_runs_and_returns_one_run_result():
         assert run["items"][1]["attribution"] == "time_window_inference"
         with pytest.raises(urllib.error.HTTPError) as raised:
             urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/api/runs/missing", timeout=2)
+        assert raised.value.code == 404
+    finally:
+        stop_server(server, thread)
+
+
+def test_console_tenant_selection_is_explicit_and_cross_tenant_runs_are_invisible():
+    module = load_module()
+    server, thread = start_server(module, MultiTenantRepository())
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/api/tenants", timeout=2) as response:
+            tenants = json.loads(response.read())
+        assert [item["tenant_id"] for item in tenants["items"]] == ["tenant-a", "tenant-b"]
+
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{server.server_port}/api/runs/run-a?tenant=tenant-a", timeout=2
+        ) as response:
+            run = json.loads(response.read())
+        assert run["tenant_id"] == "tenant-a"
+
+        with pytest.raises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/api/runs/run-b?tenant=tenant-a", timeout=2
+            )
+        assert raised.value.code == 404
+    finally:
+        stop_server(server, thread)
+
+
+def test_console_tenant_selection_is_explicit_and_cross_tenant_runs_are_invisible():
+    module = load_module()
+    server, thread = start_server(module, MultiTenantRepository())
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/api/tenants", timeout=2) as response:
+            tenants = json.loads(response.read())
+        assert [item["tenant_id"] for item in tenants["items"]] == ["tenant-a", "tenant-b"]
+
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{server.server_port}/api/runs/run-a?tenant=tenant-a", timeout=2
+        ) as response:
+            run = json.loads(response.read())
+        assert run["tenant_id"] == "tenant-a"
+
+        with pytest.raises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/api/runs/run-b?tenant=tenant-a", timeout=2
+            )
         assert raised.value.code == 404
     finally:
         stop_server(server, thread)

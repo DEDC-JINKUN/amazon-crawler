@@ -14,6 +14,7 @@
       <p id="tenantLabel" class="muted">正在连接指定批次…</p>
     </div>
     <div class="topbar-actions">
+      <label class="tenant-picker">Tenant / 批次 <select id="tenantSelector" aria-label="选择tenant或批次"><option value="">正在读取…</option></select></label>
       <span id="liveBadge" class="live-badge"><i></i> 实时</span>
       <button id="apiKeyButton" class="ghost-button" type="button">API Key</button>
       <button id="refreshButton" class="primary-button" type="button">立即刷新</button>
@@ -22,6 +23,16 @@
 
   <main>
     <div id="errorBanner" class="error-banner" hidden></div>
+
+    <section class="panel batch-panel">
+      <div class="panel-title"><div><p class="eyebrow">POSTGRESQL BATCHES</p><h2>可见批次</h2></div><span class="muted">每批次一行 · 点击切换</span></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Tenant / 批次</th><th>Requested / Recorded</th><th>商品成功</th><th>Variant redirect</th><th>Failed</th><th>Blocked</th><th>Pending / Running</th><th>流量</th><th>耗时</th><th>终态</th></tr></thead>
+          <tbody id="batchRows"><tr><td colspan="10" class="muted">正在读取PostgreSQL可见批次…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
 
     <section class="metric-grid" aria-label="批次指标">
       <article class="metric-card"><span>进度</span><strong id="progressMetric">—</strong><small id="progressSub">—</small></article>
@@ -65,8 +76,8 @@
       <div id="runSummary" class="run-summary muted">选择一个run即可区分本次处理结果；同一ASIN可在不同run中重复出现。</div>
       <div class="table-wrap compact-table">
         <table>
-          <thead><tr><th>ASIN</th><th>结果</th><th>商品</th><th>来源</th><th>HTTP</th><th>错误/阻断</th><th>归属依据</th><th>时间</th></tr></thead>
-          <tbody id="runRows"><tr><td colspan="8" class="muted">暂无已选运行</td></tr></tbody>
+          <thead><tr><th>ASIN</th><th>结果</th><th>商品</th><th>价格状态</th><th>来源</th><th>HTTP</th><th>错误/阻断</th><th>归属依据</th><th>时间</th></tr></thead>
+          <tbody id="runRows"><tr><td colspan="9" class="muted">暂无已选运行</td></tr></tbody>
         </table>
       </div>
       <p id="runWarning" class="muted table-summary"></p>
@@ -84,7 +95,7 @@
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>ASIN</th><th>商品</th><th>状态</th><th>阶段</th><th>来源</th><th>HTTP</th><th>错误</th><th>更新时间</th></tr></thead>
+          <thead><tr><th>ASIN</th><th>商品</th><th>状态</th><th>阶段</th><th>价格状态</th><th>来源</th><th>HTTP</th><th>错误</th><th>更新时间</th></tr></thead>
           <tbody id="taskRows"></tbody>
         </table>
       </div>
@@ -98,7 +109,7 @@
   </aside>
   <div id="drawerBackdrop" class="backdrop" hidden></div>
 
-  <footer>只读控制台 · 5秒轮询本机数据库 · 不访问Amazon · 不执行原始HTML</footer>
+  <footer>只读控制台 · 5秒轮询PostgreSQL · 不访问Amazon · 历史run不依赖浏览器缓存或单一输出目录</footer>
   <script src="/app.js" defer></script>
 </body>
 </html>
