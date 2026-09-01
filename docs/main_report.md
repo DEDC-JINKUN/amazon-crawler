@@ -580,6 +580,8 @@ if (-not $env:AMAZON_US_POSTGRES_DSN) { throw 'AMAZON_US_POSTGRES_DSN is require
 
 Console 是常驻 Python 进程，代码更新后必须重启旧 Console 才会加载新的分类与汇总逻辑：先执行 `.\crawler.ps1 stop -All`，再由下一次 `probe/run` 自动启动，或单独执行 `.\crawler.ps1 console`。
 
+2026-09-01核对发现，旧交接副本曾通过Windows计划任务`Amazon US Collection Hourly`每小时执行`2026-08-25`目录的`run_once_windows.bat`。该旧入口先执行SQLite `--live --once`，即使Worker失败仍继续`--materialize-only`，会造成“先出现联网异常堆栈、随后打印不访问网络”的误导，并可能与正式批次同时占用Amazon出口。该计划任务已由用户授权禁用，原生任务查询为`Status=Disabled, Next Run Time=N/A`；任务本身和旧目录暂未删除。正式运行与未来调度只能调用当前目录`crawler.ps1`和PostgreSQL Worker，禁止重新启用旧小时任务。
+
 Console 只在三项同时成立时复用：`.console.lock.json` 中的 PID+StartTime 仍指向受控 host、lock 的 tenant/raw HTML 身份匹配、readyz 与当前 `collection_console.py` 的 SHA-256 runtime fingerprint 一致。锁的 `start_time` 可能被 PowerShell `ConvertFrom-Json` 还原为 `DateTime`，也可能保持 ISO string；控制器将两者规范为 UTC 后按 ticks 精确比较，不使用宽松时间容差，也不只凭 PID 接管进程。仅 tenant/raw 目录匹配不足以证明进程受控。端口存在无有效 lock 的 listener 时，控制器 fail closed 并提示由操作者在控制器外处理；`stop -All` 不会任意终止未知 PID。
 
 `probe` 的 Worker exit 0 只表示完成有界 action 循环，不代表商品质量通过。Worker 退出后，控制器会有界读取最终 run，打印最终 `recorded/requested`、completed、failed、blocked、inferred，并在 receipt v2 保存这些字段、四类 traffic、`worker_exit_code`、`quality_gate_ok` 与失败原因。Probe 只有在 recorded 等于请求数、inferred/failed/blocked 均为 0、且全部 item 为 evidence-attributed completed 时返回 0；否则状态为 `quality_failed` 并返回非零。普通 `run` 保留原 Worker exit 语义，但 receipt 同样提供最终观测字段。
