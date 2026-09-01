@@ -28,7 +28,7 @@
 
 ### 1.4 当前结论
 
-低流量控制、Cookie 桥接、fallback 去重、nullable 流量、terminal failure 和 full/partial 上下文合同已通过离线测试，最新完整结果为 `261 passed, 1 skipped`。2026-08-31 修复后的真实 Amazon 阶梯已验证3/10/20；继续扩到100-ASIN时在第73条首次出现HTTP 200 CAPTCHA，`stop_on_block`立即以73/100熔断，剩余27条未请求。已完成73条中60个商品全部为full，12条均为同Parent内跳向活跃Sibling Child的`asin_mismatch/variant_redirect`，1条为CAPTCHA；没有新的代码失败或stderr。60个商品页已保存338条真实top reviews，其中54条进入`reviews_pending`，但独立评论分页尚未执行。用户连接手机热点后的短探针3/3通过，但随后的100-run在第2条再次命中同型CAPTCHA；Windows路由核对发现`EFan tun2socks Tunnel`仍为Up并持有覆盖绝大多数公网地址的低metric路由，证明热点只更换底层WLAN，Amazon流量仍经过原VPN隧道。当前必须先关闭EFan或切到真正不同的合规美国出口，不能继续试探；测试账户不得用于绕过挑战，独立评论登录能力仍需单独实现和验证。
+低流量控制、Cookie 桥接、fallback 去重、nullable 流量、terminal failure 和 full/partial 上下文合同已通过离线测试，最新完整结果为 `261 passed, 1 skipped`。2026-08-31 修复后的真实 Amazon 阶梯已验证3/10/20；继续扩到100-ASIN时在第73条首次出现HTTP 200 CAPTCHA，`stop_on_block`立即以73/100熔断，剩余27条未请求。已完成73条中60个商品全部为full，12条均为同Parent内跳向活跃Sibling Child的`asin_mismatch/variant_redirect`，1条为CAPTCHA；没有新的代码失败或stderr。60个商品页已保存338条真实top reviews，其中54条进入`reviews_pending`，但独立评论分页尚未执行。用户连接手机热点后的短探针3/3通过，但随后的100-run在第2条再次命中同型CAPTCHA；Windows路由核对发现`EFan tun2socks Tunnel`仍为Up并持有覆盖绝大多数公网地址的低metric路由，证明热点只更换底层WLAN，Amazon流量仍经过原VPN隧道。当前必须先关闭EFan或切到真正不同的合规美国出口，不能继续试探；测试账户不得用于绕过挑战。结合2026-09-01周会完成的评论分析专项调研已写入7.3：正确方法、工具候选、Customer Feedback API权限清单和测试账户Worker设计均为**研究结论**，尚未采购、授权、开发或实机验证。
 
 ## 2. 系统架构
 
@@ -303,7 +303,135 @@ Partial 不等于 90001 结果，不能用于断言价格、库存、buy box 或
 
 portal 评论 URL 为空时可尝试稳定 `/product-reviews/{ASIN}`；两者均为空后，才允许一次 `review_empty` Firefox fallback。仍为空时保存 `empty_review_page`，保持评论游标，不把 200 空页写成评论成功。
 
-### 7.3 媒体
+### 7.3 评论分析工具选型与采集规则（研究完成，实现待定）
+
+> **状态边界：** 本节是截至2026-09-01、结合周会要求形成的研究合同。当前没有购买或接入第三方评论工具，没有获得Amazon Customer Feedback API授权，没有实现登录评论Worker，也没有用测试账户访问独立评论页。任何后续代码任务必须先解决本节的`待确认`项。
+
+#### 7.3.1 业务目标
+
+评论分析的核心是识别用户诉求，而不是只筛三星以下或把1万条评论机械翻完。目标输出至少包括：
+
+- 正面、负面和混合观点；
+- 产品主题/属性，如质量、耐用性、尺寸、安装、兼容性、包装、缺件、价格和描述一致性；
+- 每个属性的情感、提及量和对星级的影响；
+- 最近周期内改善、恶化或稳定的趋势；
+- Parent/Child变体差异和自有/竞品差距；
+- 可回到原评论、ASIN、日期和样本分母的证据；
+- 面向产品、Listing、客服和供应链的行动建议。
+
+不能只给整条评论一个正负标签。一条五星评论可能同时表达“安装方便”与“铰链不耐用”，必须做属性级情感分析（ABSA）。任何百分比都必须保存分母、cohort、时间范围和数据来源，不能由LLM自行编造。
+
+#### 7.3.2 数据源与工具优先级
+
+优先顺序固定为：
+
+```text
+Amazon官方Customer Feedback API
+→ 合规现成工具的小样本对照
+→ PostgreSQL中的top reviews和获准原文证据
+→ 测试账户低频评论Worker（仅补证）
+```
+
+| 候选 | 主要能力 | 已知限制 | 当前决策 |
+|---|---|---|---|
+| Amazon Customer Feedback API | ASIN/Browse Node正负主题、提及量、星级影响、月度趋势和片段 | 周更、仅英文；需`Brand Analytics`或`Selling Partner Insights`角色 | **第一优先核验**，未授权 |
+| Helium 10 Review Insights | 官方API主题、评分影响、6个月趋势、Parent/类目比较、CSV | 付费；共享Amazon API缺数据边界；截至2026-09-01公开约$99年付折算或$129月付 | 可做现成工具对照，未采购 |
+| Jungle Scout AI Review Analysis | 任意ASIN、竞品、正负主题和改进建议 | 原始CSV需Amazon买家登录，公开限制最多100条最新评论 | 适合分析师小样本，非5,800 ASIN主链路 |
+| VOC.AI | Amazon专用主题、竞品、API/MCP和批报告 | 数据新鲜度、Parent/Child和近期评论覆盖需实测；Pro公开$99/月 | **低成本试点候选**，未开通 |
+| BERTopic + PyABSA | 开源主题发现、属性抽取、属性情感和观点三元组 | 通用模型存在品类错配；必须用本项目金标和人工主题治理 | 可做内部原型，未安装 |
+| Thematic / Qualtrics / Chattermill | 多渠道企业VoC、工作流和仪表盘 | 成本和复杂度高；不是Amazon数据源 | Amazon单站MVP暂不采购 |
+
+价格属于动态外部事实，采购前必须重新核验；本表不构成购买授权。
+
+#### 7.3.3 正确的评论选择与分析规则
+
+1. 先定义业务问题、ASIN cohort、Parent/Child、时间窗口和竞品集合，再取评论；
+2. 不只抓低星，也不只依赖Amazon排序后的top reviews；
+3. 评论量较少时可在访问权利允许的前提下全量；评论量很大时按以下维度分层抽样：
+   - 1至5星；
+   - 正面、负面、混合及待识别观点；
+   - 新近与历史；
+   - Parent下不同Child；
+   - verified purchase、helpful count；
+   - 自有与竞品；
+4. 先发现和合并`aspect-sentiment`，再按其分布选择代表评论，最后生成证据约束摘要；
+5. 摘要必须显示样本数、时间范围、ASIN/变体和3至5条原文证据；
+6. 评分影响表示关联和优先级，不得冒充销售因果关系；
+7. 趋势比较必须固定cohort、周期和主题版本，主题重命名或合并要有版本历史；
+8. 原文中可能包含姓名等用户生成信息，展示层只保留分析所需最小字段，不建立用户画像。
+
+试点目标为20至50个ASIN、1,000至2,000条评论，并覆盖高/低评论量、自有/竞品和多个Child。至少10%的试点样本由人工复核主题、情感、证据与摘要；`主题准确率、召回率、情感F1和允许误差阈值`均为**待确认验收标准**，不能先写一个没有金标依据的数字。
+
+#### 7.3.4 Customer Feedback API权限核验
+
+官方API当前已知合同：数据周更、仅英文；单ASIN洞察可分别按`MENTIONS`和`STAR_RATING_IMPACT`排序，返回前10个正面、前10个负面主题及过去六个月趋势；默认每账户-应用对1 request/second、burst 10。
+
+以下信息必须由公司Amazon主账号管理员确认：
+
+| 待确认项 | 为什么需要 | 确认结果 |
+|---|---|---|
+| 公司账户是Seller还是Vendor | 决定注册和授权路径 | `待确认` |
+| Seller是否为Professional账户 | 私有Seller SP-API应用前置 | `待确认` |
+| 是否有Brand Registry | 影响Brand Analytics能力 | `待确认` |
+| 主账号能否进入`Apps and Services → Develop Apps`或Solution Provider Portal | 决定是否能注册/更新应用 | `待确认` |
+| 是否已有Developer Profile | 决定从注册还是角色更新开始 | `待确认` |
+| 是否已有公司私有SP-API应用 | 决定新建或复用 | `待确认` |
+| 已获批角色是否包含`Brand Analytics`或`Selling Partner Insights` | Customer Feedback操作至少需要一个 | `待确认` |
+| 是否允许为本项目新增角色并重新授权 | 新角色需要应用更新和新LWA refresh token | `待确认` |
+| 凭据由谁保管、放入哪个安全凭据系统 | 禁止写代码、文档、日志和TOML | `待确认` |
+| API用于自有ASIN还是也允许竞品/类目研究 | 决定业务边界与cohort | `待确认` |
+
+权限可用时，官方API是主题、提及量、评分影响和趋势的主数据源；本地评论只补原文、中文业务主题和细粒度证据。权限不可用时，才进入VOC.AI/Helium 10/Jungle Scout同cohort试点。
+
+#### 7.3.5 测试账户独立评论Worker规则
+
+该Worker尚未实现。即使使用测试账户，也只能作为低频原文补证，不能承担5,800 ASIN生产全量评论：
+
+```text
+独立review tenant / worker / run_id
+→ 启动可见隔离Firefox
+→ 用户在该窗口手动登录测试账户
+→ 不读取现有Chrome/Firefox个人profile
+→ 代码不接触密码、OTP或支付信息
+→ 登录Cookie不桥接商品HTTP
+→ 初期不跨run持久化Cookie
+→ 只领取reviews_pending
+→ 固定ASIN数、页数、速率和总时长
+→ CAPTCHA、WAF、登录异常、评论访问限制立即停止
+```
+
+其他硬边界：
+
+- 不自动解决CAPTCHA，不点击“继续购物”绕过挑战；
+- 不自动换账号、IP或代理轮换；
+- 商品成功和评论失败继续分离；
+- 评论evidence保存URL、状态、hash、来源、页码和Raw HTML指针，不保存Cookie值或账号标识；
+- 第一次真实验收最多3个ASIN、每个1至2页；出现评论访问限制立即停用该路径；
+- Amazon 2026 Agent Policy完整文本、测试账户负责人授权和公司合规/安全意见均为`待确认`；确认前不进入代码开发。
+
+#### 7.3.6 仍需业务确认
+
+| 业务问题 | 当前状态 |
+|---|---|
+| 正式自有美国ASIN权威清单是800、1,800还是5,800口径 | `待确认`；需区分active、404、variant_redirect和Parent/Child |
+| 评论分析覆盖自有商品、竞品还是两者 | `待确认` |
+| 重点ASIN如何分级，分析周期是周、月还是事件触发 | `待确认` |
+| 是否需要中文、英文或双语主题和摘要 | `待确认` |
+| 产品、运营、Listing、供应链分别需要哪些主题 | `待确认` |
+| 允许展示哪些原评论字段，保留多久 | `待确认` |
+| VOC.AI/Helium 10/Jungle Scout试点预算与采购负责人 | `待确认` |
+| 测试账户自动化是否获公司账户负责人和合规/安全批准 | `待确认` |
+
+#### 7.3.7 分阶段决策门
+
+1. **A：现有数据原型。** 用已保存top reviews建立主题/证据样例，不新增Amazon请求；
+2. **B：官方权限。** 完成7.3.4清单；权限可用则先做API静态Sandbox和3-ASIN生产验证；
+3. **C：工具对照。** 同一20至50 ASIN cohort试用VOC.AI，并选择Helium 10或Jungle Scout之一对照；
+4. **D：方法验收。** 建立人工金标，核对主题、情感、Parent/Child、新鲜度和证据追溯；
+5. **E：实现决策。** 官方API/现成工具不足且登录路径获批时，才创建独立评论Worker任务包；
+6. **F：采购决策。** 只有试点证明覆盖、新鲜度、成本和可持续性后才购买。
+
+### 7.4 媒体
 
 默认配置 `save_media = "url_and_metadata_only"`。`media_asset` 和 `content_module.image_url` 保存 URL/元数据；系统不下载图片或视频二进制，媒体成本不并入商品 action。
 
@@ -521,6 +649,7 @@ Console 只在三项同时成立时复用：`.console.lock.json` 中的 PID+Star
 | 已验证 | 404缺ASIN+标题与严格ASIN mismatch终止、释放租约且不普通重领 | 离线PG/SQLite测试；最新20-ASIN真实PostgreSQL状态核对 |
 | 已验证 | 同run匿名Cookie桥接后HTTP复用 | 最新20-ASIN为1条Firefox、19条HTTP，桥接1次 |
 | 已验证 | `stop_on_block` 在扩量时立即停止当前出口 | 100-ASIN run在第73条HTTP 200 CAPTCHA后停止，剩余27条未请求 |
+| 研究结论 | 评论分析工具、属性级方法、官方API权限清单和测试账户Worker边界 | 32个来源/30条证据的会议驱动调研；未实现 |
 | 目标值 | 商品成功率 | `>= 95%`，待真实批次 |
 | 目标值 | US/USD 硬门正确率 | `100%`，待真实批次 |
 | 目标值 | full/partial 可解释率 | 最新3/10/20及100-run已完成73条 evidence 与 Console 均可解释 |
@@ -530,6 +659,10 @@ Console 只在三项同时成立时复用：`.console.lock.json` 中的 PID+Star
 | 未验证 | Firefox/geckodriver 实机 BiDi bytes 与 fetch_error 事件完整性 | 需获批 Amazon 小样本 |
 | 未验证 | 真实 PostgreSQL 集成（当前进程） | `AMAZON_TEST_POSTGRES_DSN` 缺失 |
 | 未验证 | 代理后台计费与本地四类指标对账 | 需最小付费套餐和 `U1-U0` |
+| 未验证 | 公司Customer Feedback API账户/角色/私有应用权限 | 需Amazon主账号管理员完成7.3.4清单 |
+| 未验证 | VOC.AI/Helium 10/Jungle Scout同cohort覆盖和新鲜度 | 需20至50 ASIN、1,000至2,000评论试点 |
+| 未验证 | 评论主题/情感/摘要的人工金标准确性 | 验收阈值待业务与技术共同确认 |
+| 未验证 | 测试账户独立评论Worker与Amazon Agent Policy合规 | 仅有设计；未获账户负责人/合规批准、未开发、未实测 |
 
 ## 15. 术语
 
@@ -542,3 +675,6 @@ Console 只在三项同时成立时复用：`.console.lock.json` 中的 PID+Star
 | Evidence | 对一次 action 的 URL、来源、状态、hash、流量、上下文和 raw HTML 指针 |
 | `null/unknown` | 计量证据不足；不是 0，也不能参与完整成本相加 |
 | Proxy bill | 代理供应商后台实际计费差值，是成本真值，不等于本地响应体大小 |
+| VoC | Voice of Customer，把评论等反馈转成可量化主题、趋势和行动 |
+| ABSA | Aspect-Based Sentiment Analysis，识别具体属性及其正面、负面或混合观点 |
+| Representative review | 能代表某个属性-情感群体并可回溯原文的评论证据，不等于Amazon top review |
