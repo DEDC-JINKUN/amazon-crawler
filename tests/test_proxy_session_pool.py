@@ -207,6 +207,16 @@ def test_rejects_unsafe_limits(name, value):
         module.ProxySessionPool(config(**{name: value}), lambda cfg: None, classifier)
 
 
+def test_rejects_more_than_forty_approved_ports():
+    module = load_pool()
+    with pytest.raises(ValueError, match="1 to 40 approved ports"):
+        module.ProxySessionPool(
+            config(proxy_session_ports=list(range(10000, 10041))),
+            lambda cfg: None,
+            classifier,
+        )
+
+
 def load_worker():
     spec = importlib.util.spec_from_file_location("amazon_worker_pool_test", ROOT / "scripts" / "amazon_us_worker.py")
     module = importlib.util.module_from_spec(spec)
@@ -383,6 +393,39 @@ def test_simulated_twenty_products_all_record_evidence_and_rotate_bounded_sessio
     assert len(final_pool["sessions"]) == 10
     assert sum(item["request_count"] for item in final_pool["sessions"]) == 20
     assert sum(item["completed"] for item in final_pool["sessions"]) == 20
+    assert final_pool["circuit_open_reason"] is None
+    assert final_pool["unrequested_count"] == 0
+
+
+def test_simulated_hundred_products_fit_in_a_finite_thirty_four_slot_pool():
+    worker = load_worker()
+    pool_module = load_pool()
+
+    class DynamicAdapter(FakeAdapter):
+        def __init__(self, slot_config):
+            super().__init__(slot_config, [])
+
+        def fetch(self, url):
+            asin = url.split("/dp/")[1][:10]
+            self.last_transfer_bytes = 100
+            self.action_http_transfer_bytes += 100
+            return product_html(asin), 200
+
+    pool = pool_module.ProxySessionPool(
+        config(proxy_session_ports=list(range(10000, 10034)), proxy_session_max_asins=3),
+        DynamicAdapter,
+        worker.classify_block,
+    )
+    storage = ProductStorage(count=100)
+    worker_config = {**worker.DEFAULTS, "max_actions_per_run": 100, "raw_html_dir": None, "context": {}}
+
+    assert worker.run_postgres_actions(
+        storage, pool, worker_config, limit=100, run_id="run-100", worker_id="worker-a"
+    ) == 100
+    assert len(storage.saved) == 100
+    final_pool = storage.saved[-1]["evidence"]["context_json"]["proxy_session_pool"]
+    assert len(final_pool["sessions"]) == 34
+    assert sum(item["completed"] for item in final_pool["sessions"]) == 100
     assert final_pool["circuit_open_reason"] is None
     assert final_pool["unrequested_count"] == 0
 

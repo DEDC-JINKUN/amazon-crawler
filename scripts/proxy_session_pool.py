@@ -7,6 +7,8 @@ from collections import deque
 from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
 
+MAX_PROXY_SESSION_PORTS = 40
+
 
 class ProxyCircuitOpen(RuntimeError):
     """No further network work is allowed for this run."""
@@ -66,8 +68,8 @@ class ProxySessionPool:
         if self.mode != "sticky":
             raise ValueError("proxy_session_mode must be sticky")
         ports = list(config.get("proxy_session_ports") or [])
-        if not ports or len(ports) > 20:
-            raise ValueError("proxy_session_ports must contain 1 to 20 approved ports")
+        if not ports or len(ports) > MAX_PROXY_SESSION_PORTS:
+            raise ValueError(f"proxy_session_ports must contain 1 to {MAX_PROXY_SESSION_PORTS} approved ports")
         self._ports = [int(port) for port in ports]
         if len(set(self._ports)) != len(self._ports) or any(port < 1 or port > 65535 for port in self._ports):
             raise ValueError("proxy_session_ports must be unique valid ports")
