@@ -219,10 +219,88 @@ def test_two_workers_claim_distinct_tasks_from_real_postgres():
             controller_exit_code=130, worker_exit_code=-15, termination_reason="controller_exited",
             receipt={"status": "interrupted"},
         )
+        ledger.start_run(
+            connect, tenant_id=tenant_id, run_id="ledger-run-2", command="run", requested_actions=2,
+            worker_id="integration-worker", controller_pid=123,
+        )
+        ledger.finish_run(
+            connect, tenant_id=tenant_id, run_id="ledger-run-2", status="completed",
+            controller_exit_code=0, worker_exit_code=0, termination_reason=None,
+            receipt={"status": "completed", "elapsed_seconds": 150.0},
+        )
+        with psycopg.connect(DSN) as connection:
+            connection.execute(
+                "UPDATE amazon_us.collection_run SET started_at='2026-09-02T03:33:23Z',"
+                "finished_at='2026-09-02T03:34:16.62Z' WHERE tenant_id=%s AND run_id='ledger-run'",
+                (tenant_id,),
+            )
+            connection.execute(
+                "UPDATE amazon_us.collection_run SET started_at='2026-09-02T03:40:34Z',"
+                "finished_at='2026-09-02T03:42:53.46Z' WHERE tenant_id=%s AND run_id='ledger-run-2'",
+                (tenant_id,),
+            )
+            connection.commit()
         ledger_detail = console.load_run("ledger-run")
         assert ledger_detail["requested_actions"] == 2
         assert ledger_detail["recorded_actions"] == 0
         assert ledger_detail["terminal_status"] == "interrupted"
+
+        operation = load_script("operation_ledger")
+        operation.ensure_schema(connect)
+        before_operation = next(
+            item for item in load_console().PostgresConsoleRepository(DSN).list_tenants()
+            if item["tenant_id"] == tenant_id
+        )
+        operation.start_operation("op-integration", tenant_id, "egress", "dataimpulse-us", None, connect=connect)
+        operation.finish_operation(
+            "op-integration", tenant_id, "failed", "egress", "network_error",
+            probe_elapsed_ms=2534.1, response_bytes=0, connect=connect,
+        )
+        operations = console.list_operations()
+        assert operations[0]["operation_id"] == "op-integration"
+        assert operations[0]["error_class"] == "network_error"
+        after_operation = next(
+            item for item in load_console().PostgresConsoleRepository(DSN).list_tenants()
+            if item["tenant_id"] == tenant_id
+        )
+        assert (after_operation["requested"], after_operation["recorded"]) == (
+            before_operation["requested"], before_operation["recorded"]
+        )
+        operation.start_operation("op-terminal", tenant_id, "run", "dataimpulse-us", "run-terminal", connect=connect)
+        operation.finish_operation(
+            "op-terminal", tenant_id, "interrupted", "worker", "controller_exited", connect=connect
+        )
+        operation.finish_operation(
+            "op-terminal", tenant_id, "failed", "worker", "worker_failed", connect=connect
+        )
+        ledger.start_run(
+            connect, tenant_id=tenant_id, run_id="run-terminal", command="run", requested_actions=1,
+            worker_id="integration-worker", controller_pid=123,
+        )
+        ledger.finish_run(
+            connect, tenant_id=tenant_id, run_id="run-terminal", status="interrupted",
+            controller_exit_code=130, worker_exit_code=130, termination_reason="controller_exited",
+            receipt={"status": "interrupted"},
+        )
+        ledger.finish_run(
+            connect, tenant_id=tenant_id, run_id="run-terminal", status="failed",
+            controller_exit_code=2, worker_exit_code=130, termination_reason="controller_exception",
+            receipt={"status": "failed"},
+        )
+        with psycopg.connect(DSN) as connection:
+            assert connection.execute(
+                "SELECT status FROM amazon_us.operation_run WHERE tenant_id=%s AND operation_id='op-terminal'",
+                (tenant_id,),
+            ).fetchone() == ("interrupted",)
+            assert connection.execute(
+                "SELECT status FROM amazon_us.collection_run WHERE tenant_id=%s AND run_id='run-terminal'",
+                (tenant_id,),
+            ).fetchone() == ("interrupted",)
+            connection.execute(
+                "DELETE FROM amazon_us.collection_run WHERE tenant_id=%s AND run_id='run-terminal'",
+                (tenant_id,),
+            )
+            connection.commit()
 
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             raw_path = Path(temporary) / "mismatch.html"
@@ -260,10 +338,11 @@ def test_two_workers_claim_distinct_tasks_from_real_postgres():
         assert batch["requested"] == 2
         assert batch["recorded"] >= 2
         assert batch["product_succeeded"] == 1
+        assert batch["active_duration_seconds"] == 193.08
     finally:
         with psycopg.connect(DSN) as connection:
             for table in (
-                "collection_run", "state_history", "review_page_state", "refresh_request", "collection_evidence", "media_asset", "content_module",
+                "operation_run", "collection_run", "state_history", "review_page_state", "refresh_request", "collection_evidence", "media_asset", "content_module",
                 "review_summary", "review_record", "product_snapshot", "item_state", "asin_master",
             ):
                 connection.execute(f"DELETE FROM amazon_us.{table} WHERE tenant_id=%s", (tenant_id,))

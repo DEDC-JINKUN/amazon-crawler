@@ -100,7 +100,7 @@ def finish_run(
             UPDATE amazon_us.collection_run
             SET status=%s,controller_exit_code=%s,worker_exit_code=%s,termination_reason=%s,
                 receipt_json=%s,finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
-            WHERE tenant_id=%s AND run_id=%s
+            WHERE tenant_id=%s AND run_id=%s AND status IN ('starting','running')
             """,
             (
                 status,
@@ -113,6 +113,15 @@ def finish_run(
             ),
         )
         if cursor.rowcount != 1:
+            cursor.execute(
+                "SELECT status FROM amazon_us.collection_run WHERE tenant_id=%s AND run_id=%s",
+                (tenant_id, run_id),
+            )
+            row = cursor.fetchone()
+            existing = row.get("status") if isinstance(row, dict) else row[0] if row else None
+            if existing in {"completed", "blocked", "quality_failed", "failed", "interrupted"}:
+                connection.commit()
+                return
             raise RuntimeError("run ledger terminal update did not match an existing run")
         connection.commit()
 
@@ -154,6 +163,17 @@ def finish_interrupted_from_host(lifecycle: dict[str, Any], worker_exit_code: in
         termination_reason="controller_exited",
         receipt=receipt,
     )
+    operation_id = lifecycle.get("operation_id")
+    if operation_id:
+        from operation_ledger import finish_operation
+        finish_operation(
+            str(operation_id),
+            str(lifecycle["tenant_id"]),
+            "interrupted",
+            "worker",
+            "controller_exited",
+            connect=connect,
+        )
     receipt_path = lifecycle.get("receipt_path")
     if receipt_path:
         _write_atomic(Path(receipt_path), receipt)
@@ -179,6 +199,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dsn-env", default="AMAZON_US_POSTGRES_DSN")
     parser.add_argument("--tenant-id")
     parser.add_argument("--run-id")
+    parser.add_argument("--operation-id")
     parser.add_argument("--command")
     parser.add_argument("--requested-actions", type=int)
     parser.add_argument("--worker-id")
@@ -229,6 +250,7 @@ def main(argv: list[str] | None = None) -> int:
                     "command": str(args.command or ""),
                     "requested_actions": int(args.requested_actions or 0),
                     "receipt_path": str(args.receipt),
+                    "operation_id": args.operation_id,
                 },
                 args.worker_exit_code,
             )

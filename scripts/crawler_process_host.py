@@ -221,6 +221,8 @@ def finalize_interrupted_run(lifecycle: dict, worker_exit_code: int | None, pyth
     ]
     if worker_exit_code is not None:
         command.extend(["--worker-exit-code", str(worker_exit_code)])
+    if lifecycle.get("operation_id"):
+        command.extend(["--operation-id", str(lifecycle["operation_id"])])
     completed = subprocess.run(command, cwd=str(Path(__file__).resolve().parents[1]), timeout=30)
     if completed.returncode != 0:
         raise RuntimeError(f"interrupted run finalization failed with exit code {completed.returncode}")

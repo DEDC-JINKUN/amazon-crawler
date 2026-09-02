@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -24,13 +25,53 @@ def load_host():
 
 def test_control_script_exposes_small_safe_command_surface():
     text = SCRIPT.read_text(encoding="utf-8")
-    assert "ValidateSet('probe', 'run', 'reviews', 'status', 'console', 'stop', 'help')" in text
+    assert "ValidateSet('egress', 'probe', 'run', 'reviews', 'status', 'console', 'stop', 'help')" in text
     assert "Read-Host" in text and "-AsSecureString" in text
     assert "--product-only" in text
     assert "--reviews-only" in text
     assert "--run-id" in text
     assert "--probe-egress" not in text
     assert "include-blocked" not in text.lower()
+    assert "egress_operation.py" in text
+    assert "operation_ledger.py" in text
+
+
+def test_collection_operations_are_registered_before_console_and_preflight():
+    text = SCRIPT.read_text(encoding="utf-8")
+    body = text[text.index("function Start-Crawl"):text.index("function Stop-Locked")]
+    assert body.index("Start-Operation") < body.index("Ensure-Console")
+    assert body.index("Start-Operation") < body.index("& $python $preflightScript")
+    assert "Mark-OperationPreflight" in body
+    assert "Finish-Operation" in body
+
+
+def test_setup_failures_are_audited_before_paths_limits_and_locks():
+    text = SCRIPT.read_text(encoding="utf-8")
+    main = text[text.index("$exitCode = 0"):]
+    assert main.index("Initialize-CrawlOperation $Command") < main.index("Resolve-ProjectPath $OutputDir")
+    setup = text[text.index("function Initialize-CrawlOperation"):text.index("function Start-Crawl")]
+    assert "Start-Operation" in setup
+    assert "$script:PendingOperationStarted = $true" in setup
+    assert 'Finish-Operation $script:PendingOperationId' in main
+
+
+def test_interrupt_status_is_preserved_by_controller_and_operation_ledgers():
+    text = SCRIPT.read_text(encoding="utf-8")
+    body = text[text.index("function Start-Crawl"):text.index("function Stop-Locked")]
+    assert "$workerExitCode -eq 130" in body
+    assert "$outcome -eq 'interrupted'" in body
+    assert "System.Management.Automation.PipelineStoppedException" in body
+    assert "$failureStatus = if ($isInterrupted) { 'interrupted' } else { 'failed' }" in body
+
+
+def test_egress_command_uses_official_audited_entry_without_collection_run():
+    text = SCRIPT.read_text(encoding="utf-8")
+    egress = text[text.index("function Start-EgressOperation"):text.index("function Start-Crawl")]
+    assert "Start-Operation" in egress
+    assert "$egressOperationScript" in egress
+    assert "Finish-Operation" in egress
+    assert "Start-RunLedger" not in egress
+    assert "requested_actions" not in egress
 
 
 def test_reviews_command_is_bounded_and_selects_only_review_stage():
@@ -223,6 +264,24 @@ def test_worker_and_console_locks_share_the_same_verified_process_gate():
     assert "Get-VerifiedProcess $console" in text
 
 
+def test_run_ledger_receipt_uses_json_file_not_native_stdin_pipe():
+    text = SCRIPT.read_text(encoding="utf-8")
+    start = text.index("function Finish-RunLedger")
+    end = text.index("function Ensure-Console", start)
+    body = text[start:end]
+    assert "--receipt" in body
+    assert "Set-Content -LiteralPath $ledgerReceipt -Encoding UTF8" in body
+    assert "| & $python $runLedgerScript" not in body
+    assert "Remove-Item -LiteralPath $ledgerReceipt" in body
+
+
+def test_controller_does_not_prompt_when_dsn_already_contains_password():
+    text = SCRIPT.read_text(encoding="utf-8")
+    assert "$dsnContainsPassword" in text
+    assert "password\\s*=" in text
+    assert "-not $dsnContainsPassword" in text
+
+
 def test_verified_process_fails_closed_when_start_time_access_throws():
     powershell = shutil.which("pwsh") or shutil.which("pwsh.exe") or shutil.which("powershell") or shutil.which("powershell.exe")
     assert powershell is not None
@@ -362,20 +421,29 @@ def test_managed_host_stops_worker_when_controller_heartbeat_stales_but_shell_li
             else:
                 owner_started = "owner"
             heartbeat.touch()
+            keepalive_stop = threading.Event()
+            def refresh_heartbeat():
+                while not keepalive_stop.is_set():
+                    heartbeat.touch()
+                    time.sleep(.1)
+            keepalive = threading.Thread(target=refresh_heartbeat, daemon=True)
+            keepalive.start()
             child_code = f"import pathlib,time; p=pathlib.Path(r'{worker_heartbeat}');\nwhile True: p.write_text(str(time.time())); time.sleep(.05)"
             request = root / "request.json"
             request.write_text(json.dumps({
                 "python": sys.executable, "working_directory": str(ROOT), "arguments": ["-c", child_code],
                 "gate_path": str(gate), "cancel_path": str(root / "cancel"),
                 "owner_pid": owner.pid, "owner_start_time": owner_started,
-                "owner_heartbeat_path": str(heartbeat), "owner_heartbeat_timeout_seconds": .5,
+                "owner_heartbeat_path": str(heartbeat), "owner_heartbeat_timeout_seconds": 2.0,
             }), encoding="utf-8")
             host = subprocess.Popen([sys.executable, str(HOST), "--request", str(request)])
             gate.touch()
             deadline = time.time() + 5
             while time.time() < deadline and not worker_heartbeat.exists(): time.sleep(.05)
             assert worker_heartbeat.exists()
-            assert host.wait(timeout=8) == 130
+            keepalive_stop.set()
+            keepalive.join(timeout=2)
+            assert host.wait(timeout=10) == 130
             assert owner.poll() is None, "the shell/controller process should still be alive in this reproduction"
             before = worker_heartbeat.stat().st_mtime_ns
             time.sleep(.3)

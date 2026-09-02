@@ -30,7 +30,7 @@
 
 低流量控制、Cookie 桥接、fallback 去重、nullable 流量、terminal failure 和 full/partial 上下文合同已通过离线测试，最新完整结果为 `261 passed, 1 skipped`。2026-08-31 修复后的真实 Amazon 阶梯已验证3/10/20；继续扩到100-ASIN时在第73条首次出现HTTP 200 CAPTCHA，`stop_on_block`立即以73/100熔断，剩余27条未请求。已完成73条中60个商品全部为full，12条均为同Parent内跳向活跃Sibling Child的`asin_mismatch/variant_redirect`，1条为CAPTCHA；没有新的代码失败或stderr。60个商品页已保存338条真实top reviews，其中54条进入`reviews_pending`，但独立评论分页尚未执行。用户连接手机热点后的短探针3/3通过，但随后的100-run在第2条再次命中同型CAPTCHA；Windows路由核对发现`EFan tun2socks Tunnel`仍为Up并持有覆盖绝大多数公网地址的低metric路由，证明热点只更换底层WLAN，Amazon流量仍经过原VPN隧道。当前必须先关闭EFan或切到真正不同的合规美国出口，不能继续试探；测试账户不得用于绕过挑战。结合2026-09-01周会完成的评论分析专项调研已写入7.3：正确方法、工具候选、Customer Feedback API权限清单和测试账户Worker设计均为**研究结论**，尚未采购、授权、开发或实机验证。
 
-2026-09-01最新美国VPN隔离100条自有ASIN验收已替代上述“当前必须等待新出口”的运行结论：100/100均形成evidence，92个商品成功、8个同Parent兄弟变体跳转、0 blocked，未出现403/429/CAPTCHA/WAF/login；详见11.6。统一Console、run ledger、Ctrl+C/heartbeat、reviews-only和DataImpulse认证整合后的最新完整离线回归为 `287 passed, 1 skipped`；真实PostgreSQL专项因当前没有`AMAZON_TEST_POSTGRES_DSN`按合同skip。
+2026-09-01最新美国VPN隔离100条自有ASIN验收已替代上述“当前必须等待新出口”的运行结论：100/100均形成evidence，92个商品成功、8个同Parent兄弟变体跳转、0 blocked，未出现403/429/CAPTCHA/WAF/login；详见11.6。Operation Runs、真实耗时、统一Console、run ledger、Ctrl+C/heartbeat、reviews-only和DataImpulse认证整合后的最新完整离线回归为 `310 passed, 1 skipped`；安全PostgreSQL集成通过DPAPI临时注入DSN执行，`1 passed`。
 
 ### 1.5 2026-09-02 自有 1,093 ASIN 生产准备与真实阻塞
 
@@ -74,6 +74,8 @@ flowchart LR
 | `scripts/postgres_worker_storage.py` | claim/lease、事务写商品/评论/evidence、状态历史 | 网络访问 |
 | `scripts/collection_console.py` | PostgreSQL tenant枚举、显式tenant-scoped只读查询、批次/run/ASIN领域投影与流量汇总 | 触发采集、修改状态 |
 | `scripts/postgres_run_ledger.py` | 幂等创建`collection_run`，写run请求数、终态与receipt JSON | 商品/evidence事实写入 |
+| `scripts/operation_ledger.py` | 独立记录egress、preflight、probe/run/reviews控制操作及失败阶段、真实耗时和安全egress_id | ASIN requested/recorded、代理URL或凭据 |
+| `scripts/egress_operation.py` | 由正式控制器执行批准出口健康检查，只输出HTTP状态、分类、耗时和字节 | 保存响应正文、代理URL、用户名或密码 |
 | `scripts/backfill_identity_evidence.py` | 幂等把旧`asin_mismatch` raw中的严格Parent/Child身份元数据补入既有evidence context | 写兄弟商品快照、改变原始error_code |
 | `scripts/collection_metrics.py` | SQLite 历史 evidence 的离线指标 | PostgreSQL 生产写入 |
 
@@ -581,6 +583,7 @@ if (-not $env:AMAZON_US_POSTGRES_DSN) { throw 'AMAZON_US_POSTGRES_DSN is require
 下面命令会访问 Amazon，只有用户明确授权真实网络测试后才执行：
 
 ```powershell
+.\crawler.ps1 egress
 .\crawler.ps1 probe -Limit 3
 .\crawler.ps1 run -Limit 10
 .\crawler.ps1 run -Limit 20
@@ -661,6 +664,18 @@ DataImpulse认证保持HTTP-first和凭据最小暴露：`ProxyTunnelAuthHTTPSHa
 
 独立R3 review首轮提出3个P1和4个P2：普通run不足仍completed、start gate前退出、文件receipt先于DB、raw伪0、重复全表扫描、ledger-only tenant不可见、进度请求漏tenant。上述7项已全部修复并由专项58 passed、完整287 passed/1 skipped、compileall、Node语法、PowerShell AST和diff检查复验；无遗留P0/P1/P2。
 
+### 11.8 Operation Runs 与真实耗时口径
+
+`amazon_us.operation_run`与`collection_run`是两个独立领域模型。前者记录控制操作：`operation_id`、tenant、`egress/probe/run/reviews`类型、开始/结束、真实总耗时、状态、preflight状态与耗时、失败阶段、错误分类、安全`egress_id`及可选collection run关联；后者只统计已经进入ASIN采集的run和requested/recorded。网络探针、端口冲突、配置解析失败及preflight失败不会进入ASIN计数。operation表禁止保存代理URL、用户名、密码、Cookie、Authorization或响应正文；egress只保留HTTP状态、响应字节和探针耗时。
+
+正式出口健康检查入口是`crawler.ps1 egress`；使用DPAPI封装的当前批次可执行`run_owned_full_secure.ps1 egress`。生产操作者不直接运行`check_egress.py`，该脚本只作为preflight/正式egress深模块内部实现与测试入口。`probe/run/reviews`在路径、参数、锁、Console与preflight之前登记operation；preflight成功或失败都会更新同一operation，尚未领取ASIN的失败也能在Console“操作记录”看到。2026-09-02正式入口实测记录了一个`network_error` egress operation（探针433.5ms、operation总耗时3.35s），随后用无网络的坏TOML稳定复现并记录`preflight/config_parse_failed`（16.10s）；两者均未创建collection run，也未改变1093/20的ASIN统计。此前手工`check_egress`成功HTTP 200/2534.1ms属于legacy控制台外操作，不伪造回填数据库。
+
+批次默认“活跃耗时”是每个collection run有效处理时长之和；“墙钟跨度”单独使用最早至最晚evidence时间，并明确包含run之间的人工等待。`owned_us_asin_20260902_full_01`当前两次真实run分别为53.62秒与139.46秒，活跃耗时为193.08秒；墙钟跨度为587.0秒，不能再把587秒显示成抓取耗时。第一个run曾人工补写ledger而导致`finished_at`过晚，Console只在ledger时长大于controller receipt时使用受控`receipt_json.elapsed_seconds`上限并标出`receipt_json.elapsed_seconds_backfill_cap`；第二个run显示`collection_run.started_at_to_finished_at=139.46s`及controller总耗时174.08s。
+
+批次表和流量卡的Requested/Recorded、商品成功、Variant Redirect、Failed、Blocked、Pending/Running、流量、活跃耗时、墙钟跨度、HTTP、Firefox、代理账单unknown均同时提供中文`title`和`aria-label`解释，不依赖颜色。真实Console DOM已显示：1093/20、16成功、3变体、1普通失败、0 blocked、1073/0、7.84MiB、活跃193.08s、墙钟587s（含等待），以及egress network_error和preflight config_parse_failed两条operation。
+
+本阶段独立R3 review提出3个P1和2个P2：setup失败登记过晚、host中断可能被controller覆盖、Ctrl+C catch误写failed、DPAPI包装器默认8774、文档占位符。修复后，路径/参数/锁检查前先登记operation；collection/operation终态只允许从running写一次，`interrupted`不可降级；controller的exit 130和`PipelineStoppedException`均保持中断语义；安全包装器默认8770；文档占位已清除。另以真实坏Limit验证`preflight_status=not_started/failure_stage=configuration`仍可见。修复后专项54 passed、完整310 passed/1 skipped、真实PostgreSQL 1 passed，无遗留P0/P1/P2。
+
 ## 12. 测试矩阵
 
 | 行为 | 主要测试 |
@@ -676,6 +691,8 @@ DataImpulse认证保持HTTP-first和凭据最小暴露：`ProxyTunnelAuthHTTPSHa
 | 四类流量指标与 Console unknown | `tests/test_collection_metrics.py`, `tests/test_collection_console.py` |
 | 统一Console tenant隔离、批次/run投影、variant与price_status | `tests/test_collection_console.py`, `tests/test_backfill_identity_evidence.py` |
 | PostgreSQL run ledger schema/终态/receipt | `tests/test_postgres_run_ledger.py`, `tests/test_postgres_worker_integration.py`（需DSN） |
+| Operation Runs、egress/preflight失败审计与ASIN统计隔离 | `tests/test_operation_ledger.py`, `tests/test_egress_operation.py`, `tests/test_postgres_worker_integration.py` |
+| 活跃耗时、墙钟跨度、run耗时来源与可访问tooltip | `tests/test_collection_console.py` |
 | Windows控制入口、owner退出和heartbeat停更的Worker终止 | `tests/test_crawler_control.py`, `tests/test_windows_entrypoints.py` |
 | HTTPS CONNECT代理认证与origin header隔离 | `tests/test_check_egress.py`, `tests/test_http_adapter.py` |
 

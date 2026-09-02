@@ -160,6 +160,32 @@ CREATE TABLE IF NOT EXISTS collection_run (
 CREATE INDEX IF NOT EXISTS idx_collection_run_tenant_started
     ON collection_run (tenant_id, started_at DESC);
 
+CREATE TABLE IF NOT EXISTS operation_run (
+    operation_id text PRIMARY KEY,
+    tenant_id text NOT NULL,
+    operation_type text NOT NULL CHECK (operation_type IN ('egress','probe','run','reviews')),
+    status text NOT NULL CHECK (status IN ('running','succeeded','failed','blocked','interrupted')),
+    preflight_status text NOT NULL DEFAULT 'not_applicable'
+        CHECK (preflight_status IN ('not_applicable','not_started','running','succeeded','failed')),
+    preflight_duration_ms numeric(14,1),
+    failure_stage text,
+    error_class text,
+    egress_id text,
+    collection_run_id text,
+    http_status integer,
+    response_bytes bigint,
+    probe_elapsed_ms numeric(14,1),
+    started_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at timestamptz,
+    duration_ms numeric(16,1),
+    updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_operation_run_tenant_started
+    ON operation_run (tenant_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_operation_run_status_started
+    ON operation_run (status, started_at DESC);
+
 CREATE TABLE IF NOT EXISTS product_snapshot (
     snapshot_id bigserial PRIMARY KEY,
     tenant_id text NOT NULL DEFAULT 'default',

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import sys
+import tempfile
+import types
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +23,7 @@ class Cursor:
     def __init__(self):
         self.executed = []
         self.rowcount = 1
+        self.current_status = None
 
     def __enter__(self):
         return self
@@ -29,6 +33,9 @@ class Cursor:
 
     def execute(self, sql, params=()):
         self.executed.append((sql, tuple(params)))
+
+    def fetchone(self):
+        return (self.current_status,) if self.current_status else None
 
 
 class Connection:
@@ -96,3 +103,46 @@ def test_run_ledger_finish_fails_closed_when_run_is_missing():
     else:
         raise AssertionError("missing PostgreSQL run must fail closed")
     assert connection.commits == 0
+
+
+def test_run_ledger_terminal_status_cannot_be_downgraded():
+    module = load_module()
+    connection = Connection()
+    connection.cursor_instance.rowcount = 0
+    connection.cursor_instance.current_status = "interrupted"
+
+    module.finish_run(
+        lambda: connection, tenant_id="tenant-a", run_id="run-1", status="failed",
+        controller_exit_code=2, worker_exit_code=130, termination_reason="controller_exception",
+        receipt={"status": "failed"},
+    )
+
+    assert connection.commits == 1
+    assert "status IN ('starting','running')" in connection.cursor_instance.executed[0][0]
+
+
+def test_interrupted_collection_run_also_finalizes_linked_operation(monkeypatch):
+    module = load_module()
+    connection = Connection()
+    calls = []
+    fake_operation = types.SimpleNamespace(
+        finish_operation=lambda operation_id, tenant_id, status, stage, error, **_kwargs:
+            calls.append((operation_id, tenant_id, status, stage, error))
+    )
+    monkeypatch.setitem(sys.modules, "operation_ledger", fake_operation)
+    monkeypatch.setenv("AMAZON_TEST_DSN", "postgresql://example")
+    monkeypatch.setattr(module, "_default_connect", lambda _dsn: connection)
+    with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+        receipt = Path(temporary) / "receipt.json"
+        module.finish_interrupted_from_host({
+            "dsn_env": "AMAZON_TEST_DSN",
+            "tenant_id": "tenant-a",
+            "run_id": "run-1",
+            "operation_id": "op-1",
+            "command": "run",
+            "requested_actions": 10,
+            "receipt_path": str(receipt),
+        }, -15)
+
+        assert calls == [("op-1", "tenant-a", "interrupted", "worker", "controller_exited")]
+        assert receipt.exists()

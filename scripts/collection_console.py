@@ -111,6 +111,64 @@ def project_price_status(product: dict[str, Any] | None) -> str:
     return "missing"
 
 
+def _coerce_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
+
+
+def project_batch_durations(runs: list[dict[str, Any]]) -> dict[str, float | bool | None]:
+    completed = [run for run in runs if _coerce_datetime(run.get("started_at")) and _coerce_datetime(run.get("finished_at"))]
+    active = round(sum(float(run.get("duration_seconds") or 0) for run in completed), 2)
+    starts = [_coerce_datetime(run.get("started_at")) for run in completed]
+    finishes = [_coerce_datetime(run.get("finished_at")) for run in completed]
+    wall = round((max(finishes) - min(starts)).total_seconds(), 2) if starts and finishes else None
+    return {
+        "active_duration_seconds": active if completed else None,
+        "wall_span_seconds": wall,
+        "wall_span_includes_idle": bool(completed),
+    }
+
+
+def project_run_durations(
+    ledger: dict[str, Any] | None,
+    observed_start: Any = None,
+    observed_end: Any = None,
+) -> dict[str, Any]:
+    ledger = ledger or {}
+    started = _coerce_datetime(ledger.get("started_at")) or _coerce_datetime(observed_start)
+    finished = _coerce_datetime(ledger.get("finished_at")) or _coerce_datetime(observed_end)
+    worker_duration = round((finished - started).total_seconds(), 2) if started and finished else None
+    receipt = ledger.get("receipt_json") or {}
+    if isinstance(receipt, str):
+        try:
+            receipt = json.loads(receipt)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            receipt = {}
+    try:
+        controller_duration = round(float(receipt.get("elapsed_seconds")), 2) if receipt.get("elapsed_seconds") is not None else None
+    except (TypeError, ValueError):
+        controller_duration = None
+    source = "collection_run.started_at_to_finished_at" if ledger else "collection_evidence.first_to_last"
+    if worker_duration is not None and controller_duration is not None and worker_duration > controller_duration:
+        worker_duration = controller_duration
+        source = "receipt_json.elapsed_seconds_backfill_cap"
+        started = _coerce_datetime(receipt.get("started_at")) or started
+        finished = _coerce_datetime(receipt.get("finished_at")) or finished
+    return {
+        "worker_duration_seconds": worker_duration,
+        "controller_duration_seconds": controller_duration,
+        "duration_source": source,
+        "effective_started_at": started,
+        "effective_finished_at": finished,
+    }
+
+
 def summarize_traffic(rows: list[dict[str, Any]]) -> dict[str, dict[str, int | None]]:
     accumulators = {
         "http_compressed_response": {"known_bytes": 0, "known_records": 0, "unknown_records": 0},
@@ -202,6 +260,8 @@ class PostgresConsoleRepository:
 
     def list_tenants(self) -> list[dict[str, Any]]:
         state: dict[str, dict[str, Any]] = {}
+        run_timings: dict[str, list[dict[str, Any]]] = {}
+        operation_tenants: set[str] = set()
         with self._connect() as conn, conn.cursor() as cursor:
             cursor.execute(
                 "SELECT tenant_id,status,COUNT(*) AS count FROM amazon_us.item_state "
@@ -265,8 +325,29 @@ class PostgresConsoleRepository:
                     """
                 )
                 ledger_rows = {str(row["tenant_id"]): dict(row) for row in cursor.fetchall()}
+                cursor.execute(
+                    """
+                    SELECT tenant_id,started_at,finished_at,
+                           CASE
+                             WHEN receipt_json->>'elapsed_seconds' ~ '^[0-9]+([.][0-9]+)?$'
+                             THEN LEAST(
+                               EXTRACT(EPOCH FROM (finished_at-started_at)),
+                               (receipt_json->>'elapsed_seconds')::numeric
+                             )
+                             ELSE EXTRACT(EPOCH FROM (finished_at-started_at))
+                           END AS duration_seconds
+                    FROM amazon_us.collection_run WHERE finished_at IS NOT NULL
+                    ORDER BY tenant_id,started_at
+                    """
+                )
+                for row in cursor.fetchall():
+                    run_timings.setdefault(str(row["tenant_id"]), []).append(dict(row))
+            cursor.execute("SELECT to_regclass('amazon_us.operation_run') AS relation")
+            if cursor.fetchone()["relation"] is not None:
+                cursor.execute("SELECT DISTINCT tenant_id FROM amazon_us.operation_run")
+                operation_tenants = {str(row["tenant_id"]) for row in cursor.fetchall()}
         results: list[dict[str, Any]] = []
-        tenant_ids = set(state) | set(product_counts) | set(outcome_counts) | set(traffic) | set(ledger_rows)
+        tenant_ids = set(state) | set(product_counts) | set(outcome_counts) | set(traffic) | set(ledger_rows) | operation_tenants
         for tenant_id in tenant_ids:
             item = state.get(tenant_id) or {"status_counts": {}, "requested": 0}
             outcomes = outcome_counts.get(tenant_id) or {}
@@ -277,10 +358,14 @@ class PostgresConsoleRepository:
             running = int((item.get("status_counts") or {}).get("running") or 0)
             started_at = metrics.get("started_at") or ledger.get("started_at")
             ended_at = metrics.get("ended_at") or ledger.get("finished_at") or ledger.get("started_at")
-            duration_seconds = (
-                round((ended_at - started_at).total_seconds(), 2)
-                if started_at is not None and ended_at is not None else None
+            durations = project_batch_durations(run_timings.get(tenant_id) or [])
+            evidence_wall_span = (
+                round((metrics.get("ended_at") - metrics.get("started_at")).total_seconds(), 2)
+                if metrics.get("started_at") is not None and metrics.get("ended_at") is not None else None
             )
+            if evidence_wall_span is not None:
+                durations["wall_span_seconds"] = evidence_wall_span
+                durations["wall_span_includes_idle"] = True
             terminal_status = (
                 "running" if running or ledger.get("status") == "running"
                 else str(ledger.get("status")) if not item.get("requested") and ledger.get("status")
@@ -304,7 +389,8 @@ class PostgresConsoleRepository:
                 "firefox_actions": int(metrics.get("firefox_actions") or 0),
                 "started_at": started_at,
                 "ended_at": ended_at,
-                "duration_seconds": duration_seconds,
+                "duration_seconds": durations["active_duration_seconds"],
+                **durations,
                 "terminal_status": terminal_status,
             })
         results.sort(key=lambda row: (row.get("ended_at") is not None, row.get("ended_at") or datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
@@ -559,10 +645,10 @@ class PostgresConsoleRepository:
             requested = int(ledger.get("requested_actions") or len(rows))
             recorded = len(rows)
             status = str(ledger.get("status") or ("legacy_blocked" if outcomes["blocked"] else "legacy_complete"))
-            duration_seconds = (
-                round((ended_at - started_at).total_seconds(), 2)
-                if started_at is not None and ended_at is not None else None
-            )
+            duration_projection = project_run_durations(ledger, observed_start, observed_end)
+            duration_seconds = duration_projection["worker_duration_seconds"]
+            started_at = duration_projection.pop("effective_started_at")
+            ended_at = duration_projection.pop("effective_finished_at")
             results.append({
                 "run_id": run_id,
                 "command": ledger.get("command") or "legacy",
@@ -582,11 +668,34 @@ class PostgresConsoleRepository:
                 "started_at": started_at,
                 "ended_at": ended_at,
                 "duration_seconds": duration_seconds,
+                **duration_projection,
                 "terminal_status": status,
                 "termination_reason": ledger.get("termination_reason"),
             })
         results.sort(key=lambda row: row.get("started_at") or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
         return results[:limit]
+
+    def list_operations(self, limit: int = 100) -> list[dict[str, Any]]:
+        tenant_id = self._require_tenant()
+        limit = max(1, min(int(limit), 500))
+        with self._connect() as conn, conn.cursor() as cursor:
+            cursor.execute("SELECT to_regclass('amazon_us.operation_run') AS relation")
+            if cursor.fetchone()["relation"] is None:
+                return []
+            cursor.execute(
+                """
+                SELECT operation_id,tenant_id,operation_type,status,preflight_status,preflight_duration_ms,
+                       failure_stage,error_class,egress_id,collection_run_id,http_status,response_bytes,
+                       probe_elapsed_ms,started_at,finished_at,duration_ms
+                FROM amazon_us.operation_run
+                WHERE tenant_id=%s ORDER BY started_at DESC LIMIT %s
+                """,
+                (tenant_id, limit),
+            )
+            rows = [dict(row) for row in cursor.fetchall()]
+        for row in rows:
+            row["duration_seconds"] = round(float(row.get("duration_ms") or 0) / 1000, 2) if row.get("duration_ms") is not None else None
+        return rows
 
     def load_run(self, run_id: str) -> dict[str, Any] | None:
         tenant_id = self._require_tenant()
@@ -619,6 +728,9 @@ class PostgresConsoleRepository:
             if not evidence_rows and ledger is None:
                 return None
             if not evidence_rows:
+                duration_projection = project_run_durations(ledger)
+                effective_started_at = duration_projection.pop("effective_started_at")
+                effective_finished_at = duration_projection.pop("effective_finished_at")
                 return {
                     "schema_version": "amazon-us-console-v2",
                     "tenant_id": tenant_id,
@@ -627,6 +739,9 @@ class PostgresConsoleRepository:
                     "recorded_actions": 0,
                     "inferred_actions": 0,
                     "terminal_status": ledger.get("status"),
+                    "started_at": effective_started_at,
+                    "ended_at": effective_finished_at,
+                    **duration_projection,
                     "termination_reason": ledger.get("termination_reason"),
                     "items": [],
                 }
@@ -665,12 +780,15 @@ class PostgresConsoleRepository:
         items.sort(key=lambda item: (item.get("retrieved_at") or item.get("updated_at"), item["asin"]))
         traffic_summary = summarize_traffic(evidence_rows)
         context_quality_counts = summarize_context_quality(evidence_rows)
+        duration_projection = project_run_durations(ledger, started_at, ended_at)
+        effective_started_at = duration_projection.pop("effective_started_at")
+        effective_finished_at = duration_projection.pop("effective_finished_at")
         return {
             "schema_version": "amazon-us-console-v2",
             "tenant_id": tenant_id,
             "run_id": run_id,
-            "started_at": (ledger or {}).get("started_at") or started_at,
-            "ended_at": (ledger or {}).get("finished_at") or ended_at,
+            "started_at": effective_started_at,
+            "ended_at": effective_finished_at,
             "requested_actions": int((ledger or {}).get("requested_actions") or len(evidence_rows)),
             "recorded_actions": len(evidence_rows),
             "inferred_actions": sum(1 for item in items if item["attribution"] == "time_window_inference"),
@@ -684,6 +802,7 @@ class PostgresConsoleRepository:
             "items": items,
             "terminal_status": (ledger or {}).get("status") or ("legacy_blocked" if any(item["outcome"] == "blocked" for item in items) else "legacy_complete"),
             "termination_reason": (ledger or {}).get("termination_reason"),
+            **duration_projection,
             "warning": "time_window_inference is legacy fallback; new network failures write run evidence",
         }
 
@@ -882,6 +1001,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     HTTPStatus.OK,
                     {"schema_version": "amazon-us-console-v2", "items": repository.list_runs(limit)},
+                )
+                return
+            if path == "/api/operations":
+                query = parse_qs(parsed.query)
+                limit = int(query.get("limit", ["100"])[0])
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"schema_version": "amazon-us-console-v2", "items": repository.list_operations(limit)},
                 )
                 return
             run_match = RUN_PATH.fullmatch(path)

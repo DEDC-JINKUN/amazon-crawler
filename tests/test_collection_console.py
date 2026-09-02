@@ -68,6 +68,9 @@ class Repository:
     def list_runs(self, limit=20):
         return [{"run_id": "run-1", "evidence_actions": 2, "blocked": 0}]
 
+    def list_operations(self, limit=100):
+        return [{"operation_id": "op-1", "operation_type": "run", "status": "failed", "preflight_status": "failed"}]
+
     def load_run(self, run_id):
         if run_id != "run-1":
             return None
@@ -106,6 +109,9 @@ class MultiTenantRepository:
 
     def list_runs(self, limit=20):
         return [{"run_id": f"run-{self.tenant_id[-1]}", "recorded_actions": 1}]
+
+    def list_operations(self, limit=100):
+        return [{"operation_id": f"op-{self.tenant_id[-1]}", "tenant_id": self.tenant_id}]
 
     def load_run(self, run_id):
         if run_id != f"run-{self.tenant_id[-1]}":
@@ -146,13 +152,17 @@ class BatchCursor:
                 "known_transfer_records": 100, "known_transfer_bytes": 36019216,
                 "started_at": None, "ended_at": None, "http_actions": 97, "firefox_actions": 3,
             }]
-        elif "to_regclass" in sql:
+        elif "to_regclass('amazon_us.collection_run')" in sql:
             self.rows = [{"relation": "amazon_us.collection_run"}]
-        elif "FROM amazon_us.collection_run" in sql:
+        elif "to_regclass('amazon_us.operation_run')" in sql:
+            self.rows = [{"relation": None}]
+        elif "DISTINCT ON (tenant_id)" in sql and "FROM amazon_us.collection_run" in sql:
             self.rows = [{
                 "tenant_id": "ledger-only", "requested_actions": 10, "status": "interrupted",
                 "started_at": None, "finished_at": None,
             }] if self.ledger_only else []
+        elif "EXTRACT(EPOCH FROM (finished_at-started_at))" in sql:
+            self.rows = []
         else:
             raise AssertionError(sql)
 
@@ -322,7 +332,8 @@ def test_tenant_list_includes_ledger_only_interrupted_run():
         "variant_redirect": 0, "failed": 0, "blocked": 0, "pending": 10, "running": 0,
         "evidence_actions": 0, "known_transfer_bytes": 0, "unknown_transfer_records": 0,
         "http_actions": 0, "firefox_actions": 0, "started_at": None, "ended_at": None,
-        "duration_seconds": None, "terminal_status": "interrupted",
+        "duration_seconds": None, "active_duration_seconds": None, "wall_span_seconds": None,
+        "wall_span_includes_idle": False, "terminal_status": "interrupted",
     }]
 
 
@@ -332,6 +343,55 @@ def test_tenant_summary_uses_database_aggregation_not_python_evidence_scan():
     assert "WITH latest AS" in method and "classified AS" in method
     assert "latest_evidence =" not in method
     assert "idx_evidence_tenant_identity_latest" in (ROOT / "schema" / "postgres_schema.sql").read_text(encoding="utf-8")
+
+
+def test_batch_active_duration_sums_runs_and_wall_span_is_separate():
+    module = load_module()
+    batch = module.project_batch_durations([
+        {"started_at": "2026-09-02T03:33:23Z", "finished_at": "2026-09-02T03:34:17Z", "duration_seconds": 53.62},
+        {"started_at": "2026-09-02T03:40:34Z", "finished_at": "2026-09-02T03:42:53Z", "duration_seconds": 139.46},
+    ])
+
+    assert batch["active_duration_seconds"] == 193.08
+    assert batch["wall_span_seconds"] == 570.0
+    assert batch["wall_span_includes_idle"] is True
+
+
+def test_run_duration_caps_manual_backfill_timestamp_with_controller_receipt():
+    module = load_module()
+    durations = module.project_run_durations({
+        "started_at": "2026-09-02T03:33:23Z",
+        "finished_at": "2026-09-02T03:49:40Z",
+        "receipt_json": {
+            "elapsed_seconds": 53.62,
+            "started_at": "2026-09-02T03:33:23Z",
+            "finished_at": "2026-09-02T03:34:17Z",
+        },
+    })
+    assert durations["worker_duration_seconds"] == 53.62
+    assert durations["controller_duration_seconds"] == 53.62
+    assert durations["duration_source"] == "receipt_json.elapsed_seconds_backfill_cap"
+    assert durations["effective_finished_at"].isoformat() == "2026-09-02T03:34:17+00:00"
+
+
+def test_operation_runs_api_is_tenant_scoped_and_separate_from_collection_runs():
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "/api/operations" in source
+    assert "list_operations" in source
+    assert "amazon_us.operation_run" in source
+    run_method = source[source.index("    def list_runs"):source.index("    def list_operations")]
+    assert "operation_run" not in run_method
+
+
+def test_console_tooltips_explain_all_operational_terms_accessibly():
+    html = (ROOT / "console" / "index.html").read_text(encoding="utf-8")
+    for term in (
+        "Requested / Recorded", "商品成功", "Variant Redirect", "Failed", "Blocked",
+        "Pending / Running", "流量", "活跃耗时", "墙钟跨度", "HTTP", "Firefox", "代理账单unknown",
+    ):
+        assert term in html
+    assert html.count("title=") >= 12
+    assert html.count("aria-label=") >= 12
 
 
 def test_variant_redirect_requires_explicit_same_parent_sibling_evidence():
@@ -482,6 +542,11 @@ def test_console_tenant_selection_is_explicit_and_cross_tenant_runs_are_invisibl
                 f"http://127.0.0.1:{server.server_port}/api/runs/run-b?tenant=tenant-a", timeout=2
             )
         assert raised.value.code == 404
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{server.server_port}/api/operations?tenant=tenant-a", timeout=2
+        ) as response:
+            operations = json.loads(response.read())
+        assert operations["items"] == [{"operation_id": "op-a", "tenant_id": "tenant-a"}]
     finally:
         stop_server(server, thread)
 

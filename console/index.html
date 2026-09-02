@@ -28,8 +28,20 @@
       <div class="panel-title"><div><p class="eyebrow">POSTGRESQL BATCHES</p><h2>可见批次</h2></div><span class="muted">每批次一行 · 点击切换</span></div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Tenant / 批次</th><th>Requested / Recorded</th><th>商品成功</th><th>Variant redirect</th><th>Failed</th><th>Blocked</th><th>Pending / Running</th><th>流量</th><th>耗时</th><th>终态</th></tr></thead>
-          <tbody id="batchRows"><tr><td colspan="10" class="muted">正在读取PostgreSQL可见批次…</td></tr></tbody>
+          <thead><tr>
+            <th title="PostgreSQL租户，也是批次隔离边界。" aria-label="Tenant / 批次：PostgreSQL租户，也是批次隔离边界。">Tenant / 批次</th>
+            <th title="Requested是批次任务总数；Recorded是已有采集evidence的唯一ASIN数，网络探针不计入。" aria-label="Requested / Recorded：任务总数与已记录ASIN数，网络探针不计入。">Requested / Recorded</th>
+            <th title="通过身份和质量门并保存商品快照的ASIN数。" aria-label="商品成功：通过质量门并保存商品快照的ASIN数。">商品成功</th>
+            <th title="原ASIN明确跳到同一Parent下Sibling Child；仅作领域分类，不写回兄弟商品数据。" aria-label="Variant Redirect：同Parent兄弟变体跳转。">Variant Redirect</th>
+            <th title="排除Variant Redirect和Blocked后的普通采集失败数。" aria-label="Failed：普通采集失败数。">Failed</th>
+            <th title="CAPTCHA、WAF、403、429或登录墙等访问控制事件。" aria-label="Blocked：访问控制事件数。">Blocked</th>
+            <th title="尚无evidence的任务数，以及当前持有租约正在处理的任务数。" aria-label="Pending / Running：待处理与正在处理的任务数。">Pending / Running</th>
+            <th title="HTTP压缩响应已知字节；unknown表示存在无法可靠计量的记录，不是零。" aria-label="流量：HTTP压缩响应字节及unknown记录。">流量</th>
+            <th title="各collection run实际处理时长之和，排除run之间的人工等待。" aria-label="活跃耗时：各run处理时长之和，排除人工等待。">活跃耗时</th>
+            <th title="最早run开始到最晚run结束的跨度，明确包含run间人工等待。" aria-label="墙钟跨度：包含run间人工等待的整体跨度。">墙钟跨度</th>
+            <th title="批次当前或最终状态。" aria-label="终态：批次当前或最终状态。">终态</th>
+          </tr></thead>
+          <tbody id="batchRows"><tr><td colspan="11" class="muted">正在读取PostgreSQL可见批次…</td></tr></tbody>
         </table>
       </div>
     </section>
@@ -38,15 +50,25 @@
       <article class="metric-card"><span>进度</span><strong id="progressMetric">—</strong><small id="progressSub">—</small></article>
       <article class="metric-card success"><span>有效商品</span><strong id="productsMetric">—</strong><small>通过商品质量门</small></article>
       <article class="metric-card warning"><span>Partial 上下文</span><strong id="partialMetric">—</strong><small>ZIP 未确认；位置敏感字段不可验证</small></article>
-      <article class="metric-card danger"><span>Blocked</span><strong id="blockedMetric">—</strong><small>访问控制事件</small></article>
-      <article class="metric-card warning"><span>Failed</span><strong id="failedMetric">—</strong><small>商品或评论失败</small></article>
+      <article class="metric-card danger" title="CAPTCHA、WAF、403、429或登录墙等访问控制事件。" aria-label="Blocked：访问控制事件。"><span>Blocked</span><strong id="blockedMetric">—</strong><small>访问控制事件</small></article>
+      <article class="metric-card warning" title="排除变体跳转和访问控制后的普通采集失败。" aria-label="Failed：普通商品或评论失败。"><span>Failed</span><strong id="failedMetric">—</strong><small>商品或评论失败</small></article>
       <article class="metric-card"><span>页面 Action</span><strong id="actionsMetric">—</strong><small>evidence记录</small></article>
       <article class="metric-card"><span>数据库记录</span><strong id="rowsMetric">—</strong><small>当前标准化记录</small></article>
       <article class="metric-card"><span>Raw HTML</span><strong id="rawMetric">—</strong><small id="rawSub">—</small></article>
-      <article class="metric-card"><span>HTTP 压缩响应</span><strong id="httpTrafficMetric">—</strong><small id="httpTrafficSub">—</small></article>
-      <article class="metric-card"><span>Firefox 主文档</span><strong id="firefoxMainMetric">—</strong><small id="firefoxMainSub">—</small></article>
-      <article class="metric-card"><span>Firefox 子资源</span><strong id="firefoxSubresourceMetric">—</strong><small id="firefoxSubresourceSub">—</small></article>
-      <article class="metric-card"><span>代理后台账单</span><strong id="proxyBillMetric">—</strong><small id="proxyBillSub">需录入供应商 U1-U0</small></article>
+      <article class="metric-card" title="HTTP表示urllib取得的压缩响应体字节，不等于代理计费。" aria-label="HTTP：压缩响应体流量。"><span>HTTP 压缩响应</span><strong id="httpTrafficMetric">—</strong><small id="httpTrafficSub">—</small></article>
+      <article class="metric-card" title="Firefox主文档的WebDriver BiDi计量；unknown表示证据不足。" aria-label="Firefox主文档：浏览器主文档流量。"><span>Firefox 主文档</span><strong id="firefoxMainMetric">—</strong><small id="firefoxMainSub">—</small></article>
+      <article class="metric-card" title="Firefox脚本、样式和XHR等子资源的BiDi计量。" aria-label="Firefox子资源：浏览器子资源流量。"><span>Firefox 子资源</span><strong id="firefoxSubresourceMetric">—</strong><small id="firefoxSubresourceSub">—</small></article>
+      <article class="metric-card" title="代理账单unknown表示尚无供应商U1-U0或账单API证据，不能用本地字节替代。" aria-label="代理账单unknown：没有供应商账单证据，不代表零。"><span>代理账单unknown</span><strong id="proxyBillMetric">—</strong><small id="proxyBillSub">需录入供应商 U1-U0</small></article>
+    </section>
+
+    <section class="panel operation-panel">
+      <div class="panel-title"><div><p class="eyebrow">OPERATION RUNS</p><h2>操作记录</h2></div><span class="muted">egress / preflight / probe / run / reviews</span></div>
+      <div class="table-wrap compact-table">
+        <table>
+          <thead><tr><th>Operation</th><th>类型</th><th>状态</th><th>Preflight</th><th>失败阶段</th><th>错误分类</th><th>Egress</th><th>HTTP</th><th>真实耗时</th><th>开始 / 结束</th><th>Collection run</th></tr></thead>
+          <tbody id="operationRows"><tr><td colspan="11" class="muted">暂无操作记录</td></tr></tbody>
+        </table>
+      </div>
     </section>
 
     <section class="overview-grid">

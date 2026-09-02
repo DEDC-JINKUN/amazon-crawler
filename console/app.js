@@ -1,5 +1,5 @@
 const initialTenant = new URL(window.location.href).searchParams.get('tenant') || '';
-const state = { overview: null, batches: [], items: [], tenant: initialTenant, selectedRun: '', timer: null, loading: false };
+const state = { overview: null, batches: [], operations: [], items: [], tenant: initialTenant, selectedRun: '', timer: null, loading: false };
 const $ = (id) => document.getElementById(id);
 const number = (value) => new Intl.NumberFormat('zh-CN').format(Number(value || 0));
 const dateTime = (value) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
@@ -66,14 +66,15 @@ function renderBatches(data) {
       taskCell(number(batch.blocked)),
       taskCell(`${number(batch.pending)} / ${number(batch.running)}`),
       taskCell(`${bytes(batch.known_transfer_bytes)}${batch.unknown_transfer_records ? ` · ${number(batch.unknown_transfer_records)} unknown` : ''}`),
-      taskCell(batch.duration_seconds === null ? '—' : `${number(batch.duration_seconds)}s`),
+      taskCell(batch.active_duration_seconds === null ? '—' : `${number(batch.active_duration_seconds)}s`),
+      taskCell(batch.wall_span_seconds === null ? '—' : `${number(batch.wall_span_seconds)}s（含等待）`),
       taskCell(batch.terminal_status),
     );
     row.addEventListener('click', () => selectTenant(batch.tenant_id));
     body.append(row);
   }
   if (!state.batches.length) {
-    const row = document.createElement('tr'); const cell = taskCell('PostgreSQL中没有可见tenant', 'muted'); cell.colSpan = 10; row.append(cell); body.append(row);
+    const row = document.createElement('tr'); const cell = taskCell('PostgreSQL中没有可见tenant', 'muted'); cell.colSpan = 11; row.append(cell); body.append(row);
   }
 }
 
@@ -137,7 +138,7 @@ function renderOverview(data) {
 function renderRun(data) {
   state.selectedRun = data.run_id;
   const outcomes = data.outcome_counts || (data.items || []).reduce((value, item) => { value[item.outcome] = (value[item.outcome] || 0) + 1; return value; }, {});
-  $('runSummary').textContent = `${data.run_id} · requested / recorded ${number(data.requested_actions)} / ${number(data.recorded_actions)} · 商品成功 ${number(outcomes.completed)} · variant redirect ${number(outcomes.variant_redirect)} · failed ${number(outcomes.failed)} · blocked ${number(outcomes.blocked)} · 终态 ${data.terminal_status || '—'} · ${dateTime(data.started_at)} → ${dateTime(data.ended_at)} · HTTP ${trafficBytes(data.traffic?.http_compressed_response)} · Firefox主文档 ${trafficBytes(data.traffic?.firefox_main_document)} · Firefox子资源 ${trafficBytes(data.traffic?.firefox_subresources)}`;
+  $('runSummary').textContent = `${data.run_id} · requested / recorded ${number(data.requested_actions)} / ${number(data.recorded_actions)} · 商品成功 ${number(outcomes.completed)} · variant redirect ${number(outcomes.variant_redirect)} · failed ${number(outcomes.failed)} · blocked ${number(outcomes.blocked)} · 终态 ${data.terminal_status || '—'} · 活跃处理 ${data.worker_duration_seconds == null ? '—' : `${number(data.worker_duration_seconds)}s`}（${data.duration_source || 'unknown'}）· controller ${data.controller_duration_seconds == null ? '—' : `${number(data.controller_duration_seconds)}s`} · ${dateTime(data.started_at)} → ${dateTime(data.ended_at)} · HTTP ${trafficBytes(data.traffic?.http_compressed_response)} · Firefox主文档 ${trafficBytes(data.traffic?.firefox_main_document)} · Firefox子资源 ${trafficBytes(data.traffic?.firefox_subresources)}`;
   $('runWarning').textContent = data.context_quality_counts?.partial ? '⚠ 本run含ZIP未确认的partial商品；price、availability、buy_box/配送等位置敏感字段不可视为90001结果。' : data.inferred_actions ? '⚠ 历史网络失败没有run evidence；黄色归属为按本run时间窗口推断。新运行已永久修复。' : '全部结果均有不可变run evidence。';
   const body = $('runRows'); clear(body);
   for (const item of data.items || []) {
@@ -174,6 +175,35 @@ async function loadRuns() {
   if (desired && (data.items || []).some((run) => run.run_id === desired)) {
     selector.value = desired; await loadRun(desired);
   }
+}
+
+function renderOperations(data) {
+  state.operations = data.items || [];
+  const body = $('operationRows'); clear(body);
+  for (const operation of state.operations) {
+    const row = document.createElement('tr');
+    row.append(
+      taskCell(operation.operation_id, 'asin'),
+      taskCell(operation.operation_type),
+      taskCell(operation.status),
+      taskCell(operation.preflight_status),
+      taskCell(operation.failure_stage),
+      taskCell(operation.error_class),
+      taskCell(operation.egress_id),
+      taskCell(operation.http_status),
+      taskCell(operation.duration_seconds == null ? '—' : `${number(operation.duration_seconds)}s`),
+      taskCell(`${dateTime(operation.started_at)} / ${dateTime(operation.finished_at)}`),
+      taskCell(operation.collection_run_id),
+    );
+    body.append(row);
+  }
+  if (!state.operations.length) {
+    const row = document.createElement('tr'); const cell = taskCell('暂无操作记录', 'muted'); cell.colSpan = 11; row.append(cell); body.append(row);
+  }
+}
+
+async function loadOperations() {
+  renderOperations(await request('/api/operations?limit=100'));
 }
 
 function taskCell(value, className = '') { const td = text('td', value ?? '—', className); return td; }
@@ -245,7 +275,7 @@ async function refresh() {
   try {
     await loadBatches();
     if (!state.tenant) throw new Error('PostgreSQL中没有可见tenant');
-    const [overview] = await Promise.all([request('/api/overview'), loadItems(), loadRuns()]);
+    const [overview] = await Promise.all([request('/api/overview'), loadItems(), loadRuns(), loadOperations()]);
     renderOverview(overview); $('errorBanner').hidden = true; $('liveBadge').classList.remove('offline');
   } catch (error) {
     $('errorBanner').textContent = `控制台刷新失败：${error.message}。上一轮数据已保留。`; $('errorBanner').hidden = false; $('liveBadge').classList.add('offline');
