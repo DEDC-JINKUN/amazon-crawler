@@ -1,8 +1,4 @@
-"""Storage interfaces used by Collection API.
-
-The first implementation is read-only SQLite. A PostgreSQL implementation can
-be added later without changing API routes or response fields.
-"""
+"""Tenant-scoped read and bounded-refresh storage used by Collection API."""
 from __future__ import annotations
 
 import sqlite3
@@ -25,6 +21,8 @@ class CollectionRepository(Protocol):
     def load_refresh_request(self, job_id: str) -> dict[str, Any] | None: ...
 
     def request_refresh(self, marketplace: str, asin: str, requested_by: str, reason: str) -> dict[str, Any]: ...
+
+    def request_refresh_batch(self, marketplace: str, asins: list[str], requested_by: str, reason: str) -> list[dict[str, Any]]: ...
 
     def record_api_audit(self, *, agent_id: str, action: str, resource: str, outcome: str) -> None: ...
 
@@ -156,32 +154,47 @@ class SQLiteCollectionRepository:
             conn.close()
 
     def request_refresh(self, marketplace: str, asin: str, requested_by: str, reason: str) -> dict[str, Any]:
+        return self.request_refresh_batch(marketplace, [asin], requested_by, reason)[0]
+
+    def request_refresh_batch(self, marketplace: str, asins: list[str], requested_by: str, reason: str) -> list[dict[str, Any]]:
+        normalized = list(dict.fromkeys(asins))
+        if not 1 <= len(normalized) <= 5:
+            raise ValueError("refresh batch requires 1 to 5 ASINs")
         conn = self._connection(read_only=False)
         try:
-            active = conn.execute(
-                "SELECT * FROM refresh_request WHERE marketplace=? AND asin=? AND status IN ('queued','claimed') ORDER BY requested_at DESC LIMIT 1",
-                (marketplace, asin),
-            ).fetchone()
-            if active is not None:
-                return _dict_row(active) or {}
-            exists = conn.execute("SELECT 1 FROM item_state WHERE marketplace=? AND asin=?", (marketplace, asin)).fetchone()
-            if exists is None:
-                raise KeyError(f"ASIN not found: {marketplace}/{asin}")
-            request = {
-                "job_id": f"refresh-{uuid.uuid4().hex}",
-                "marketplace": marketplace,
-                "asin": asin,
-                "requested_by": requested_by or "collection-api",
-                "reason": reason or "on_demand",
-                "status": "queued",
-                "requested_at": _now(),
-            }
-            conn.execute(
-                "INSERT INTO refresh_request(job_id,marketplace,asin,requested_by,reason,status,requested_at) VALUES(?,?,?,?,?,?,?)",
-                tuple(request.values()),
-            )
+            missing = [asin for asin in normalized if conn.execute(
+                "SELECT 1 FROM item_state WHERE marketplace=? AND asin=?", (marketplace, asin)
+            ).fetchone() is None]
+            if missing:
+                raise KeyError(f"ASIN not found: {marketplace}/{','.join(missing)}")
+            requests = []
+            for asin in normalized:
+                active = conn.execute(
+                    "SELECT * FROM refresh_request WHERE marketplace=? AND asin=? AND status IN ('queued','claimed') ORDER BY requested_at DESC LIMIT 1",
+                    (marketplace, asin),
+                ).fetchone()
+                if active is not None:
+                    requests.append(_dict_row(active) or {})
+                    continue
+                request = {
+                    "job_id": f"refresh-{uuid.uuid4().hex}",
+                    "marketplace": marketplace,
+                    "asin": asin,
+                    "requested_by": requested_by or "collection-api",
+                    "reason": reason or "on_demand",
+                    "status": "queued",
+                    "requested_at": _now(),
+                }
+                conn.execute(
+                    "INSERT INTO refresh_request(job_id,marketplace,asin,requested_by,reason,status,requested_at) VALUES(?,?,?,?,?,?,?)",
+                    tuple(request.values()),
+                )
+                requests.append(request)
             conn.commit()
-            return request
+            return requests
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -212,7 +225,7 @@ class SQLiteCollectionRepository:
 
 
 class PostgresCollectionRepository:
-    """Read-only repository for the PostgreSQL schema in ``schema/``.
+    """Tenant-scoped query and refresh repository for PostgreSQL.
 
     ``psycopg`` is imported only when this repository is used, so the SQLite
     POC remains dependency-free. Tests may inject a DB-API connection factory.
@@ -348,44 +361,55 @@ class PostgresCollectionRepository:
                 return [dict(row) for row in cursor.fetchall()]
 
     def request_refresh(self, marketplace: str, asin: str, requested_by: str, reason: str) -> dict[str, Any]:
-        request = {
-            "job_id": f"refresh-{uuid.uuid4().hex}",
-            "marketplace": marketplace,
-            "asin": asin,
-            "requested_by": requested_by or "collection-api",
-            "reason": reason or "on_demand",
-            "status": "queued",
-        }
+        return self.request_refresh_batch(marketplace, [asin], requested_by, reason)[0]
+
+    def request_refresh_batch(self, marketplace: str, asins: list[str], requested_by: str, reason: str) -> list[dict[str, Any]]:
+        normalized = list(dict.fromkeys(asins))
+        if not 1 <= len(normalized) <= 5:
+            raise ValueError("refresh batch requires 1 to 5 ASINs")
         with self._connect_factory() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    "SELECT subject_type FROM amazon_us.item_state WHERE tenant_id=%s AND marketplace=%s AND asin=%s "
-                    "ORDER BY CASE subject_type WHEN 'own' THEN 0 WHEN 'competitor' THEN 1 ELSE 2 END LIMIT 1",
-                    (self.tenant_id, marketplace, asin),
-                )
-                state = cursor.fetchone()
-                if state is None:
-                    raise KeyError(f"ASIN not found: {marketplace}/{asin}")
-                subject_type = (state if isinstance(state, dict) else dict(state)).get("subject_type", "own")
-                cursor.execute(
-                    "INSERT INTO amazon_us.refresh_request(job_id,tenant_id,marketplace,asin,subject_type,requested_by,reason,status) "
-                    "VALUES(%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (tenant_id,marketplace,asin,subject_type) "
-                    "WHERE status IN ('queued','claimed') DO NOTHING RETURNING *",
-                    (request["job_id"], self.tenant_id, marketplace, asin, subject_type, request["requested_by"], request["reason"], request["status"]),
-                )
-                inserted = cursor.fetchone()
-                if inserted is None:
+            try:
+                requests = []
+                with conn.cursor() as cursor:
                     cursor.execute(
-                        "SELECT * FROM amazon_us.refresh_request WHERE tenant_id=%s AND marketplace=%s AND asin=%s AND subject_type=%s "
-                        "AND status IN ('queued','claimed') ORDER BY requested_at DESC LIMIT 1",
-                        (self.tenant_id, marketplace, asin, subject_type),
+                        "SELECT DISTINCT ON (asin) asin,subject_type FROM amazon_us.item_state "
+                        "WHERE tenant_id=%s AND marketplace=%s AND asin=ANY(%s) "
+                        "ORDER BY asin,CASE subject_type WHEN 'own' THEN 0 WHEN 'competitor' THEN 1 ELSE 2 END",
+                        (self.tenant_id, marketplace, normalized),
                     )
-                    inserted = cursor.fetchone()
-                if inserted is not None:
-                    request = inserted if isinstance(inserted, dict) else dict(inserted)
-            conn.commit()
-        request.setdefault("requested_at", _now())
-        return request
+                    subjects = {dict(row)["asin"]: dict(row).get("subject_type", "own") for row in cursor.fetchall()}
+                    missing = [asin for asin in normalized if asin not in subjects]
+                    if missing:
+                        raise KeyError(f"ASIN not found: {marketplace}/{','.join(missing)}")
+                    for asin in normalized:
+                        request = {
+                            "job_id": f"refresh-{uuid.uuid4().hex}", "marketplace": marketplace, "asin": asin,
+                            "requested_by": requested_by or "collection-api", "reason": reason or "on_demand", "status": "queued",
+                        }
+                        subject_type = subjects[asin]
+                        cursor.execute(
+                            "INSERT INTO amazon_us.refresh_request(job_id,tenant_id,marketplace,asin,subject_type,requested_by,reason,status) "
+                            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (tenant_id,marketplace,asin,subject_type) "
+                            "WHERE status IN ('queued','claimed') DO NOTHING RETURNING *",
+                            (request["job_id"], self.tenant_id, marketplace, asin, subject_type, request["requested_by"], request["reason"], request["status"]),
+                        )
+                        inserted = cursor.fetchone()
+                        if inserted is None:
+                            cursor.execute(
+                                "SELECT * FROM amazon_us.refresh_request WHERE tenant_id=%s AND marketplace=%s AND asin=%s AND subject_type=%s "
+                                "AND status IN ('queued','claimed') ORDER BY requested_at DESC LIMIT 1",
+                                (self.tenant_id, marketplace, asin, subject_type),
+                            )
+                            inserted = cursor.fetchone()
+                        if inserted is not None:
+                            request = inserted if isinstance(inserted, dict) else dict(inserted)
+                        request.setdefault("requested_at", _now())
+                        requests.append(request)
+                conn.commit()
+                return requests
+            except Exception:
+                conn.rollback()
+                raise
 
     def load_refresh_request(self, job_id: str) -> dict[str, Any] | None:
         with self._connect_factory() as conn:

@@ -427,6 +427,53 @@ class PostgresWorkerStorage:
                 conn.rollback()
                 raise
 
+    def fail_claimed_refreshes(self, worker_id: str, reason: str = "agent_refresh_worker_failed") -> int:
+        """Fail refresh jobs still owned by one failed worker and release their leases."""
+        if not worker_id or not worker_id.strip():
+            raise ValueError("worker_id is required")
+        safe_reason = str(reason or "agent_refresh_worker_failed")[:240]
+        with self._connect_factory() as conn:
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT r.job_id,s.marketplace,s.asin,s.subject_type,s.status AS previous_status
+                        FROM amazon_us.refresh_request r
+                        JOIN amazon_us.item_state s
+                          ON s.tenant_id=r.tenant_id AND s.marketplace=r.marketplace
+                         AND s.asin=r.asin AND s.subject_type=r.subject_type
+                        WHERE r.tenant_id=%s AND r.subject_type=%s AND r.status='claimed'
+                          AND s.status='running' AND s.lease_owner=%s
+                        FOR UPDATE OF r,s
+                        """,
+                        (self.tenant_id, self.subject_type, worker_id.strip()),
+                    )
+                    rows = [self._as_dict(row) for row in cursor.fetchall()]
+                    for row in rows:
+                        cursor.execute(
+                            "UPDATE amazon_us.refresh_request SET status='failed',completed_at=CURRENT_TIMESTAMP "
+                            "WHERE tenant_id=%s AND job_id=%s AND status='claimed'",
+                            (self.tenant_id, row["job_id"]),
+                        )
+                        cursor.execute(
+                            "UPDATE amazon_us.item_state SET status='failed',resume_status=NULL,next_retry_at=NULL,"
+                            "block_reason=NULL,last_error=%s,lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL,"
+                            "updated_at=CURRENT_TIMESTAMP WHERE tenant_id=%s AND marketplace=%s AND asin=%s "
+                            "AND subject_type=%s AND status='running' AND lease_owner=%s",
+                            (safe_reason, self.tenant_id, row["marketplace"], row["asin"], row["subject_type"], worker_id.strip()),
+                        )
+                        cursor.execute(
+                            "INSERT INTO amazon_us.state_history "
+                            "(tenant_id,marketplace,asin,subject_type,from_status,to_status,reason) "
+                            "VALUES(%s,%s,%s,%s,%s,'failed',%s)",
+                            (self.tenant_id, row["marketplace"], row["asin"], row["subject_type"], row["previous_status"], safe_reason),
+                        )
+                conn.commit()
+                return len(rows)
+            except Exception:
+                conn.rollback()
+                raise
+
     def enqueue_due_refreshes(self, *, min_age_hours: int = 24, limit: int = 1000) -> int:
         """Queue stale product snapshots once per scoped ASIN."""
         hours = int(min_age_hours)

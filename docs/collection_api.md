@@ -1,8 +1,19 @@
-# Collection API（本地只读版）
+# Collection API 与 Agent 刷新服务
 
-Collection API 是 Agent 查询采集结果的统一入口。当前版本以只读方式打开 SQLite，不启动采集、不修改任务、不暴露到公网。API 通过 `collection_storage.py` 的 repository 接口访问数据，后续替换 PostgreSQL 时保持路由和响应不变。
+Collection API 是 Agent 查询采集结果和提交小批按需刷新的统一入口。生产模式只使用 PostgreSQL，并由同一服务内的 `refresh-only` Worker 消费刷新队列；SQLite 入口只保留给离线兼容测试。服务不暴露到公网。
 
 ## 启动
+
+生产启动、状态、健康检查和停止均使用固定批次包装器，不需要重复传 tenant、manifest 或目录：
+
+```powershell
+.\run_owned_full_secure.ps1 agent-service
+.\run_owned_full_secure.ps1 agent-status
+.\run_owned_full_secure.ps1 agent-health
+.\run_owned_full_secure.ps1 agent-stop
+```
+
+以下直接启动方式仅用于离线开发：
 
 ```powershell
 python scripts/collection_api.py --db state/amazon_us.sqlite3 --host 127.0.0.1 --port 8765
@@ -10,7 +21,7 @@ python scripts/collection_api.py --db state/amazon_us.sqlite3 --host 127.0.0.1 -
 
 默认只监听回环地址 `127.0.0.1`。如需部署到其他机器，必须先增加认证、网络隔离和权限控制，不能直接修改 host 绕过限制。
 
-可通过环境变量开启 API Key 认证。健康检查不要求 Key，其余路由需携带 `X-Collection-API-Key`：
+健康检查不要求 Key。生产业务路由只接受 DPAPI 主密钥派生的 `read-agent` 或 `refresh-agent` scoped key；主密钥保留给本机运维兼容入口，不交给 Agent：
 
 ```powershell
 $env:AMAZON_COLLECTION_API_KEY = "local-dev-key"
@@ -112,9 +123,22 @@ GET /v1/jobs/status
 GET /v1/jobs/{job_id}
 ```
 
-返回刷新请求的 `queued`、`claimed`、`completed` 或 `failed` 状态。
+返回刷新请求的 `queued`、`claimed`、`completed`、`failed` 或 `cancelled` 状态。终态响应额外包含最新商品快照、最新 evidence、`evidence_after_request`、`requested_at/claimed_at/completed_at`、总耗时和 evidence 中可用的流量字段；`evidence_after_request=false` 时不得把历史 evidence 当作本次刷新结果。
 
 ### 提交按需刷新
+
+Agent 推荐使用 1 至 5 条批量入口：
+
+```http
+POST /v1/asin/refresh
+Content-Type: application/json
+
+{"marketplace":"US","asins":["B00RCPDCQU","B00RCPDI50"],"reason":"price_is_stale"}
+```
+
+服务端去重并硬限制 1 至 5 个 ASIN。只有 `refresh-agent` 可以提交；`read-agent` 返回 403。PostgreSQL仓储先在同一事务内校验全部ASIN，再原子提交整批；相同 ASIN 已有 `queued/claimed` job 时复用活跃 job。请求接受后会唤醒 refresh Worker，Worker 使用 PostgreSQL lease 原子领取，且不会领取普通全量队列。
+
+兼容的单条入口仍可使用：
 
 ```http
 POST /v1/asin/US/{asin}/refresh
@@ -123,7 +147,9 @@ Content-Type: application/json
 {"requested_by":"agent-name","reason":"price_is_stale"}
 ```
 
-接口只登记 `refresh_request` 队列并返回 `202 Accepted`，不会在 HTTP 请求线程中直接运行爬虫；后续由统一调度器领取。当前 API 仅绑定本机，真实内网部署前还需增加认证。
+HTTP线程只负责登记队列并返回 `202 Accepted`；真实采集由后台受控 Worker 执行。若 Worker 因访问控制或内部错误进入 `blocked/failed`，`/readyz` 返回 503，服务拒绝新增刷新，避免任务无限积压。
+
+若Worker在领取后发生未预期异常，服务按固定脱敏原因将该Worker仍持有的refresh job置为`failed`，释放对应item lease并写状态历史；异常正文不进入API响应或健康状态。Agent客户端只允许HTTP loopback基址，拒绝外部主机、URL内嵌凭据、路径、query、fragment和HTTP重定向，避免scoped key外发。
 
 ### 批量查询
 
@@ -139,9 +165,9 @@ Content-Type: application/json
 ## 当前不支持
 
 - 直接在 API 请求线程中运行爬虫；
-- Agent 直接运行爬虫；
+- Agent 触发全量抓取、普通pending队列或超过5条的刷新；
 - 远程公网访问；
+- 自动代理轮换、CAPTCHA/WAF绕过、登录或个人Cookie；
 - 直接查询个人 Cookie、Token 或代理凭证。
 
-后续接入 PostgreSQL 时保持相同路由和响应契约，将 SQLite repository 替换为 PostgreSQL repository 即可。
 其他业务路由遇到数据库异常时返回 HTTP 500 `database_unavailable`，不返回底层驱动或连接详情。

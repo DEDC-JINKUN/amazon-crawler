@@ -693,6 +693,14 @@ DPAPI `CurrentUser` 密钥仓必须由将来启动爬虫的同一 Windows 账号
 
 `configure` 会优先复用当前进程已配置的 `AMAZON_PROXY_USER` / `AMAZON_PROXY_PASS` 和完整 PostgreSQL DSN，只对缺失项使用安全输入。密钥仓 ACL 只授权创建者 SID 和 LocalSystem。计划任务或服务必须固定为该账号；账号不一致时启动器明确返回 `vault-owner-mismatch`，不再只显示模糊的 unprotect 失败。
 
+### 11.10 Agent 调用爬虫闭环
+
+正式 Agent 服务入口为 `.\run_owned_full_secure.ps1 agent-service`，固定 tenant、配置和输出目录，同时启动 loopback Collection API 与单个 `refresh-only` Worker。`agent-status`、`agent-health` 和 `agent-stop` 分别负责身份校验后的状态、`/readyz` 与 Job Object 进程树停止。服务锁绑定宿主 PID、StartTime、tenant、端口和代码 fingerprint；停止宿主会关闭 kill-on-close Job Object，终止API及其Firefox/geckodriver子树。
+
+普通 Agent 不接触 DSN、代理凭据、Cookie或服务主密钥。`secure_dpapi_launcher.ps1 -AgentId`只向子进程注入 `AMAZON_COLLECTION_AGENT_ID` 和派生 scoped key。Agent客户端拒绝非HTTP loopback基址、URL内嵌凭据和HTTP重定向。`read-agent`只能读取；`refresh-agent`一次只能提交1至5个已登记ASIN。批量刷新在PostgreSQL同一事务内先全量校验再提交，并经过tenant、scope、速率和活跃job唯一索引约束；服务用`RefreshOnlyStorageView`开放lease化refresh领取，同时固定屏蔽普通`claim_task`队列。
+
+终态 `GET /v1/jobs/{job_id}` 返回job、最新商品快照、最新evidence、证据是否处于请求时间窗、请求/领取/完成时间、总耗时和可用流量。Worker遇到访问控制时进入blocked，`/readyz`返回503并拒绝新增refresh；未预期异常会把该Worker仍持有的job置为failed、释放lease并写脱敏状态历史。不自动换代理、处理验证码、登录或使用个人Cookie。2026-09-02无Amazon网络验收已完成：隔离空tenant服务启动/status/health/stop通过，端口/锁/宿主完成清理；真实本机PostgreSQL临时tenant完成Agent scoped API→refresh入队→Worker lease领取→fixture采集→job completed→商品/evidence/789 bytes→审计回查，并验证强制Worker异常后job failed及lease清理，测试后删除临时tenant数据。
+
 ## 12. 测试矩阵
 
 | 行为 | 主要测试 |
@@ -712,6 +720,7 @@ DPAPI `CurrentUser` 密钥仓必须由将来启动爬虫的同一 Windows 账号
 | 活跃耗时、墙钟跨度、run耗时来源与可访问tooltip | `tests/test_collection_console.py` |
 | Windows控制入口、owner退出和heartbeat停更的Worker终止 | `tests/test_crawler_control.py`, `tests/test_windows_entrypoints.py` |
 | HTTPS CONNECT代理认证与origin header隔离 | `tests/test_check_egress.py`, `tests/test_http_adapter.py` |
+| Agent scoped key、1–5刷新、refresh-only Worker、终态结果与真实PostgreSQL闭环 | `tests/test_collection_api.py`, `tests/test_agent_collection_service.py`, `tests/test_postgres_worker_entrypoint.py`, `tests/test_postgres_worker_integration.py`, `tests/test_windows_entrypoints.py` |
 
 ## 13. 可观测指标与操作门
 

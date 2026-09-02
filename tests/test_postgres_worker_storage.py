@@ -255,6 +255,25 @@ def test_finish_refresh_request_is_tenant_scoped():
     assert params[-2:] == ("job-1", "tenant-a")
 
 
+def test_fail_claimed_refreshes_terminalizes_job_and_releases_worker_lease():
+    storage = load_storage()
+    connection = ScriptedConnection([[{
+        "job_id": "refresh-1", "marketplace": "US", "asin": "B00RCPDCQU",
+        "subject_type": "own", "previous_status": "running",
+    }], [], [], []])
+    repository = storage.PostgresWorkerStorage(
+        "postgresql://example", tenant_id="tenant-a", subject_type="own", connect=lambda: connection
+    )
+
+    assert repository.fail_claimed_refreshes("agent-refresh-1", "agent_refresh_worker_failed") == 1
+    statements = "\n".join(sql for sql, _ in connection.cursor_instance.executed)
+    assert "UPDATE amazon_us.refresh_request" in statements
+    assert "UPDATE amazon_us.item_state" in statements
+    assert "INSERT INTO amazon_us.state_history" in statements
+    assert "lease_token=NULL" in statements
+    assert connection.commits == 1
+
+
 def test_enqueue_due_refreshes_uses_latest_snapshot_and_deduplicates_active_jobs():
     storage = load_storage()
     connection = ScriptedConnection([[{"job_id": "scheduled-1"}, {"job_id": "scheduled-2"}]])

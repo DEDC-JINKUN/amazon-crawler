@@ -207,3 +207,22 @@ def test_owned_full_secure_wrapper_uses_dpapi_and_fixed_tenant():
     assert "'configure','verify-secrets','rotate'" in wrapper
     assert "configure_owned_full.ps1" in wrapper
     assert "[int]$Port = 8770" in wrapper
+
+
+def test_owned_full_wrapper_exposes_agent_service_lifecycle_and_scoped_calls():
+    wrapper = (ROOT / "run_owned_full_secure.ps1").read_text(encoding="utf-8")
+    control = (ROOT / "scripts" / "agent_service_control.ps1").read_text(encoding="utf-8")
+
+    for mode in ("agent-service", "agent-status", "agent-health", "agent-stop", "agent-get", "agent-batch", "agent-refresh", "agent-job"):
+        assert f"'{mode}'" in wrapper
+    assert "-AgentId" in wrapper
+    assert "refresh-agent" in wrapper
+    assert "read-agent" in wrapper
+    assert "agent_collection_service.py" in control
+    assert "crawler_process_host.py" in control
+    assert "agent_service_control" in control
+    assert "runtime_fingerprint" in control
+    assert "agent_service_unmanaged_listener" in control
+    assert "$lockStart -is [DateTime]" in control
+    assert "AMAZON_US_POSTGRES_DSN" not in control
+    assert "AMAZON_COLLECTION_API_KEY" not in control

@@ -105,6 +105,28 @@ python scripts/collection_api.py --backend postgres --dsn "$env:AMAZON_US_POSTGR
 
 默认只监听 `127.0.0.1`；Agent 通过它读取快照、任务状态、最近证据并提交按需刷新请求。
 
+## Agent 调用爬虫
+
+生产入口把 Collection API 与一个 `refresh-only` Worker 作为同一受控服务启动。Agent 只能查询既有数据，或一次提交 1 至 5 个已登记 ASIN 的按需刷新；不能触发全量采集。
+
+```powershell
+.\run_owned_full_secure.ps1 agent-service
+.\run_owned_full_secure.ps1 agent-health
+.\run_owned_full_secure.ps1 agent-status
+```
+
+Agent 调用使用 DPAPI 派生的 scoped key，子进程不会得到 PostgreSQL DSN、代理密码或服务主密钥：
+
+```powershell
+.\run_owned_full_secure.ps1 agent-get -Asins B00RCPDCQU
+.\run_owned_full_secure.ps1 agent-batch -Asins B00RCPDCQU,B00RCPDI50
+.\run_owned_full_secure.ps1 agent-refresh -Asins B00RCPDCQU,B00RCPDI50 -Wait
+.\run_owned_full_secure.ps1 agent-job -JobId refresh-example
+.\run_owned_full_secure.ps1 agent-stop
+```
+
+带 `-Wait` 的刷新会等待 PostgreSQL job 进入 `completed`、`failed` 或 `cancelled`，并返回最新商品快照、evidence、请求到终态的耗时及可用流量字段。访问控制、WAF、CAPTCHA或登录墙会使 refresh Worker 进入不可用状态；服务拒绝继续接收刷新，等待人工处理，不自动换代理或绕过。
+
 本机只读运营控制台：
 
 ```powershell

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local, read-only Collection API for the Amazon US SQLite snapshot."""
+"""Loopback API for Amazon US snapshots and bounded refresh requests."""
 from __future__ import annotations
 
 import argparse
@@ -9,7 +9,8 @@ import json
 import os
 import re
 import sqlite3
-from datetime import date, datetime
+import threading
+from datetime import date, datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -73,6 +74,60 @@ def _json_default(value: Any) -> str:
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     return str(value)
+
+
+def _elapsed_seconds(start: Any, finish: Any) -> float | None:
+    if not start or not finish:
+        return None
+    try:
+        start_value = start if isinstance(start, datetime) else datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+        finish_value = finish if isinstance(finish, datetime) else datetime.fromisoformat(str(finish).replace("Z", "+00:00"))
+        return max(0.0, round((finish_value - start_value).total_seconds(), 3))
+    except (TypeError, ValueError):
+        return None
+
+
+def _at_or_after(value: Any, baseline: Any) -> bool | None:
+    if not value or not baseline:
+        return None
+    try:
+        observed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        expected = baseline if isinstance(baseline, datetime) else datetime.fromisoformat(str(baseline).replace("Z", "+00:00"))
+        return observed >= expected - timedelta(seconds=1)
+    except (TypeError, ValueError):
+        return None
+
+
+def _terminal_job_result(repository: CollectionRepository, job: dict[str, Any]) -> dict[str, Any]:
+    marketplace = str(job.get("marketplace") or "US").upper()
+    asin = str(job.get("asin") or "").upper()
+    evidence_items = repository.load_evidence(marketplace, asin, limit=1)
+    latest_evidence = evidence_items[0] if evidence_items else None
+    traffic: dict[str, Any] = {}
+    if latest_evidence:
+        context = latest_evidence.get("context_json") or {}
+        if isinstance(context, str):
+            try:
+                context = json.loads(context)
+            except json.JSONDecodeError:
+                context = {}
+        if isinstance(context, dict) and isinstance(context.get("traffic"), dict):
+            traffic.update(context["traffic"])
+        traffic.setdefault("transfer_bytes", latest_evidence.get("transfer_bytes"))
+    return {
+        "product": repository.load_product(marketplace, asin),
+        "latest_evidence": latest_evidence,
+        "evidence_after_request": _at_or_after(
+            (latest_evidence or {}).get("retrieved_at"), job.get("requested_at")
+        ),
+        "timing": {
+            "requested_at": job.get("requested_at"),
+            "claimed_at": job.get("claimed_at"),
+            "completed_at": job.get("completed_at"),
+            "elapsed_seconds": _elapsed_seconds(job.get("requested_at"), job.get("completed_at")),
+        },
+        "traffic": traffic,
+    }
 
 
 class CollectionHandler(BaseHTTPRequestHandler):
@@ -159,6 +214,14 @@ class CollectionHandler(BaseHTTPRequestHandler):
             tenant_id = getattr(self.server.repository, "tenant_id", None)
             if tenant_id:
                 payload["tenant_id"] = tenant_id
+            status_loader = getattr(self.server, "refresh_worker_status", None)
+            if callable(status_loader):
+                worker_status = status_loader()
+                payload["refresh_worker"] = worker_status
+                if worker_status.get("state") in {"failed", "blocked"}:
+                    payload.update({"ok": False, "error": "refresh_worker_unavailable"})
+                    self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, payload)
+                    return
             self._send_json(HTTPStatus.OK, payload)
             return
         principal: AgentPrincipal | None = None
@@ -185,7 +248,14 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "job_not_found", "job_id": job_match.group(1)})
                 return
             self._audit(principal, "read", path, "ok")
-            self._send_json(HTTPStatus.OK, {"schema_version": API_SCHEMA_VERSION, "job": job})
+            payload = {"schema_version": API_SCHEMA_VERSION, "job": job}
+            if job.get("status") in {"completed", "failed", "cancelled"}:
+                try:
+                    payload["result"] = _terminal_job_result(self.server.repository, job)
+                except Exception:
+                    self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable"})
+                    return
+            self._send_json(HTTPStatus.OK, payload)
             return
         evidence_match = re.fullmatch(r"/v1/asin/([A-Za-z]{2})/([A-Za-z0-9]{10})/evidence", path)
         if evidence_match:
@@ -245,6 +315,10 @@ class CollectionHandler(BaseHTTPRequestHandler):
             principal = self._authorized("refresh", "request_refresh", path)
         if principal is None:
             return
+        if path != "/v1/asin/batch" and not self.server.can_accept_refresh():
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "refresh_worker_unavailable"})
+            self._audit(principal, "request_refresh", path, "worker_unavailable")
+            return
         if path == "/v1/asin/batch":
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -279,6 +353,47 @@ class CollectionHandler(BaseHTTPRequestHandler):
             self._audit(principal, "batch_read", path, "ok")
             self._send_json(HTTPStatus.OK, {"schema_version": API_SCHEMA_VERSION, "marketplace": marketplace, "items": items})
             return
+        if path == "/v1/asin/refresh":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length > 8192:
+                    raise ValueError("request body too large")
+                body = json.loads((self.rfile.read(length) if length else b"{}").decode("utf-8"))
+                if not isinstance(body, dict) or not isinstance(body.get("asins"), list):
+                    raise ValueError("asins must be a JSON array")
+                marketplace = str(body.get("marketplace") or "US").upper()
+                if marketplace != "US":
+                    raise ValueError("only US marketplace is supported")
+                asins: list[str] = []
+                for value in body["asins"]:
+                    asin = str(value).upper()
+                    if not re.fullmatch(r"[A-Z0-9]{10}", asin):
+                        raise ValueError(f"invalid ASIN: {asin}")
+                    if asin not in asins:
+                        asins.append(asin)
+                if not 1 <= len(asins) <= 5:
+                    raise ValueError("asins must contain 1 to 5 unique values")
+                reason = str(body.get("reason") or "on_demand")[:240]
+                missing = [asin for asin in asins if self.server.repository.load_product(marketplace, asin) is None]
+                if missing:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "asin_not_found", "asins": missing})
+                    return
+                batcher = getattr(self.server.repository, "request_refresh_batch", None)
+                jobs = (
+                    batcher(marketplace, asins, principal.agent_id, reason)
+                    if callable(batcher)
+                    else [self.server.repository.request_refresh(marketplace, asin, principal.agent_id, reason) for asin in asins]
+                )
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request", "detail": str(exc)})
+                return
+            except Exception:
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable"})
+                return
+            self._audit(principal, "request_refresh_batch", f"{marketplace}/{len(asins)}", "accepted")
+            self.server.notify_refresh_worker()
+            self._send_json(HTTPStatus.ACCEPTED, {"schema_version": API_SCHEMA_VERSION, "jobs": jobs})
+            return
         match = re.fullmatch(r"/v1/asin/([A-Za-z]{2})/([A-Za-z0-9]{10})/refresh", path)
         if not match:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "route_not_found"})
@@ -304,6 +419,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable"})
             return
         self._audit(principal, "request_refresh", f"{marketplace}/{asin}", "accepted")
+        self.server.notify_refresh_worker()
         self._send_json(HTTPStatus.ACCEPTED, {"schema_version": API_SCHEMA_VERSION, "job": request})
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -311,7 +427,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
 
 
 class CollectionServer(ThreadingHTTPServer):
-    def __init__(self, address: tuple[str, int], db_path: Path | None = None, repository: CollectionRepository | None = None, api_key: str | None = None, agent_scopes: dict[str, frozenset[str]] | None = None, agent_rate_limit: int = 60):
+    def __init__(self, address: tuple[str, int], db_path: Path | None = None, repository: CollectionRepository | None = None, api_key: str | None = None, agent_scopes: dict[str, frozenset[str]] | None = None, agent_rate_limit: int = 60, refresh_notifier=None, refresh_worker_status=None):
         if address[0] not in LOOPBACK_HOSTS:
             raise ValueError("Collection API only allows loopback host by default")
         if repository is None:
@@ -324,18 +440,31 @@ class CollectionServer(ThreadingHTTPServer):
         self.agent_scopes = dict(agent_scopes or DEFAULT_AGENT_SCOPES)
         self.agent_rate_limit = max(1, int(agent_rate_limit))
         self._agent_windows: dict[str, tuple[float, int]] = {}
+        self._agent_window_lock = threading.Lock()
+        self.refresh_notifier = refresh_notifier
+        self.refresh_worker_status = refresh_worker_status
+
+    def notify_refresh_worker(self) -> None:
+        if callable(self.refresh_notifier):
+            self.refresh_notifier()
+
+    def can_accept_refresh(self) -> bool:
+        if not callable(self.refresh_worker_status):
+            return True
+        return self.refresh_worker_status().get("state") not in {"failed", "blocked", "stopped"}
 
     def allow_request(self, agent_id: str) -> bool:
         import time
         now = time.monotonic()
-        start, count = self._agent_windows.get(agent_id, (now, 0))
-        if now - start >= 60:
-            start, count = now, 0
-        if count >= self.agent_rate_limit:
-            self._agent_windows[agent_id] = (start, count)
-            return False
-        self._agent_windows[agent_id] = (start, count + 1)
-        return True
+        with self._agent_window_lock:
+            start, count = self._agent_windows.get(agent_id, (now, 0))
+            if now - start >= 60:
+                start, count = now, 0
+            if count >= self.agent_rate_limit:
+                self._agent_windows[agent_id] = (start, count)
+                return False
+            self._agent_windows[agent_id] = (start, count + 1)
+            return True
 
 
 def serve(db_path: Path | None = None, host: str = "127.0.0.1", port: int = 8765, repository: CollectionRepository | None = None, api_key: str | None = None, agent_rate_limit: int = 60) -> None:

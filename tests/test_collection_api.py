@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import tempfile
 import threading
 import urllib.error
@@ -233,6 +234,163 @@ class CollectionApiTests(unittest.TestCase):
             refresh_client = client_module.AmazonCollectionClient(base_url, "refresh-agent", api.derive_agent_key("master-key", "refresh-agent"))
             self.assertEqual(refresh_client.request_refresh("B00RCPDCQU")["job"]["requested_by"], "refresh-agent")
             self.assertEqual(refresh_client.get_job("refresh-1")["job"]["status"], "queued")
+        finally:
+            server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+        with self.assertRaisesRegex(ValueError, "loopback"):
+            client_module.AmazonCollectionClient("https://example.com", "read-agent", "scoped-key")
+        with self.assertRaisesRegex(ValueError, "credentials"):
+            client_module.AmazonCollectionClient("http://user:pass@127.0.0.1:8765", "read-agent", "scoped-key")
+
+        class RedirectHandler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                self.send_response(302)
+                self.send_header("Location", "https://example.com/collect")
+                self.end_headers()
+
+            def log_message(self, format, *args):
+                return
+
+        redirect_server = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+        redirect_thread = threading.Thread(target=redirect_server.serve_forever, daemon=True)
+        redirect_thread.start()
+        try:
+            redirect_client = client_module.AmazonCollectionClient(
+                f"http://127.0.0.1:{redirect_server.server_port}", "read-agent", "scoped-key"
+            )
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                redirect_client.get_product("B00RCPDCQU")
+            self.assertEqual(raised.exception.code, 302)
+        finally:
+            redirect_server.shutdown(); redirect_server.server_close(); redirect_thread.join(timeout=2)
+
+    def test_refresh_agent_can_submit_one_to_five_asins_and_wait_for_terminal_results(self):
+        api = load("collection_api")
+        client_module = load("amazon_collection_client")
+
+        class Repository:
+            tenant_id = "tenant-agent"
+
+            def __init__(self):
+                self.jobs = {}
+                self.audits = []
+                self.batch_calls = 0
+
+            def load_product(self, marketplace, asin):
+                if asin not in {"B00RCPDCQU", "B00RCPDI50"}:
+                    return None
+                return {"asin": asin, "marketplace": marketplace, "title": f"Product {asin}", "found": True}
+
+            def load_job_status(self): return {"counts": {"succeeded": 2}}
+            def load_history(self, marketplace, asin, limit=20): return []
+
+            def load_evidence(self, marketplace, asin, limit=20):
+                return [{
+                    "run_id": f"agent-refresh-{asin}", "retrieved_at": "2026-09-02T08:00:02+00:00",
+                    "http_status": 200, "transfer_bytes": 4321, "source_type": "http_html",
+                    "context_json": {"traffic": {"http_compressed_response_bytes": 4321}},
+                }]
+
+            def request_refresh(self, marketplace, asin, requested_by, reason):
+                job = {
+                    "job_id": f"refresh-{asin}", "marketplace": marketplace, "asin": asin,
+                    "requested_by": requested_by, "reason": reason, "status": "completed",
+                    "requested_at": "2026-09-02T08:00:00+00:00",
+                    "claimed_at": "2026-09-02T08:00:01+00:00",
+                    "completed_at": "2026-09-02T08:00:03+00:00",
+                }
+                self.jobs[job["job_id"]] = job
+                return job
+
+            def request_refresh_batch(self, marketplace, asins, requested_by, reason):
+                self.batch_calls += 1
+                return [self.request_refresh(marketplace, asin, requested_by, reason) for asin in asins]
+
+            def load_refresh_request(self, job_id): return self.jobs.get(job_id)
+            def record_api_audit(self, **event): self.audits.append(event)
+
+        repository = Repository()
+        wakeups = []
+        server = api.CollectionServer(
+            ("127.0.0.1", 0), repository=repository, api_key="master-key",
+            refresh_notifier=lambda: wakeups.append("wake"),
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            client = client_module.AmazonCollectionClient(
+                f"http://127.0.0.1:{server.server_port}", "refresh-agent",
+                api.derive_agent_key("master-key", "refresh-agent"),
+            )
+            result = client.refresh_and_wait(
+                ["B00RCPDCQU", "B00RCPDI50"], reason="agent_test", timeout_seconds=1, poll_seconds=0.01
+            )
+            self.assertEqual([item["job"]["status"] for item in result["results"]], ["completed", "completed"])
+            self.assertEqual(result["results"][0]["result"]["latest_evidence"]["transfer_bytes"], 4321)
+            self.assertTrue(result["results"][0]["result"]["evidence_after_request"])
+            self.assertEqual(result["results"][0]["result"]["timing"]["elapsed_seconds"], 3.0)
+            self.assertEqual(result["results"][0]["result"]["traffic"]["http_compressed_response_bytes"], 4321)
+            self.assertEqual(wakeups, ["wake"])
+            self.assertEqual(repository.batch_calls, 1)
+            self.assertTrue(all(job["requested_by"] == "refresh-agent" for job in repository.jobs.values()))
+            self.assertIn("request_refresh_batch", [event["action"] for event in repository.audits])
+
+            with self.assertRaises(ValueError):
+                client.request_refreshes([
+                    "B000000001", "B000000002", "B000000003",
+                    "B000000004", "B000000005", "B000000006",
+                ])
+        finally:
+            server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+    def test_read_agent_cannot_submit_batch_refresh(self):
+        api = load("collection_api")
+
+        class Repository:
+            def load_job_status(self): return {"counts": {}}
+
+        server = api.CollectionServer(("127.0.0.1", 0), repository=Repository(), api_key="master-key")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/v1/asin/refresh",
+                data=b'{"marketplace":"US","asins":["B00RCPDCQU"]}',
+                headers={"Content-Type": "application/json", **api.agent_headers("master-key", "read-agent")},
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                urllib.request.urlopen(request, timeout=2)
+            self.assertEqual(raised.exception.code, 403)
+        finally:
+            server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+    def test_agent_service_rejects_new_refresh_when_worker_is_blocked(self):
+        api = load("collection_api")
+
+        class Repository:
+            def load_job_status(self): return {"counts": {}}
+
+            def request_refresh(self, *args):
+                self.fail("blocked service must not enqueue")
+
+        server = api.CollectionServer(
+            ("127.0.0.1", 0), repository=Repository(), api_key="master-key",
+            refresh_worker_status=lambda: {"state": "blocked", "last_error": "access_blocked"},
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/v1/asin/refresh",
+                data=b'{"marketplace":"US","asins":["B00RCPDCQU"]}',
+                headers={"Content-Type": "application/json", **api.agent_headers("master-key", "refresh-agent")},
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                urllib.request.urlopen(request, timeout=2)
+            self.assertEqual(raised.exception.code, 503)
+            self.assertEqual(json.loads(raised.exception.read())["error"], "refresh_worker_unavailable")
         finally:
             server.shutdown(); server.server_close(); thread.join(timeout=2)
 

@@ -1,0 +1,149 @@
+from __future__ import annotations
+
+import importlib.util
+import time
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load(name: str):
+    spec = importlib.util.spec_from_file_location(name, ROOT / "scripts" / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+class RefreshStorage:
+    tenant_id = "tenant-agent"
+
+    def __init__(self):
+        self.claimed = False
+        self.saved = []
+        self.finished = []
+
+    def reclaim_expired_leases(self):
+        return 0
+
+    def claim_refresh_task(self, worker_id, lease_seconds=None):
+        if self.claimed:
+            return None
+        self.claimed = True
+        return {
+            "job_id": "refresh-1", "asin": "B00RCPDCQU", "marketplace": "US",
+            "url": "https://www.amazon.com/dp/B00RCPDCQU", "status": "running",
+            "task_stage": "product", "lease_token": "token-1", "lease_owner": worker_id,
+            "reported_review_count": 0, "fetched_review_count": 0, "review_pages_fetched": 0,
+        }
+
+    def claim_task(self, *args, **kwargs):
+        raise AssertionError("agent service must not claim ordinary tasks")
+
+    def save_product_result(self, **payload):
+        self.saved.append(payload)
+        return True
+
+    def save_failure(self, **payload):
+        self.saved.append(payload)
+        return True
+
+    def finish_refresh_request(self, job_id, status):
+        self.finished.append((job_id, status))
+
+
+class Adapter:
+    source_type = "http_html"
+    last_transfer_bytes = 321
+    last_retry_after_seconds = None
+
+    def fetch(self, url):
+        return """
+        <html><head><link rel="canonical" href="https://www.amazon.com/dp/B00RCPDCQU"></head><body>
+          <input id="ASIN" value="B00RCPDCQU"><span id="productTitle">Agent refreshed product</span>
+        </body></html>
+        """, 200
+
+    def close(self):
+        return None
+
+
+class ExplodingAdapter(Adapter):
+    def fetch(self, url):
+        raise RuntimeError("provider detail must not escape")
+
+
+class FailingRefreshStorage(RefreshStorage):
+    def fail_claimed_refreshes(self, worker_id, reason):
+        assert worker_id.startswith("agent-refresh-")
+        self.finished.append(("refresh-1", "failed"))
+        self.failure_reason = reason
+        return 1
+
+
+def test_background_service_executes_only_refresh_jobs_and_reports_health():
+    service = load("agent_collection_service")
+    worker_module = load("amazon_us_worker")
+    storage = RefreshStorage()
+    config = dict(worker_module.DEFAULTS)
+    config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}})
+    background = service.AgentRefreshWorker(
+        storage=storage,
+        adapter_factory=Adapter,
+        config=config,
+        poll_seconds=0.01,
+        lease_seconds=120,
+    )
+
+    background.start()
+    background.notify()
+    deadline = time.monotonic() + 2
+    while not storage.finished and time.monotonic() < deadline:
+        time.sleep(0.01)
+    background.stop()
+
+    assert storage.finished == [("refresh-1", "completed")]
+    assert storage.saved[0]["product"]["title"] == "Agent refreshed product"
+    status = background.status()
+    assert status["state"] == "stopped"
+    assert status["completed_actions"] == 1
+    assert status["last_error"] is None
+
+
+def test_service_cli_is_postgres_only_and_loopback_only():
+    service = load("agent_collection_service")
+    parser = service.build_parser()
+    args = parser.parse_args([
+        "--tenant-id", "tenant-agent", "--config", "config/amazon_us.windows.toml",
+        "--output-dir", "data/tenant-agent",
+        "--host", "127.0.0.1", "--port", "8765",
+    ])
+
+    assert args.tenant_id == "tenant-agent"
+    assert args.host == "127.0.0.1"
+    assert args.port == 8765
+
+
+def test_unexpected_worker_error_terminalizes_claimed_refresh_without_detail_leak():
+    service = load("agent_collection_service")
+    worker_module = load("amazon_us_worker")
+    storage = FailingRefreshStorage()
+    config = dict(worker_module.DEFAULTS)
+    config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}})
+    background = service.AgentRefreshWorker(
+        storage=storage, adapter_factory=ExplodingAdapter, config=config, poll_seconds=0.01, lease_seconds=120
+    )
+
+    background.start()
+    deadline = time.monotonic() + 2
+    while background.status()["state"] not in {"failed", "blocked"} and time.monotonic() < deadline:
+        time.sleep(0.01)
+    status = background.status()
+    background.stop()
+
+    assert storage.finished == [("refresh-1", "failed")]
+    assert storage.failure_reason == "agent_refresh_worker_failed"
+    assert status["state"] == "failed"
+    assert status["last_error"] == "RuntimeError"
+    assert "provider detail" not in str(status)

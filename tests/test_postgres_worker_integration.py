@@ -5,6 +5,7 @@ import importlib.util
 import os
 from pathlib import Path
 import tempfile
+import threading
 import uuid
 
 import pytest
@@ -344,6 +345,102 @@ def test_two_workers_claim_distinct_tasks_from_real_postgres():
             for table in (
                 "operation_run", "collection_run", "state_history", "review_page_state", "refresh_request", "collection_evidence", "media_asset", "content_module",
                 "review_summary", "review_record", "product_snapshot", "item_state", "asin_master",
+            ):
+                connection.execute(f"DELETE FROM amazon_us.{table} WHERE tenant_id=%s", (tenant_id,))
+            connection.commit()
+
+
+@pytest.mark.skipif(not DSN, reason="AMAZON_TEST_POSTGRES_DSN is not configured")
+def test_agent_api_refresh_is_consumed_and_returned_from_real_postgres():
+    import psycopg
+
+    service = load_script("agent_collection_service")
+    api = load_script("collection_api")
+    client_module = load_script("amazon_collection_client")
+    worker_module = load_script("amazon_us_worker")
+    storage_module = load_storage()
+    tenant_id = f"agent-e2e-{uuid.uuid4().hex}"
+    schema = (ROOT / "schema" / "postgres_schema.sql").read_text(encoding="utf-8")
+    with psycopg.connect(DSN) as connection:
+        connection.execute(schema)
+        connection.commit()
+
+    storage = storage_module.PostgresWorkerStorage(DSN, tenant_id=tenant_id, subject_type="own")
+    storage.initialize_manifest([{
+        "asin": "B00RCPDCQU", "url": "https://www.amazon.com/dp/B00RCPDCQU",
+        "marketplace": "US", "source_site_label": "agent-e2e", "source_workbook": "fixture",
+    }])
+    repository = load_script("collection_storage").PostgresCollectionRepository(DSN, tenant_id=tenant_id)
+
+    class Adapter:
+        source_type = "http_html"
+        last_transfer_bytes = 789
+        last_retry_after_seconds = None
+
+        def fetch(self, url):
+            return """
+            <html><head><link rel="canonical" href="https://www.amazon.com/dp/B00RCPDCQU"></head><body>
+              <input id="ASIN" value="B00RCPDCQU"><span id="productTitle">Agent E2E Product</span>
+            </body></html>
+            """, 200
+
+        def close(self): return None
+
+    config = dict(worker_module.DEFAULTS)
+    config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}})
+    background = service.AgentRefreshWorker(
+        storage=storage, adapter_factory=Adapter, config=config, poll_seconds=0.01, lease_seconds=120
+    )
+    server = api.CollectionServer(
+        ("127.0.0.1", 0), repository=repository, api_key="agent-e2e-master",
+        refresh_notifier=background.notify, refresh_worker_status=background.status,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    background.start()
+    thread.start()
+    try:
+        client = client_module.AmazonCollectionClient(
+            f"http://127.0.0.1:{server.server_port}", "refresh-agent",
+            api.derive_agent_key("agent-e2e-master", "refresh-agent"),
+        )
+        result = client.refresh_and_wait(["B00RCPDCQU"], reason="postgres_e2e", timeout_seconds=5, poll_seconds=0.02)
+        item = result["results"][0]
+        assert item["job"]["status"] == "completed"
+        assert item["result"]["product"]["product"]["title"] == "Agent E2E Product"
+        assert item["result"]["latest_evidence"]["transfer_bytes"] == 789
+        assert item["result"]["evidence_after_request"] is True
+        with psycopg.connect(DSN) as connection:
+            audit = connection.execute(
+                "SELECT agent_id,action,outcome FROM amazon_us.collection_api_audit "
+                "WHERE tenant_id=%s AND action='request_refresh_batch' ORDER BY id DESC LIMIT 1",
+                (tenant_id,),
+            ).fetchone()
+        assert audit == ("refresh-agent", "request_refresh_batch", "accepted")
+
+        background.stop()
+        failed_job = repository.request_refresh("US", "B00RCPDCQU", "refresh-agent", "forced_worker_error")
+        claimed = storage.claim_refresh_task("agent-refresh-failure", lease_seconds=120)
+        assert claimed["job_id"] == failed_job["job_id"]
+        assert storage.fail_claimed_refreshes("agent-refresh-failure", "agent_refresh_worker_failed") == 1
+        failed_result = repository.load_refresh_request(failed_job["job_id"])
+        assert failed_result["status"] == "failed"
+        with psycopg.connect(DSN) as connection:
+            state = connection.execute(
+                "SELECT status,lease_token,lease_owner,last_error FROM amazon_us.item_state "
+                "WHERE tenant_id=%s AND asin='B00RCPDCQU'",
+                (tenant_id,),
+            ).fetchone()
+        assert state == ("failed", None, None, "agent_refresh_worker_failed")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        background.stop()
+        with psycopg.connect(DSN) as connection:
+            for table in (
+                "collection_api_audit", "operation_run", "collection_run", "state_history", "review_page_state",
+                "refresh_request", "collection_evidence", "media_asset", "content_module", "review_summary",
+                "review_record", "product_snapshot", "item_state", "asin_master",
             ):
                 connection.execute(f"DELETE FROM amazon_us.{table} WHERE tenant_id=%s", (tenant_id,))
             connection.commit()
