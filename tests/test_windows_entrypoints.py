@@ -226,3 +226,55 @@ def test_owned_full_wrapper_exposes_agent_service_lifecycle_and_scoped_calls():
     assert "$lockStart -is [DateTime]" in control
     assert "AMAZON_US_POSTGRES_DSN" not in control
     assert "AMAZON_COLLECTION_API_KEY" not in control
+
+
+def test_agent_business_commands_ensure_the_local_service_before_calling_client():
+    wrapper = (ROOT / "run_owned_full_secure.ps1").read_text(encoding="utf-8")
+    client_block = wrapper.split("if ($Mode -in @('agent-get','agent-batch','agent-refresh','agent-job'))", 1)[1]
+    client_block = client_block.split("$arguments = [Collections.Generic.List[string]]::new()", 1)[0]
+
+    assert "$ensureArguments = Get-AgentControlArguments 'start'" in client_block
+    assert "& $launcher -FilePath $shell -ArgumentList $ensureArguments" in client_block
+    assert client_block.index("-ArgumentList $ensureArguments") < client_block.index("-AgentId $agentId")
+
+
+def test_agent_service_runtime_fingerprint_covers_worker_pool_api_storage_and_config():
+    control = (ROOT / "scripts" / "agent_service_control.ps1").read_text(encoding="utf-8")
+
+    assert "function Get-AgentRuntimeFingerprint" in control
+    for dependency in (
+        "agent_collection_service.py",
+        "amazon_us_worker.py",
+        "proxy_session_pool.py",
+        "collection_api.py",
+        "collection_storage.py",
+        "postgres_worker_storage.py",
+        "$resolvedConfig",
+    ):
+        assert dependency in control
+    assert control.count("Get-AgentRuntimeFingerprint") >= 3
+
+
+def test_agent_service_start_replaces_only_a_verified_ready_stale_runtime():
+    control = (ROOT / "scripts" / "agent_service_control.ps1").read_text(encoding="utf-8")
+    start_block = control.split("if ($null -ne $hostProcess)", 1)[1]
+    start_block = start_block.split("[IO.Directory]::CreateDirectory($controlDir)", 1)[0]
+
+    assert "$live.Ok -and (Test-CurrentRuntime $lock)" in start_block
+    assert "if ($live.Ok)" in start_block
+    assert "Stop-Process -Id $hostProcess.Id -Force" in start_block
+    assert "Wait-AgentOffline" in start_block
+    assert "Remove-ControlFiles" in start_block
+    assert "agent_service_lock_is_live_but_not_ready" in start_block
+
+
+def test_agent_status_uses_liveness_so_reads_survive_a_blocked_refresh_worker():
+    control = (ROOT / "scripts" / "agent_service_control.ps1").read_text(encoding="utf-8")
+    health_block = control.split("if ($Mode -eq 'health')", 1)[1].split("if ($Mode -eq 'status')", 1)[0]
+    status_block = control.split("if ($Mode -eq 'status')", 1)[1].split("if ($Mode -eq 'stop')", 1)[0]
+
+    assert "function Get-Live" in control
+    assert '"$url/healthz"' in control
+    assert "Get-Ready" in health_block
+    assert "Get-Live" in status_block
+    assert "Get-Ready" not in status_block

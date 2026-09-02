@@ -4,7 +4,7 @@ Collection API 是 Agent 查询采集结果和提交小批按需刷新的统一�
 
 ## 启动
 
-生产启动、状态、健康检查和停止均使用固定批次包装器，不需要重复传 tenant、manifest 或目录：
+普通 Agent 直接执行 `agent-get` / `agent-batch` / `agent-refresh -Wait` / `agent-job`；这些命令会先幂等确保固定 tenant 的本机服务已启动。管理员才需要显式使用以下生命周期命令：
 
 ```powershell
 .\run_owned_full_secure.ps1 agent-service
@@ -12,6 +12,10 @@ Collection API 是 Agent 查询采集结果和提交小批按需刷新的统一�
 .\run_owned_full_secure.ps1 agent-health
 .\run_owned_full_secure.ps1 agent-stop
 ```
+
+锁中的运行时指纹覆盖服务、Worker、代理池、API、存储模块和当前配置文件。只有 PID、StartTime、tenant、URL 均已验证且 `/healthz` 正常的旧版本进程会被受控替换；未知监听器继续 fail closed。
+
+进程身份与业务 readiness 分开：自动确保服务使用 `/healthz`，所以 refresh Worker blocked 后只读查询和 job 回查仍可用；`agent-health` 使用 `/readyz`，新 refresh 也由服务端 readiness Gate 拒绝。
 
 以下直接启动方式仅用于离线开发：
 
@@ -147,7 +151,7 @@ Content-Type: application/json
 {"requested_by":"agent-name","reason":"price_is_stale"}
 ```
 
-HTTP线程只负责登记队列并返回 `202 Accepted`；真实采集由后台受控 Worker 执行。若 Worker 因访问控制或内部错误进入 `blocked/failed`，`/readyz` 返回 503，服务拒绝新增刷新，避免任务无限积压。
+HTTP线程只负责登记队列并返回 `202 Accepted`；真实采集由后台受控 Worker 执行。同一次 Agent 批量的最多5条由一个 runner run 领取，保证会话预算和跨ASIN主动换槽不会被逐条重置。Agent Worker 与普通 Worker 共用同一 adapter factory；配置 `proxy_session_ports` 时两者均经过 `ProxySessionPool`。若 Worker 达到有界会话池熔断或因内部错误进入 `blocked/failed`，`/readyz` 返回 503，服务拒绝新增刷新，避免任务无限积压。
 
 若Worker在领取后发生未预期异常，服务按固定脱敏原因将该Worker仍持有的refresh job置为`failed`，释放对应item lease并写状态历史；异常正文不进入API响应或健康状态。Agent客户端只允许HTTP loopback基址，拒绝外部主机、URL内嵌凭据、路径、query、fragment和HTTP重定向，避免scoped key外发。
 
@@ -167,7 +171,7 @@ Content-Type: application/json
 - 直接在 API 请求线程中运行爬虫；
 - Agent 触发全量抓取、普通pending队列或超过5条的刷新；
 - 远程公网访问；
-- 自动代理轮换、CAPTCHA/WAF绕过、登录或个人Cookie；
+- 无限代理轮换、CAPTCHA/WAF绕过、登录或个人Cookie；已批准粘滞会话仅在配置的有界上限内切换；
 - 直接查询个人 Cookie、Token 或代理凭证。
 
 其他业务路由遇到数据库异常时返回 HTTP 500 `database_unavailable`，不返回底层驱动或连接详情。

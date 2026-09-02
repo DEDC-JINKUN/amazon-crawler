@@ -28,6 +28,14 @@ $shell = (Get-Process -Id $PID).Path
 $tenant = 'owned_us_asin_20260902_full_01'
 $output = 'data\owned_us_asin_20260902_full_01'
 
+function Get-AgentControlArguments([string]$ControlMode) {
+    return @(
+        '-NoProfile','-ExecutionPolicy','Bypass','-File',$agentControl,$ControlMode,
+        '-TenantId',$tenant,'-ConfigPath',"$output\owned_us_full.toml",
+        '-OutputDir',$output,'-Port',[string]$AgentPort
+    )
+}
+
 if ($Mode -eq 'configure') {
     & $credentialTool -Mode Configure
     exit $LASTEXITCODE
@@ -46,11 +54,7 @@ if ($Mode -in @('agent-service','agent-status','agent-health','agent-stop')) {
         'agent-service' = 'start'; 'agent-status' = 'status';
         'agent-health' = 'health'; 'agent-stop' = 'stop'
     }[$Mode]
-    $controlArguments = @(
-        '-NoProfile','-ExecutionPolicy','Bypass','-File',$agentControl,$controlMode,
-        '-TenantId',$tenant,'-ConfigPath',"$output\owned_us_full.toml",
-        '-OutputDir',$output,'-Port',[string]$AgentPort
-    )
+    $controlArguments = Get-AgentControlArguments $controlMode
     if ($Mode -eq 'agent-service') {
         & $launcher -FilePath $shell -ArgumentList $controlArguments
     }
@@ -62,6 +66,13 @@ if ($Mode -in @('agent-service','agent-status','agent-health','agent-stop')) {
 
 if ($Mode -in @('agent-get','agent-batch','agent-refresh','agent-job')) {
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'Python virtual environment is unavailable.' }
+    $statusArguments = Get-AgentControlArguments 'status'
+    & $shell @statusArguments *> $null
+    if ($LASTEXITCODE -ne 0) {
+        $ensureArguments = Get-AgentControlArguments 'start'
+        & $launcher -FilePath $shell -ArgumentList $ensureArguments
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
     $baseUrl = "http://127.0.0.1:$AgentPort"
     $clientArguments = [Collections.Generic.List[string]]::new()
     foreach ($value in @($agentClient,'--base-url',$baseUrl)) { $clientArguments.Add([string]$value) }

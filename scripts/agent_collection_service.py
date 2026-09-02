@@ -15,10 +15,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
-from amazon_us_worker import DEFAULT_CONFIG, HttpFirstAdapter, load_config, run_postgres_actions  # noqa: E402
+from amazon_us_worker import DEFAULT_CONFIG, _build_http_adapter, load_config, run_postgres_actions  # noqa: E402
 from collection_api import CollectionServer, LOOPBACK_HOSTS  # noqa: E402
 from collection_storage import PostgresCollectionRepository  # noqa: E402
 from postgres_worker_storage import PostgresWorkerStorage  # noqa: E402
+
+MAX_AGENT_REFRESH_BATCH = 5
 
 
 class RefreshOnlyStorageView:
@@ -103,7 +105,7 @@ class AgentRefreshWorker:
                     self._refresh_storage,
                     adapter,
                     self.config,
-                    limit=1,
+                    limit=MAX_AGENT_REFRESH_BATCH,
                     run_id=run_id,
                     worker_id=worker_id,
                     lease_seconds=self.lease_seconds,
@@ -176,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
     repository = PostgresCollectionRepository(dsn, tenant_id=args.tenant_id)
     worker = AgentRefreshWorker(
         storage=storage,
-        adapter_factory=lambda: HttpFirstAdapter(config),
+        adapter_factory=lambda: _build_http_adapter(config),
         config=config,
         poll_seconds=args.poll_seconds,
         lease_seconds=args.lease_seconds,

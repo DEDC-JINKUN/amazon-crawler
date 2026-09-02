@@ -13,6 +13,11 @@ $root = Split-Path -Parent $PSScriptRoot
 $python = Join-Path $root '.venv\Scripts\python.exe'
 $hostScript = Join-Path $PSScriptRoot 'crawler_process_host.py'
 $serviceScript = Join-Path $PSScriptRoot 'agent_collection_service.py'
+$workerScript = Join-Path $PSScriptRoot 'amazon_us_worker.py'
+$proxyPoolScript = Join-Path $PSScriptRoot 'proxy_session_pool.py'
+$collectionApiScript = Join-Path $PSScriptRoot 'collection_api.py'
+$collectionStorageScript = Join-Path $PSScriptRoot 'collection_storage.py'
+$postgresStorageScript = Join-Path $PSScriptRoot 'postgres_worker_storage.py'
 $controlDir = Join-Path $root 'data\agent_service_control'
 $lockPath = Join-Path $controlDir '.agent-service.lock.json'
 $requestPath = Join-Path $controlDir 'agent-service.request.json'
@@ -29,6 +34,35 @@ function Resolve-ProjectPath([string]$Value) {
         throw 'agent_service_path_outside_project'
     }
     return $candidate
+}
+
+function Get-AgentRuntimeFingerprint {
+    $resolvedConfig = Resolve-ProjectPath $ConfigPath
+    $runtimeFiles = @(
+        $serviceScript,
+        $workerScript,
+        $proxyPoolScript,
+        $collectionApiScript,
+        $collectionStorageScript,
+        $postgresStorageScript,
+        $resolvedConfig
+    )
+    $parts = foreach ($path in $runtimeFiles) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "agent_service_file_missing:$path"
+        }
+        $normalized = [IO.Path]::GetFullPath($path).ToLowerInvariant()
+        $fileHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        "$normalized`n$fileHash"
+    }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes(($parts -join "`n"))
+        return [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
+    }
 }
 
 function Read-Lock {
@@ -54,7 +88,7 @@ function Get-VerifiedHost($Lock) {
 function Test-CurrentRuntime($Lock) {
     if ($null -eq $Lock -or [string]$Lock.schema -ne 'amazon-us-agent-service-lock-v1') { return $false }
     if ([string]$Lock.tenant_id -ne $TenantId -or [string]$Lock.url -ne $url) { return $false }
-    $expectedFingerprint = (Get-FileHash -LiteralPath $serviceScript -Algorithm SHA256).Hash.ToLowerInvariant()
+    try { $expectedFingerprint = Get-AgentRuntimeFingerprint } catch { return $false }
     return [string]$Lock.runtime_fingerprint -eq $expectedFingerprint
 }
 
@@ -64,6 +98,23 @@ function Get-Ready {
         return [pscustomobject]@{ Ok = ($response.StatusCode -eq 200); Body = [string]$response.Content }
     }
     catch { return [pscustomobject]@{ Ok = $false; Body = $null } }
+}
+
+function Get-Live {
+    try {
+        $response = Invoke-WebRequest -Uri "$url/healthz" -UseBasicParsing -TimeoutSec 3
+        return [pscustomobject]@{ Ok = ($response.StatusCode -eq 200); Body = [string]$response.Content }
+    }
+    catch { return [pscustomobject]@{ Ok = $false; Body = $null } }
+}
+
+function Wait-AgentOffline([int]$TimeoutSeconds = 10) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        if (-not (Get-Live).Ok) { return $true }
+        Start-Sleep -Milliseconds 200
+    } while ([DateTime]::UtcNow -lt $deadline)
+    return $false
 }
 
 function Remove-ControlFiles {
@@ -84,44 +135,55 @@ if ($Mode -eq 'health') {
 }
 
 if ($Mode -eq 'status') {
-    $ready = Get-Ready
+    $live = Get-Live
     if ($null -eq $hostProcess) {
-        if ($ready.Ok) { Write-Error 'Agent service has an unmanaged listener.'; exit 2 }
+        if ($live.Ok) { Write-Error 'Agent service has an unmanaged listener.'; exit 2 }
         Write-Host 'Agent service: STOPPED'; exit 1
     }
     if (-not (Test-CurrentRuntime $lock)) { Write-Error 'Agent service runtime identity is stale.'; exit 2 }
-    if (-not $ready.Ok) { Write-Error 'Agent service process is running but not ready.'; exit 2 }
+    if (-not $live.Ok) { Write-Error 'Agent service process is running but not live.'; exit 2 }
     Write-Host "Agent service: RUNNING pid=$($hostProcess.Id) tenant=$TenantId url=$url"
-    Write-Output $ready.Body
+    Write-Output $live.Body
     exit 0
 }
 
 if ($Mode -eq 'stop') {
     if ($null -eq $hostProcess) {
-        if ((Get-Ready).Ok) { throw 'agent_service_unmanaged_listener' }
+        if ((Get-Live).Ok) { throw 'agent_service_unmanaged_listener' }
         Remove-ControlFiles
         Write-Host 'Agent service: already stopped'
         exit 0
     }
     Stop-Process -Id $hostProcess.Id -Force
     try { $hostProcess.WaitForExit(10000) | Out-Null } catch { }
+    if (-not (Wait-AgentOffline)) { throw 'agent_service_stop_timeout' }
     Remove-ControlFiles
     Write-Host 'Agent service: STOPPED'
     exit 0
 }
 
 if ($null -ne $hostProcess) {
-    $ready = Get-Ready
-    if ($ready.Ok -and (Test-CurrentRuntime $lock)) { Write-Host "Agent service: already running pid=$($hostProcess.Id) url=$url"; exit 0 }
-    throw 'agent_service_lock_is_live_but_not_ready'
+    $live = Get-Live
+    if ($live.Ok -and (Test-CurrentRuntime $lock)) { Write-Host "Agent service: already running pid=$($hostProcess.Id) url=$url"; exit 0 }
+    if ($live.Ok) {
+        Write-Host "Agent service: restarting stale controlled runtime pid=$($hostProcess.Id)"
+        Stop-Process -Id $hostProcess.Id -Force
+        try { $hostProcess.WaitForExit(10000) | Out-Null } catch { }
+        if (-not (Wait-AgentOffline)) { throw 'agent_service_stale_runtime_stop_timeout' }
+        Remove-ControlFiles
+        $hostProcess = $null
+    }
+    else {
+        throw 'agent_service_lock_is_live_but_not_ready'
+    }
 }
-if ((Get-Ready).Ok) { throw 'agent_service_port_has_unmanaged_listener' }
+if ((Get-Live).Ok) { throw 'agent_service_port_has_unmanaged_listener' }
 
 [IO.Directory]::CreateDirectory($controlDir) | Out-Null
 Remove-ControlFiles
 $resolvedConfig = Resolve-ProjectPath $ConfigPath
 $resolvedOutput = Resolve-ProjectPath $OutputDir
-foreach ($required in @($python,$hostScript,$serviceScript,$resolvedConfig)) {
+foreach ($required in @($python,$hostScript,$serviceScript,$workerScript,$proxyPoolScript,$collectionApiScript,$collectionStorageScript,$postgresStorageScript,$resolvedConfig)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "agent_service_file_missing:$required" }
 }
 [IO.Directory]::CreateDirectory($resolvedOutput) | Out-Null
@@ -142,7 +204,7 @@ $hostProcess = Start-Process -FilePath $python -ArgumentList $hostArgumentLine `
     -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $stdoutPath `
     -RedirectStandardError $stderrPath -PassThru
 $hostProcess.Refresh()
-$fingerprint = (Get-FileHash -LiteralPath $serviceScript -Algorithm SHA256).Hash.ToLowerInvariant()
+$fingerprint = Get-AgentRuntimeFingerprint
 $newLock = [ordered]@{
     schema = 'amazon-us-agent-service-lock-v1'
     pid = $hostProcess.Id

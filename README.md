@@ -15,7 +15,7 @@
 - PostgreSQL 是正式任务、断点、结果和历史的唯一事实源；SQLite 仅保留给历史回放和离线回归测试。
 - 原始 HTML、采集时间、来源和解析器版本必须可追溯。
 - PostgreSQL 使用租约和 `FOR UPDATE SKIP LOCKED` 支持多个 Worker 安全领取；当前 Windows 默认仍以单 Worker 小批量运行。
-- 生产阶段再接入经过批准的 IP 代理池和受控 Worker Pool。
+- 配置已批准粘滞端口时，普通 Worker 与 Agent refresh Worker 共用有界代理会话池；未配置时保留单会话行为。
 - 不读取个人浏览器 Profile、Cookie、Token 或密码，不绕过验证码和访问控制。
 
 ## 目录
@@ -45,18 +45,6 @@ python -m pytest tests -q
 ## 正式 PostgreSQL 运行
 
 完整步骤、环境变量和故障说明见 [`docs/postgres_production_worker.md`](docs/postgres_production_worker.md)。正式入口不会读取 SQLite，也不会把数据库密码写入仓库。
-
-Windows本机推荐使用统一控制入口：
-
-```powershell
-.\crawler.ps1 probe
-.\crawler.ps1 run -Limit 10
-.\crawler.ps1 status
-.\crawler.ps1 console
-.\crawler.ps1 stop
-```
-
-它自动处理隐藏密码、preflight、run_id、单实例锁、日志、receipt和只读控制台。超过100个action需要显式 `-ConfirmLargeBatch`。完整说明见 [`docs/crawler_control.md`](docs/crawler_control.md)。
 
 Windows本机推荐使用统一控制入口：
 
@@ -107,13 +95,7 @@ python scripts/collection_api.py --backend postgres --dsn "$env:AMAZON_US_POSTGR
 
 ## Agent 调用爬虫
 
-生产入口把 Collection API 与一个 `refresh-only` Worker 作为同一受控服务启动。Agent 只能查询既有数据，或一次提交 1 至 5 个已登记 ASIN 的按需刷新；不能触发全量采集。
-
-```powershell
-.\run_owned_full_secure.ps1 agent-service
-.\run_owned_full_secure.ps1 agent-health
-.\run_owned_full_secure.ps1 agent-status
-```
+生产入口把 Collection API 与一个 `refresh-only` Worker 作为同一受控服务。Agent 只能查询既有数据，或一次提交 1 至 5 个已登记 ASIN 的按需刷新；不能触发全量采集。普通 Agent 命令会先幂等确保本机服务已启动，不需要先跑健康检查。
 
 Agent 调用使用 DPAPI 派生的 scoped key，子进程不会得到 PostgreSQL DSN、代理密码或服务主密钥：
 
@@ -125,7 +107,17 @@ Agent 调用使用 DPAPI 派生的 scoped key，子进程不会得到 PostgreSQL
 .\run_owned_full_secure.ps1 agent-stop
 ```
 
-带 `-Wait` 的刷新会等待 PostgreSQL job 进入 `completed`、`failed` 或 `cancelled`，并返回最新商品快照、evidence、请求到终态的耗时及可用流量字段。访问控制、WAF、CAPTCHA或登录墙会使 refresh Worker 进入不可用状态；服务拒绝继续接收刷新，等待人工处理，不自动换代理或绕过。
+`agent-service` / `agent-health` / `agent-status` / `agent-stop` 只供管理员手工运维；Agent 业务调用不依赖它们作为前置步骤。
+
+服务身份同时指纹化 Agent 服务、Worker、代理池、API、存储模块和实际 TOML。业务调用发现已验证的旧版本进程时会受控替换；无法证明归属的监听器不会被终止或接管。
+
+`agent-get`、`agent-batch` 和 `agent-job` 只要求受控 API 存活，因此 refresh Worker 因访问控制熔断时仍可读取历史数据；`agent-refresh` 是否可接受由 `/readyz` 和服务端 503 单独约束。
+
+`agent-get`、`agent-batch` 和 `agent-job` 只要求受控 API 存活，因此 refresh Worker 因访问控制熔断时仍可读取历史数据；`agent-refresh` 是否可接受由 `/readyz` 和服务端 503 单独约束。
+
+服务身份同时指纹化 Agent 服务、Worker、代理池、API、存储模块和实际 TOML。业务调用发现已验证的旧版本进程时会受控替换；无法证明归属的监听器不会被终止或接管。
+
+带 `-Wait` 的刷新会等待 PostgreSQL job 进入 `completed`、`failed` 或 `cancelled`，并返回最新商品快照、evidence、请求到终态的耗时及可用流量字段。同一次 Agent 批量的最多 5 条由一个 runner run 处理。配置 `proxy_session_ports` 时，Agent Worker 与普通 Worker 都使用同一有界会话池：单 ASIN 最多换会话一次，达到连续/滑窗阈值立即熔断。不做无限轮换、验证码处理、登录或个人 Cookie 读取。
 
 本机只读运营控制台：
 

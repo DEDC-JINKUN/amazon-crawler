@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Agent 业务命令现在自动确保本机受控服务已启动；Agent refresh Worker 与普通 Worker 统一通过同一 adapter factory，配置时均使用有界 `ProxySessionPool`，同一5-ASIN批量在一个 runner run 内执行。运行时组合指纹覆盖 Worker、代理池、API、存储和配置，受控旧版本可安全替换且未知监听器保持 fail closed；liveness/readiness 分离后，采集熔断不再阻断历史快照和 job 查询。
+- 新增 DataImpulse 有界粘滞会话池：每会话独立 CookieJar/opener，按 ASIN 预算主动换槽，访问控制隔离、单 ASIN 最多一次新会话重试、连续/滑窗/容量熔断，并在 evidence、Console 和 receipt 中保留脱敏会话归因与跨槽流量。
 - 新增生产级 Agent 调用闭环：一条安全命令启动 loopback Collection API 与 refresh-only Worker，支持状态、健康与进程树停止；Agent凭派生scoped key查询、原子提交1至5条刷新、轮询终态并取得最新evidence、耗时和流量，不接触服务秘密或普通全量队列。客户端拒绝非loopback目标，Worker异常会终结其claimed job并释放lease。
 - 新增 loopback-only、PostgreSQL只读的 Amazon Collection Console，集中展示批次、任务异常、商品、媒体URL、top reviews、内容模块、evidence和流量；前端5秒刷新不访问Amazon。
 - PostgreSQL Worker新增显式 `--product-only` 阶段过滤；SQLite后端现在拒绝该不兼容参数，不再静默处理评论任务。

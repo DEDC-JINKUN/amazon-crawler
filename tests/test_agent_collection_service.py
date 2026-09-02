@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -111,6 +113,33 @@ def test_background_service_executes_only_refresh_jobs_and_reports_health():
     assert status["last_error"] is None
 
 
+def test_background_service_gives_one_agent_batch_to_one_bounded_pool_run():
+    service = load("agent_collection_service")
+    worker_module = load("amazon_us_worker")
+    limits = []
+
+    def fake_run(*args, **kwargs):
+        limits.append(kwargs["limit"])
+        return 0
+
+    background = service.AgentRefreshWorker(
+        storage=RefreshStorage(),
+        adapter_factory=Adapter,
+        config=dict(worker_module.DEFAULTS),
+        poll_seconds=0.01,
+        lease_seconds=120,
+    )
+    with patch.object(service, "run_postgres_actions", side_effect=fake_run):
+        background.start()
+        deadline = time.monotonic() + 2
+        while not limits and time.monotonic() < deadline:
+            time.sleep(0.01)
+        background.stop()
+
+    assert limits
+    assert limits[0] == 5
+
+
 def test_service_cli_is_postgres_only_and_loopback_only():
     service = load("agent_collection_service")
     parser = service.build_parser()
@@ -123,6 +152,69 @@ def test_service_cli_is_postgres_only_and_loopback_only():
     assert args.tenant_id == "tenant-agent"
     assert args.host == "127.0.0.1"
     assert args.port == 8765
+
+
+def test_service_cli_builds_the_same_proxy_session_adapter_as_batch_workers(tmp_path):
+    service = load("agent_collection_service")
+    worker_module = load("amazon_us_worker")
+    config = {
+        **worker_module.DEFAULTS,
+        "proxy_url": "http://proxy.local:10000",
+        "proxy_session_ports": [10000, 10001],
+    }
+    marker = object()
+    captured = {}
+
+    class FakeWorker:
+        def __init__(self, *, adapter_factory, **kwargs):
+            captured["adapter"] = adapter_factory()
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+        def notify(self):
+            return None
+
+        def status(self):
+            return {"state": "running"}
+
+    class FakeServer:
+        server_port = 8765
+
+        def __init__(self, *args, **kwargs):
+            return None
+
+        def serve_forever(self):
+            return None
+
+        def server_close(self):
+            return None
+
+    environment = {
+        "AMAZON_US_POSTGRES_DSN": "postgresql://fixture",
+        "AMAZON_COLLECTION_API_KEY": "fixture-key",
+    }
+    with (
+        patch.dict(os.environ, environment, clear=False),
+        patch.object(service, "load_config", return_value=config),
+        patch.object(service, "PostgresWorkerStorage", return_value=object()),
+        patch.object(service, "PostgresCollectionRepository", return_value=object()),
+        patch.object(service, "AgentRefreshWorker", FakeWorker),
+        patch.object(service, "CollectionServer", FakeServer),
+        patch.object(service, "_build_http_adapter", return_value=marker, create=True) as shared_builder,
+    ):
+        result = service.main([
+            "--tenant-id", "tenant-agent",
+            "--config", str(tmp_path / "config.toml"),
+            "--output-dir", str(tmp_path / "output"),
+        ])
+
+    assert result == 0
+    assert captured["adapter"] is marker
+    shared_builder.assert_called_once_with(config)
 
 
 def test_unexpected_worker_error_terminalizes_claimed_refresh_without_detail_leak():

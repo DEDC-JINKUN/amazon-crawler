@@ -715,11 +715,13 @@ DPAPI `CurrentUser` 密钥仓必须由将来启动爬虫的同一 Windows 账号
 
 ### 11.10 Agent 调用爬虫闭环
 
-正式 Agent 服务入口为 `.\run_owned_full_secure.ps1 agent-service`，固定 tenant、配置和输出目录，同时启动 loopback Collection API 与单个 `refresh-only` Worker。`agent-status`、`agent-health` 和 `agent-stop` 分别负责身份校验后的状态、`/readyz` 与 Job Object 进程树停止。服务锁绑定宿主 PID、StartTime、tenant、端口和代码 fingerprint；停止宿主会关闭 kill-on-close Job Object，终止API及其Firefox/geckodriver子树。
+正式 Agent 服务固定 tenant、配置和输出目录，同时启动 loopback Collection API 与单个 `refresh-only` Worker。`agent-get/batch/refresh/job` 会先检查受控服务身份，未运行时通过 DPAPI 安全启动，已运行时直接调用；普通 Agent 不需要先执行健康检查。`agent-service`、`agent-status`、`agent-health` 和 `agent-stop` 只供管理员显式维护。服务锁绑定宿主 PID、StartTime、tenant、端口，以及 service、Worker、代理池、API、storage 和当前 TOML 的组合 fingerprint；已验证归属且仍 live 的旧版本进程会受控替换，未知监听器仍拒绝接管。自动确保服务使用 `/healthz`，因此 refresh Worker blocked 时历史快照/job仍可读；`agent-health` 与新增 refresh 使用 `/readyz`。停止宿主会关闭 kill-on-close Job Object，终止API及其Firefox/geckodriver子树。
 
 普通 Agent 不接触 DSN、代理凭据、Cookie或服务主密钥。`secure_dpapi_launcher.ps1 -AgentId`只向子进程注入 `AMAZON_COLLECTION_AGENT_ID` 和派生 scoped key。Agent客户端拒绝非HTTP loopback基址、URL内嵌凭据和HTTP重定向。`read-agent`只能读取；`refresh-agent`一次只能提交1至5个已登记ASIN。批量刷新在PostgreSQL同一事务内先全量校验再提交，并经过tenant、scope、速率和活跃job唯一索引约束；服务用`RefreshOnlyStorageView`开放lease化refresh领取，同时固定屏蔽普通`claim_task`队列。
 
-终态 `GET /v1/jobs/{job_id}` 返回job、最新商品快照、最新evidence、证据是否处于请求时间窗、请求/领取/完成时间、总耗时和可用流量。Worker遇到访问控制时进入blocked，`/readyz`返回503并拒绝新增refresh；未预期异常会把该Worker仍持有的job置为failed、释放lease并写脱敏状态历史。不自动换代理、处理验证码、登录或使用个人Cookie。2026-09-02无Amazon网络验收已完成：隔离空tenant服务启动/status/health/stop通过，端口/锁/宿主完成清理；真实本机PostgreSQL临时tenant完成Agent scoped API→refresh入队→Worker lease领取→fixture采集→job completed→商品/evidence/789 bytes→审计回查，并验证强制Worker异常后job failed及lease清理，测试后删除临时tenant数据。
+终态 `GET /v1/jobs/{job_id}` 返回job、最新商品快照、最新evidence、证据是否处于请求时间窗、请求/领取/完成时间、总耗时和可用流量。同一次 Agent 批量的最多5条在同一 runner run 内领取，避免逐条重置会话预算。Agent Worker 与普通 Worker 经过同一 adapter factory；配置会话端口时均进入 `ProxySessionPool`。有界会话池达到连续/滑窗阈值后Worker进入blocked，`/readyz`返回503并拒绝新增refresh；未预期异常会把该Worker仍持有的job置为failed、释放lease并写脱敏状态历史。不做无限换会话、验证码处理、登录或个人Cookie。2026-09-02无Amazon网络验收已完成：隔离空tenant服务启动/status/health/stop通过，端口/锁/宿主完成清理；真实本机PostgreSQL临时tenant完成Agent scoped API→refresh入队→Worker lease领取→fixture采集→job completed→商品/evidence/789 bytes→审计回查，并验证强制Worker异常后job failed及lease清理，测试后删除临时tenant数据。
+
+2026-09-02重新基线后关闭三个整合缺口：Agent不再绕过会话池、业务命令不再要求人工预启动、blocked Worker不再阻断只读查询；运行时组合指纹和受控旧进程替换已接入。权威 `tests/` 全量为345 passed、2 skipped，另通过Python compileall、Node语法、PowerShell AST与diff-check；隔离tenant在8775完成真实本机启动/status/stop且未领取任务、未访问Amazon。
 
 ## 12. 测试矩阵
 
