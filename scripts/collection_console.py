@@ -62,6 +62,14 @@ def summarize_context_quality(rows: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
+def latest_proxy_session_pool(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for row in reversed(rows):
+        value = _context_value(row).get("proxy_session_pool")
+        if isinstance(value, dict):
+            return dict(value)
+    return None
+
+
 def _explicit_sibling_identity(row: dict[str, Any]) -> bool:
     identity = _context_value(row).get("identity") or {}
     if not isinstance(identity, dict):
@@ -780,6 +788,7 @@ class PostgresConsoleRepository:
         items.sort(key=lambda item: (item.get("retrieved_at") or item.get("updated_at"), item["asin"]))
         traffic_summary = summarize_traffic(evidence_rows)
         context_quality_counts = summarize_context_quality(evidence_rows)
+        proxy_session_pool = latest_proxy_session_pool(evidence_rows)
         duration_projection = project_run_durations(ledger, started_at, ended_at)
         effective_started_at = duration_projection.pop("effective_started_at")
         effective_finished_at = duration_projection.pop("effective_finished_at")
@@ -795,6 +804,7 @@ class PostgresConsoleRepository:
             "known_transfer_bytes": sum(int(item.get("transfer_bytes") or 0) for item in evidence_rows),
             "traffic": traffic_summary,
             "context_quality_counts": context_quality_counts,
+            "proxy_session_pool": proxy_session_pool,
             "outcome_counts": {
                 outcome: sum(item["outcome"] == outcome for item in items)
                 for outcome in ("completed", "variant_redirect", "failed", "blocked")

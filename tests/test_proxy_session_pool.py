@@ -1,0 +1,400 @@
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_pool():
+    spec = importlib.util.spec_from_file_location("proxy_session_pool_test", ROOT / "scripts" / "proxy_session_pool.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+class FakeAdapter:
+    def __init__(self, config, scripted):
+        self.config = config
+        self.scripted = scripted
+        self.cookie_jar = {}
+        self.last_transfer_bytes = 0
+        self.action_http_transfer_bytes = 0
+        self.source_type = "http_html"
+        self.closed = False
+
+    def begin_run(self, *args):
+        self.run_scope = args
+
+    def begin_action(self):
+        self.action_http_transfer_bytes = 0
+
+    def fetch(self, url):
+        result = self.scripted.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        body, status, size = result
+        self.last_transfer_bytes = size
+        self.action_http_transfer_bytes += size
+        return body, status
+
+    def close(self):
+        self.cookie_jar.clear()
+        self.closed = True
+
+
+def config(**overrides):
+    value = {
+        "proxy_url": "http://proxy.example:10000",
+        "proxy_session_ports": [10000, 10001, 10002, 10003],
+        "proxy_session_mode": "sticky",
+        "proxy_session_max_asins": 2,
+        "proxy_session_retry_per_asin": 1,
+        "proxy_session_consecutive_block_limit": 2,
+        "proxy_session_window_size": 20,
+        "proxy_session_window_block_limit": 3,
+    }
+    value.update(overrides)
+    return value
+
+
+def classifier(status, body):
+    return "captcha" if "captcha" in body.lower() else "http_403" if status == 403 else None
+
+
+def test_rotates_after_two_asins_and_keeps_cookie_jars_isolated_until_close():
+    module = load_pool()
+    adapters = []
+
+    def factory(slot_config):
+        adapter = FakeAdapter(slot_config, [("product", 200, 100)] * 2)
+        adapters.append(adapter)
+        return adapter
+
+    pool = module.ProxySessionPool(config(), factory, classifier)
+    pool.begin_run("run-1", "tenant-a", "worker-a")
+    for asin in ("B000000001", "B000000002", "B000000003", "B000000004"):
+        pool.begin_action()
+        pool.fetch(f"https://www.amazon.com/dp/{asin}")
+        pool.record_outcome("completed")
+
+    assert len(adapters) == 2
+    assert adapters[0].config["proxy_url"].endswith(":10000")
+    assert adapters[1].config["proxy_url"].endswith(":10001")
+    adapters[0].cookie_jar["session"] = "first-secret"
+    assert adapters[1].cookie_jar == {}
+    assert [item["asin_count"] for item in pool.evidence_context()["sessions"]] == [2, 2]
+
+    pool.close()
+    assert all(adapter.closed and adapter.cookie_jar == {} for adapter in adapters)
+
+
+def test_captcha_quarantines_session_and_retries_same_asin_once_on_new_session():
+    module = load_pool()
+    scripts = [[("captcha page", 200, 25)], [("product", 200, 100)]]
+    adapters = []
+
+    def factory(slot_config):
+        adapter = FakeAdapter(slot_config, scripts[len(adapters)])
+        adapters.append(adapter)
+        return adapter
+
+    pool = module.ProxySessionPool(config(), factory, classifier)
+    pool.begin_run("run-1", "tenant-a", "worker-a")
+    body, status = pool.fetch("https://www.amazon.com/dp/B000000001")
+    pool.record_outcome("completed")
+
+    assert (body, status) == ("product", 200)
+    assert len(adapters) == 2
+    intermediate = pool.drain_intermediate_attempts()
+    assert len(intermediate) == 1
+    assert intermediate[0]["block_reason"] == "captcha"
+    assert intermediate[0]["session_id"] == "session-01"
+    assert pool.evidence_context()["sessions"][0]["quarantine_reason"] == "captcha"
+
+
+def test_consecutive_and_window_breakers_stop_without_unbounded_rotation():
+    module = load_pool()
+
+    def factory(slot_config):
+        return FakeAdapter(slot_config, [("captcha", 200, 10)])
+
+    pool = module.ProxySessionPool(config(), factory, classifier)
+    pool.begin_run("run-1", "tenant-a", "worker-a")
+    body, _ = pool.fetch("https://www.amazon.com/dp/B000000001")
+    assert body == "captcha"
+    assert pool.circuit_open_reason == "consecutive_new_sessions_blocked"
+    with pytest.raises(module.ProxyCircuitOpen, match="consecutive"):
+        pool.fetch("https://www.amazon.com/dp/B000000002")
+
+    sequence = iter(["captcha", "product", "captcha", "product", "captcha"])
+
+    def window_factory(slot_config):
+        return FakeAdapter(slot_config, [(next(sequence), 200, 10)])
+
+    window = module.ProxySessionPool(
+        config(
+            proxy_session_ports=[10000, 10001, 10002, 10003, 10004],
+            proxy_session_max_asins=1,
+            proxy_session_retry_per_asin=0,
+            proxy_session_consecutive_block_limit=5,
+        ),
+        window_factory,
+        classifier,
+    )
+    window.begin_run("run-2", "tenant-a", "worker-a")
+    for index in range(5):
+        window.fetch(f"https://www.amazon.com/dp/B0000001{index:02d}")
+        window.record_outcome("completed")
+    assert window.circuit_open_reason == "rolling_window_block_limit"
+
+
+def test_network_errors_are_separate_and_sensitive_values_never_enter_context():
+    module = load_pool()
+    secret = "proxy-password-secret"
+
+    def factory(slot_config):
+        adapter = FakeAdapter(slot_config, [TimeoutError(secret)])
+        adapter.cookie_jar["auth"] = "cookie-secret"
+        return adapter
+
+    pool = module.ProxySessionPool(config(), factory, classifier)
+    pool.begin_run("run-1", "tenant-a", "worker-a")
+    with pytest.raises(TimeoutError):
+        pool.fetch("https://www.amazon.com/dp/B000000001")
+
+    rendered = repr(pool.evidence_context())
+    assert "network_error" in rendered
+    assert secret not in rendered
+    assert "cookie-secret" not in rendered
+    assert "proxy.example" not in rendered
+    assert pool.circuit_open_reason is None
+
+
+def test_exhausted_pool_returns_last_real_block_and_opens_circuit_without_throwing():
+    module = load_pool()
+
+    def factory(slot_config):
+        return FakeAdapter(slot_config, [("captcha", 200, 10)])
+
+    pool = module.ProxySessionPool(config(proxy_session_ports=[10000]), factory, classifier)
+    pool.begin_run("run-1", "tenant-a", "worker-a")
+    body, status = pool.fetch("https://www.amazon.com/dp/B000000001")
+
+    assert (body, status) == ("captcha", 200)
+    assert pool.circuit_open_reason == "session_pool_exhausted"
+    assert pool.can_claim_new_asin() is False
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("proxy_session_max_asins", 0),
+        ("proxy_session_max_asins", 6),
+        ("proxy_session_retry_per_asin", 2),
+        ("proxy_session_consecutive_block_limit", 0),
+        ("proxy_session_window_size", 101),
+        ("proxy_session_window_block_limit", 21),
+    ],
+)
+def test_rejects_unsafe_limits(name, value):
+    module = load_pool()
+    with pytest.raises(ValueError):
+        module.ProxySessionPool(config(**{name: value}), lambda cfg: None, classifier)
+
+
+def load_worker():
+    spec = importlib.util.spec_from_file_location("amazon_worker_pool_test", ROOT / "scripts" / "amazon_us_worker.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+class ProductStorage:
+    tenant_id = "tenant-a"
+
+    def __init__(self, count=1):
+        self.remaining = count
+        self.saved = []
+
+    def claim_task(self, worker_id, lease_seconds=None):
+        if self.remaining <= 0:
+            return None
+        index = self.remaining
+        self.remaining -= 1
+        asin = f"B000000{index:03d}"
+        return {
+            "asin": asin,
+            "url": f"https://www.amazon.com/dp/{asin}",
+            "task_stage": "product",
+            "lease_token": f"lease-{index}",
+            "lease_owner": worker_id,
+            "reported_review_count": 0,
+            "fetched_review_count": 0,
+            "review_pages_fetched": 0,
+        }
+
+    def save_product_result(self, **payload):
+        self.saved.append(payload)
+        return True
+
+    def save_failure(self, **payload):
+        self.saved.append(payload)
+        return True
+
+
+def product_html(asin):
+    return f"""
+    <html><head><link rel='canonical' href='https://www.amazon.com/dp/{asin}'></head><body>
+      <input id='ASIN' value='{asin}'><span id='productTitle'>Product</span>
+    </body></html>
+    """
+
+
+def test_postgres_runner_records_retry_attribution_and_sanitized_session_metrics():
+    worker = load_worker()
+    pool_module = load_pool()
+    scripts = [[("captcha", 200, 25)], [(product_html("B000000001"), 200, 100)]]
+    adapters = []
+
+    def factory(slot_config):
+        adapter = FakeAdapter(slot_config, scripts[len(adapters)])
+        adapters.append(adapter)
+        return adapter
+
+    pool = pool_module.ProxySessionPool(config(), factory, worker.classify_block)
+    storage = ProductStorage()
+    worker_config = {**worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None, "context": {}}
+
+    assert worker.run_postgres_actions(
+        storage, pool, worker_config, limit=1, run_id="run-pool", worker_id="worker-a"
+    ) == 1
+    context = storage.saved[0]["evidence"]["context_json"]["proxy_session_pool"]
+    traffic = storage.saved[0]["evidence"]["context_json"]["traffic"]
+
+    assert "product" in storage.saved[0]
+    assert context["sessions"][0]["blocked"] == 1
+    assert context["sessions"][1]["completed"] == 1
+    assert context["attempts"][0]["block_reason"] == "captcha"
+    assert context["attempts"][0]["content_hash"]
+    assert "body" not in context["attempts"][0]
+    assert "proxy.example" not in repr(context)
+    assert traffic["http_compressed_response_bytes"] == 125
+
+
+def test_postgres_runner_reports_circuit_and_nineteen_unrequested_actions():
+    worker = load_worker()
+    pool_module = load_pool()
+
+    def factory(slot_config):
+        return FakeAdapter(slot_config, [("captcha", 200, 10)])
+
+    pool = pool_module.ProxySessionPool(config(), factory, worker.classify_block)
+    storage = ProductStorage(count=20)
+    worker_config = {**worker.DEFAULTS, "max_actions_per_run": 20, "raw_html_dir": None, "context": {}}
+
+    assert worker.run_postgres_actions(
+        storage, pool, worker_config, limit=20, run_id="run-circuit", worker_id="worker-a"
+    ) == -1
+    context = storage.saved[0]["evidence"]["context_json"]["proxy_session_pool"]
+
+    assert len(storage.saved) == 1
+    assert context["circuit_open_reason"] == "consecutive_new_sessions_blocked"
+    assert context["unrequested_count"] == 19
+    assert len(context["attempts"]) == 1
+
+
+def test_blocked_attempt_is_preserved_when_retry_session_has_network_error():
+    worker = load_worker()
+    pool_module = load_pool()
+    scripts = [[("captcha", 200, 25)], [worker.AdapterFetchError("network unavailable")]]
+    adapters = []
+
+    def factory(slot_config):
+        adapter = FakeAdapter(slot_config, scripts[len(adapters)])
+        adapters.append(adapter)
+        return adapter
+
+    pool = pool_module.ProxySessionPool(config(), factory, worker.classify_block)
+    storage = ProductStorage()
+    worker_config = {**worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None, "context": {}}
+
+    assert worker.run_postgres_actions(
+        storage, pool, worker_config, limit=1, run_id="run-block-network", worker_id="worker-a"
+    ) == 1
+    context = storage.saved[0]["evidence"]["context_json"]["proxy_session_pool"]
+
+    assert storage.saved[0]["reason"] == "fetch_error"
+    assert len(context["attempts"]) == 1
+    assert context["attempts"][0]["block_reason"] == "captcha"
+    assert context["attempts"][0]["content_hash"]
+
+
+def test_console_projects_latest_sanitized_pool_context_for_run_and_receipt():
+    spec = importlib.util.spec_from_file_location("collection_console_pool_test", ROOT / "scripts" / "collection_console.py")
+    console = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(console)
+    rows = [
+        {"context_json": {}},
+        {"context_json": {"proxy_session_pool": {"mode": "sticky", "sessions": [{"session_id": "session-01"}], "unrequested_count": 7}}},
+    ]
+
+    assert console.latest_proxy_session_pool(rows) == {
+        "mode": "sticky",
+        "sessions": [{"session_id": "session-01"}],
+        "unrequested_count": 7,
+    }
+
+
+def test_simulated_twenty_products_all_record_evidence_and_rotate_bounded_sessions():
+    worker = load_worker()
+    pool_module = load_pool()
+
+    class DynamicAdapter(FakeAdapter):
+        def __init__(self, slot_config):
+            super().__init__(slot_config, [])
+
+        def fetch(self, url):
+            asin = url.split("/dp/")[1][:10]
+            self.last_transfer_bytes = 100
+            self.action_http_transfer_bytes += 100
+            return product_html(asin), 200
+
+    pool = pool_module.ProxySessionPool(
+        config(proxy_session_ports=list(range(10000, 10010)), proxy_session_max_asins=2),
+        DynamicAdapter,
+        worker.classify_block,
+    )
+    storage = ProductStorage(count=20)
+    worker_config = {**worker.DEFAULTS, "max_actions_per_run": 20, "raw_html_dir": None, "context": {}}
+
+    assert worker.run_postgres_actions(
+        storage, pool, worker_config, limit=20, run_id="run-20", worker_id="worker-a"
+    ) == 20
+    assert len(storage.saved) == 20
+    assert all(payload["evidence"]["run_id"] == "run-20" for payload in storage.saved)
+    final_pool = storage.saved[-1]["evidence"]["context_json"]["proxy_session_pool"]
+    assert len(final_pool["sessions"]) == 10
+    assert sum(item["request_count"] for item in final_pool["sessions"]) == 20
+    assert sum(item["completed"] for item in final_pool["sessions"]) == 20
+    assert final_pool["circuit_open_reason"] is None
+    assert final_pool["unrequested_count"] == 0
+
+
+def test_worker_builds_pool_only_when_approved_session_ports_are_configured():
+    worker = load_worker()
+    plain = worker._build_http_adapter({**worker.DEFAULTS, "proxy_url": ""})
+    pooled = worker._build_http_adapter({**worker.DEFAULTS, **config()})
+    try:
+        assert plain.__class__.__name__ == "HttpFirstAdapter"
+        assert pooled.__class__.__name__ == "ProxySessionPool"
+        assert pooled.evidence_context()["mode"] == "sticky"
+    finally:
+        plain.close()
+        pooled.close()

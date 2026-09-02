@@ -104,6 +104,13 @@ DEFAULTS: dict[str, Any] = {
     "proxy_url": "",
     "proxy_username_env": "",
     "proxy_password_env": "",
+    "proxy_session_ports": [],
+    "proxy_session_mode": "sticky",
+    "proxy_session_max_asins": 3,
+    "proxy_session_retry_per_asin": 1,
+    "proxy_session_consecutive_block_limit": 2,
+    "proxy_session_window_size": 20,
+    "proxy_session_window_block_limit": 3,
     "global_requests_per_second": 0.0,
     "egress_requests_per_second": 0.0,
     "rate_burst": 1,
@@ -2249,7 +2256,69 @@ def _evidence_context(base_context: dict[str, Any] | None, adapter: Any) -> dict
         if bridge_error:
             bridge["error_code"] = str(bridge_error)
         context["cookie_bridge"] = bridge
+    pool_context = getattr(adapter, "evidence_context", None)
+    if callable(pool_context):
+        context["proxy_session_pool"] = pool_context()
     return context
+
+
+def _capture_proxy_attempt_evidence(
+    adapter: Any,
+    raw_html_dir: Path | None,
+    run_id: str,
+    asin: str,
+) -> None:
+    drain = getattr(adapter, "drain_intermediate_attempts", None)
+    accept = getattr(adapter, "add_attempt_evidence", None)
+    if not callable(drain) or not callable(accept):
+        return
+    persisted = []
+    for attempt in drain():
+        value = dict(attempt)
+        body = str(value.pop("body", ""))
+        value.pop("url", None)
+        value["content_hash"] = hashlib.sha256(body.encode()).hexdigest()
+        value["raw_html_path"] = _persist_raw_html(raw_html_dir, run_id, asin, body) if body else None
+        persisted.append(value)
+    accept(persisted)
+
+
+def _proxy_circuit_reason(adapter: Any) -> str | None:
+    return str(getattr(adapter, "circuit_open_reason", "") or "") or None
+
+
+def _proxy_capacity_available(adapter: Any) -> bool:
+    method = getattr(adapter, "can_claim_new_asin", None)
+    return bool(method()) if callable(method) else True
+
+
+def _record_proxy_outcome(adapter: Any, outcome: str) -> None:
+    method = getattr(adapter, "record_outcome", None)
+    if callable(method):
+        method(outcome)
+
+
+def _note_proxy_unrequested(adapter: Any, count: int) -> None:
+    method = getattr(adapter, "note_unrequested", None)
+    if callable(method):
+        method(max(0, count))
+
+
+def _should_stop_after_block(adapter: Any, config: dict[str, Any], status: int | None, reason: str | None) -> bool:
+    if callable(getattr(adapter, "evidence_context", None)):
+        return _proxy_circuit_reason(adapter) is not None
+    return bool(config.get("stop_on_block", True)) or status == 429 or reason == "too_many_requests"
+
+
+def _build_http_adapter(config: dict[str, Any]) -> Any:
+    if not config.get("proxy_session_ports"):
+        return HttpFirstAdapter(config)
+    try:
+        from proxy_session_pool import ProxySessionPool
+    except ModuleNotFoundError:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from proxy_session_pool import ProxySessionPool
+    return ProxySessionPool(config, HttpFirstAdapter, classify_block)
 
 
 def _product_evidence_context(
@@ -2283,6 +2352,15 @@ def _identity_mismatch_evidence_context(
         "child_asins": sorted({str(value).upper() for value in data.get("identity_child_asins") or [] if value}),
     }
     return context
+
+
+def _is_sibling_variant_redirect(data: dict[str, Any], expected_asin: str) -> bool:
+    expected = expected_asin.upper()
+    observed = str(data.get("asin") or "").upper()
+    canonical = str(_canonical_asin(data.get("canonical_url")) or "").upper()
+    parent = str(data.get("parent_asin") or "").upper()
+    children = {str(value).upper() for value in data.get("identity_child_asins") or []}
+    return bool(parent and expected != observed and canonical == observed and expected in children and observed in children)
 
 
 def _assess_product_context(
@@ -2421,6 +2499,11 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
         selected.append(conn.execute("SELECT * FROM item_state WHERE marketplace=? AND asin=?", (refresh_request["marketplace"], refresh_request["asin"])).fetchone())
     selected.extend(_select_actions(conn, max(0, max_actions - len(selected)), {refresh_asin} if refresh_asin else set()))
     for initial in selected:
+        if _proxy_circuit_reason(adapter) or not _proxy_capacity_available(adapter):
+            if not _proxy_circuit_reason(adapter):
+                setattr(adapter, "circuit_open_reason", "session_pool_exhausted")
+            _note_proxy_unrequested(adapter, len(selected) - actions)
+            break
         row = conn.execute("SELECT * FROM item_state WHERE marketplace='US' AND asin=?", (initial["asin"],)).fetchone()
         if row["status"] == "failed" and row["attempts"] >= row["max_attempts"]:
             continue
@@ -2432,7 +2515,9 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
             page, url = int(row["next_review_page"] or 1), row["next_review_url"]
             try:
                 body, response_status = adapter.fetch(url)
+                _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, row["asin"])
             except AdapterFetchError as exc:
+                _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, row["asin"])
                 _record_failure(conn, "US", row["asin"], "review_fetch_error", str(exc))
                 if refresh_job_id and row["asin"] == refresh_asin:
                     _finish_refresh_request(conn, refresh_job_id, "failed")
@@ -2444,7 +2529,9 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
             if not reason and not records and int(row["reported_review_count"] or 0) > 0 and alternate_url:
                 try:
                     alternate_body, alternate_status = adapter.fetch(alternate_url)
+                    _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, row["asin"])
                 except AdapterFetchError:
+                    _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, row["asin"])
                     pass
                 else:
                     alternate_reason = classify_block(alternate_status, alternate_body)
@@ -2496,12 +2583,15 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                 _finish_refresh_request(conn, refresh_job_id, "queued" if reason == "http_429" else "failed" if reason else "completed")
             blocked = blocked or bool(reason)
             actions += 1
-            if blocked and (bool(config["stop_on_block"]) or response_status == 429 or reason == "too_many_requests"):
+            if blocked and _should_stop_after_block(adapter, config, response_status, reason):
+                _note_proxy_unrequested(adapter, len(selected) - actions)
                 break
             continue
         try:
             body, response_status = adapter.fetch(row["url"])
+            _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, row["asin"])
         except AdapterFetchError as exc:
+            _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, row["asin"])
             # A truncated/timeout HTTP response can still be recoverable by
             # the browser layer when a delivery context is configured. Keep
             # the normal HTTP-first route, but do not discard the fallback.
@@ -2627,7 +2717,8 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
             _finish_refresh_request(conn, refresh_job_id, "queued" if reason == "http_429" else "failed" if reason else "completed")
         blocked = blocked or bool(reason)
         actions += 1
-        if blocked and (bool(config["stop_on_block"]) or response_status == 429 or reason == "too_many_requests"):
+        if blocked and _should_stop_after_block(adapter, config, response_status, reason):
+            _note_proxy_unrequested(adapter, len(selected) - actions)
             break
     materialize_csvs(conn, Path(config["output_dir"]))
     return -1 if blocked else actions
@@ -2688,6 +2779,11 @@ def run_postgres_actions(
     actions = 0
     blocked = False
     while actions < max_actions:
+        if _proxy_circuit_reason(adapter) or not _proxy_capacity_available(adapter):
+            if not _proxy_circuit_reason(adapter):
+                setattr(adapter, "circuit_open_reason", "session_pool_exhausted")
+            _note_proxy_unrequested(adapter, max_actions - actions)
+            break
         stage_filter = "product" if product_only else "reviews" if reviews_only else None
         task = storage.claim_refresh_task(worker_id, lease_seconds=lease_seconds) if stage_filter is None and hasattr(storage, "claim_refresh_task") else None
         if task is None:
@@ -2724,7 +2820,9 @@ def run_postgres_actions(
             task["url"] = url
             try:
                 body, response_status = adapter.fetch(url)
+                _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, task["asin"])
             except AdapterFetchError as exc:
+                _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, task["asin"])
                 evidence = _postgres_evidence(
                     run_id, task, None, None, getattr(adapter, "source_type", "http_html"),
                     raw_html_dir, _evidence_context(config.get("context"), adapter), getattr(adapter, "last_transfer_bytes", None),
@@ -2741,7 +2839,9 @@ def run_postgres_actions(
             if not reason and not records and int(task.get("reported_review_count") or 0) > 0 and alternate_url:
                 try:
                     alternate_body, alternate_status = adapter.fetch(alternate_url)
+                    _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, task["asin"])
                 except AdapterFetchError:
+                    _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, task["asin"])
                     pass
                 else:
                     alternate_reason = classify_block(alternate_status, alternate_body)
@@ -2831,12 +2931,15 @@ def run_postgres_actions(
                 if refresh_job_id:
                     storage.finish_refresh_request(refresh_job_id, "failed" if empty else "completed")
             actions += 1
-            if blocked and bool(config.get("stop_on_block", True)):
+            if blocked and _should_stop_after_block(adapter, config, response_status, reason):
+                _note_proxy_unrequested(adapter, max_actions - actions)
                 break
             continue
         try:
             body, response_status = adapter.fetch(task["url"])
+            _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, task["asin"])
         except AdapterFetchError as exc:
+            _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, task["asin"])
             postal_code = str((config.get("context") or {}).get("postal_code") or "").strip()
             browser_result = None
             if postal_code:
@@ -2848,6 +2951,7 @@ def run_postgres_actions(
                 except AdapterFetchError:
                     browser_result = None
             if browser_result is None:
+                _record_proxy_outcome(adapter, "failed")
                 evidence = _postgres_evidence(
                     run_id, task, None, None, getattr(adapter, "source_type", "http_html"),
                     raw_html_dir, _evidence_context(config.get("context"), adapter), getattr(adapter, "last_transfer_bytes", None),
@@ -2877,6 +2981,9 @@ def run_postgres_actions(
                     body, response_status, reason = browser_body, browser_status, browser_reason
                     data = parse_product_html(browser_body, task["url"]) if not browser_reason else {"asin": "", "canonical_url": ""}
         if not reason and _has_explicit_asin_mismatch(data, task["asin"]):
+            _record_proxy_outcome(
+                adapter, "variant_redirect" if _is_sibling_variant_redirect(data, task["asin"]) else "failed"
+            )
             source_type = getattr(adapter, "source_type", "http_html")
             transfer_bytes = getattr(adapter, "last_transfer_bytes", None)
             evidence = _postgres_evidence(
@@ -2893,6 +3000,7 @@ def run_postgres_actions(
             continue
         missing_core = [key for key in ("asin", "canonical_url", "title") if not str(data.get(key) or "").strip()]
         if not reason and _is_terminal_missing_core_failure(response_status, missing_core):
+            _record_proxy_outcome(adapter, "failed")
             error = "missing_core_fields:" + ",".join(missing_core)
             source_type = getattr(adapter, "source_type", "http_html")
             evidence = _postgres_evidence(
@@ -2947,6 +3055,19 @@ def run_postgres_actions(
         source_type = getattr(adapter, "source_type", "http_html")
         transfer_bytes = getattr(adapter, "last_transfer_bytes", None)
         error_code = "context_mismatch:" + ",".join(context_errors) if context_errors else None
+        if reason and _proxy_circuit_reason(adapter):
+            _note_proxy_unrequested(adapter, max_actions - actions - 1)
+        pending_missing = [key for key in ("asin", "canonical_url", "title") if not str(data.get(key) or "").strip()]
+        if reason:
+            _record_proxy_outcome(adapter, "blocked")
+        elif context_errors or pending_missing:
+            _record_proxy_outcome(adapter, "failed")
+        elif not _valid_asin_identity(data, task["asin"]):
+            _record_proxy_outcome(
+                adapter, "variant_redirect" if _is_sibling_variant_redirect(data, task["asin"]) else "failed"
+            )
+        else:
+            _record_proxy_outcome(adapter, "completed")
         evidence = _postgres_evidence(
             run_id, task, body, response_status, source_type, raw_html_dir,
             _product_evidence_context(config.get("context"), adapter, data, task["asin"]), transfer_bytes,
@@ -2966,7 +3087,8 @@ def run_postgres_actions(
                 storage.finish_refresh_request(refresh_job_id, "queued" if deferred else "failed")
             blocked = bool(reason)
             actions += 1
-            if blocked and bool(config.get("stop_on_block", True)):
+            if blocked and _should_stop_after_block(adapter, config, response_status, reason):
+                _note_proxy_unrequested(adapter, max_actions - actions)
                 break
             continue
         missing_core = [key for key in ("asin", "canonical_url", "title") if not str(data.get(key) or "").strip()]
@@ -3123,7 +3245,7 @@ def run(args: argparse.Namespace) -> int:
             return 2
         if args.visible:
             config["headless"] = False
-        adapter = HttpFirstAdapter(config)
+        adapter = _build_http_adapter(config)
         try:
             action_result = run_postgres_actions(
                 storage, adapter, config, limit=args.limit, worker_id=args.worker_id,
@@ -3148,7 +3270,7 @@ def run(args: argparse.Namespace) -> int:
         return 2
     if args.visible:
         config["headless"] = False
-    adapter = HttpFirstAdapter(config)
+    adapter = _build_http_adapter(config)
     result = 0
     try:
         limit = args.limit

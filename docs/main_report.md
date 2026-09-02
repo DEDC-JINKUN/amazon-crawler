@@ -198,6 +198,26 @@ HTTP 请求继续由标准 CookieJar 根据 domain/path/secure/expiry 决定是�
 
 该数值不包含请求头、TLS、代理协议开销，也不是代理商账单。代理计费必须用供应商后台前后差值。
 
+### 4.5 DataImpulse 粘滞会话池与有界熔断
+
+当且仅当配置 `proxy_session_ports` 时，Worker 用 `ProxySessionPool` 包装现有 `HttpFirstAdapter`；未配置时接口和单会话行为不变。每个批准端口对应一个懒创建的粘滞会话槽，槽内拥有独立 `HttpFirstAdapter`、内存 CookieJar、opener、Firefox引用和健康统计。Cookie 不跨槽复制；会话耗尽、隔离或 run 结束时关闭 adapter 并销毁 Cookie。
+
+```toml
+[worker]
+proxy_url = "http://gw.dataimpulse.com:10000" # 只提供已批准host；不得内嵌凭据
+proxy_session_ports = [10000, 10001, 10002, 10003]
+proxy_session_mode = "sticky"
+proxy_session_max_asins = 3                 # 1..5，默认3
+proxy_session_retry_per_asin = 1            # 0..1，默认1
+proxy_session_consecutive_block_limit = 2   # 1..5，默认2
+proxy_session_window_size = 20              # 1..100，默认20
+proxy_session_window_block_limit = 3        # 1..20且不大于窗口
+```
+
+健康会话达到 ASIN 配额后主动关闭并切下一槽。CAPTCHA、WAF、403、429 立即隔离当前槽；同一 ASIN 只允许在一个新槽重试一次。连续两个新会话阻断，或滚动20次会话响应累计三个阻断时，打开全局熔断并记录未请求数；槽耗尽同样 fail closed。Transport/network error 仍由单会话 HTTP adapter 的有限重试处理，不计访问控制熔断。
+
+Evidence 继续使用现有 `context_json.proxy_session_pool`，不新增 schema。只保存 `session-01` 形式的脱敏ID、sticky模式、ASIN/请求数、completed/variant/failed/blocked/network_error、响应字节、延迟、隔离原因、熔断原因和未请求数。跨会话重试的先前阻断正文写入原 raw store，context 仅保留content hash、raw指针和状态归因；不保存真实代理IP、端口映射、用户名、密码、Cookie、Authorization或响应正文。Console run/详情与receipt读取同一对象。
+
 ## 5. Firefox 与 WebDriver BiDi
 
 ### 5.1 启动门

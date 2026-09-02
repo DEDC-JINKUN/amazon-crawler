@@ -712,6 +712,7 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             blocked_actions = $quality.blocked_actions
             inferred_actions = $quality.inferred_actions
             traffic = $quality.traffic
+            proxy_session_pool = if ($null -ne $finalRun) { $finalRun.proxy_session_pool } else { $null }
             quality_gate_ok = $qualityGateOk
             completion_gate_ok = $completionGateOk
             run_verification_reason = $runVerificationReason
@@ -774,6 +775,7 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             blocked_actions = 0
             inferred_actions = 0
             traffic = $null
+            proxy_session_pool = $null
             quality_gate_ok = $false
             run_verification_reason = $failureReason
             termination_reason = $failureReason

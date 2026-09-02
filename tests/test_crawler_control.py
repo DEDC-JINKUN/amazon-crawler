@@ -118,6 +118,7 @@ def test_control_script_has_locks_logs_receipts_and_safe_stop():
         "owner_pid",
         "owner_start_time",
         "amazon-us-control-receipt-v3",
+        "proxy_session_pool = if ($null -ne $finalRun)",
     ):
         assert expected in text
     assert "PGPASSWORD" in text
