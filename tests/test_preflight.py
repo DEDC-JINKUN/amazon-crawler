@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -18,6 +19,33 @@ def load():
 
 
 class PreflightTests(unittest.TestCase):
+    def test_configured_geckodriver_path_is_resolved_from_project_root(self):
+        preflight = load()
+        relative_driver = Path("tools/geckodriver-v0.37.1/geckodriver.exe")
+        self.assertTrue((ROOT / relative_driver).exists(), "repository geckodriver fixture is required")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.csv"
+            manifest.write_text("asin,url,marketplace,source_site_label,source_workbook\nB00RCPDCQU,https://www.amazon.com/dp/B00RCPDCQU,US,test,fixture.csv\n", encoding="utf-8")
+            config = root / "config.toml"
+            config.write_text(
+                '[worker]\nagent_name="test-agent"\nuser_agent="Agent/test-agent"\n'
+                f'geckodriver_path="{relative_driver.as_posix()}"\n'
+                '[context]\nexpected_country="US"\nexpected_currency="USD"\npostal_code="90001"\n',
+                encoding="utf-8",
+            )
+            previous = Path.cwd()
+            try:
+                os.chdir(root)
+                result = preflight.run_preflight(
+                    manifest, config, root / "state.sqlite3", require_live=True
+                )
+            finally:
+                os.chdir(previous)
+        check = next(item for item in result["checks"] if item["name"] == "geckodriver")
+        self.assertTrue(check["ok"], check)
+        self.assertEqual(Path(check["detail"]), ROOT / relative_driver)
+
     def test_proxy_validation_rejects_embedded_credentials(self):
         preflight = load()
         ok, detail = preflight._validate_proxy_url("http://user:secret@127.0.0.1:8080")

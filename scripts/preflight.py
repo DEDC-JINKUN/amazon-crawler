@@ -136,6 +136,8 @@ def run_preflight(manifest: Path, config: Path, db: Path, *, require_live: bool 
     except UnboundLocalError:
         configured_driver = ""
     driver_path = Path(configured_driver) if configured_driver else ROOT / "tools" / "geckodriver-v0.37.1" / "geckodriver.exe"
+    if not driver_path.is_absolute():
+        driver_path = ROOT / driver_path
     checks.append(_check("firefox", bool(firefox_path) or not require_live, firefox_path or "not found (optional until live mode)"))
     checks.append(_check("geckodriver", driver_path.exists() or not require_live, str(driver_path) if driver_path.exists() else "not found (run install_geckodriver.ps1)"))
     if backend == "postgres":
