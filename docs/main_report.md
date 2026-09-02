@@ -36,7 +36,7 @@
 
 - 新隔离 tenant 为 `owned_us_asin_20260902_full_01`。清单由授权源 `美国仓Asin清单.xlsx` 的 `Sheet2!A2:A1094` 只读生成，1,093 条均为唯一合法 ASIN；来源 SHA-256 为 `f0b8fb0fb892edcefe188bfd531dd5434387579e1cb4f69fae7657aa69013e0e`。manifest 和元数据在 `data/owned_us_asin_20260902_full_01/`（Git 忽略）。PostgreSQL 已只执行 manifest 初始化：1,093 条，未发起 Amazon 网络请求。
 - 原始 evidence 新写入改为 UTF-8 明文 SHA-256 内容寻址的 `.html.gz`；数据库只保留相对路径、hash 与 metadata。相同 ASIN 的相同 body 跨 run 复用同一 raw 文件；旧 `.html` 保留且离线健康检查、覆盖率、回填和基准解析兼容两种格式。
-- `scripts/secure_dpapi_launcher.ps1` 只在短生命周期子进程环境中解密 Windows CurrentUser DPAPI 仓；不会把值放入命令行、stdout/stderr、文件、数据库或 Git。Collection API 可从同一密钥派生只读/refresh Agent 的不同 scoped key；API 将 `requested_by` 固定派生为认证 Agent，并将无凭据、越权和接受的 refresh 写入无秘密审计记录。
+- `scripts/secure_dpapi_launcher.ps1` 只在短生命周期子进程环境中解密 Windows CurrentUser DPAPI 仓；不会把值放入命令行、stdout/stderr、数据库或 Git。新密钥仓在明文外层只保存非秘密的 scope、owner SID、创建时间和 DPAPI ciphertext；启动器先比对当前 Windows SID，账号不匹配时在解密前以 `vault-owner-mismatch` 失败。Collection API 可从同一密钥派生只读/refresh Agent 的不同 scoped key；API 将 `requested_by` 固定派生为认证 Agent，并将无凭据、越权和接受的 refresh 写入无秘密审计记录。
 - **真实出口阻塞，尚未开始 3→20→100→剩余 1,093 商品阶梯：** 当日 DataImpulse 配置 `gw.dataimpulse.com:823`、已确认的 `__cr.us` 用户名和 DPAPI 凭据在 live preflight 返回 `network_error`；本机随后对该 host:port 的 TCP 连通性为 `False`。未发生 403/429/CAPTCHA/WAF/login，也没有代理轮换、替代出口、Cookie/登录或 CAPTCHA 绕过。恢复条件是让此 Windows 主机可达已批准的 DataImpulse `gw.dataimpulse.com:823`（或由供应商确认并授权的新已批准 endpoint）；恢复后必须从 3-ASIN product gate 重新开始，不能把本次初始化当作真实采集。
 
 ## 2. 系统架构
@@ -675,6 +675,23 @@ DataImpulse认证保持HTTP-first和凭据最小暴露：`ProxyTunnelAuthHTTPSHa
 批次表和流量卡的Requested/Recorded、商品成功、Variant Redirect、Failed、Blocked、Pending/Running、流量、活跃耗时、墙钟跨度、HTTP、Firefox、代理账单unknown均同时提供中文`title`和`aria-label`解释，不依赖颜色。真实Console DOM已显示：1093/20、16成功、3变体、1普通失败、0 blocked、1073/0、7.84MiB、活跃193.08s、墙钟587s（含等待），以及egress network_error和preflight config_parse_failed两条operation。
 
 本阶段独立R3 review提出3个P1和2个P2：setup失败登记过晚、host中断可能被controller覆盖、Ctrl+C catch误写failed、DPAPI包装器默认8774、文档占位符。修复后，路径/参数/锁检查前先登记operation；collection/operation终态只允许从running写一次，`interrupted`不可降级；controller的exit 130和`PipelineStoppedException`均保持中断语义；安全包装器默认8770；文档占位已清除。另以真实坏Limit验证`preflight_status=not_started/failure_stage=configuration`仍可见。修复后专项54 passed、完整310 passed/1 skipped、真实PostgreSQL 1 passed，无遗留P0/P1/P2。
+
+### 11.9 Windows DPAPI 一次性配置
+
+DPAPI `CurrentUser` 密钥仓必须由将来启动爬虫的同一 Windows 账号创建；不可复制其他账号或沙箱身份创建的密钥仓。新机器或新服务账号应重新配置，不迁移 ciphertext。
+
+```powershell
+# 首次配置；若旧仓无法由当前账号使用，完成安全输入后原子替换
+.\run_owned_full_secure.ps1 configure
+
+# 只验证身份、DPAPI 解密和字段完整性；不打印秘密，不访问 Amazon
+.\run_owned_full_secure.ps1 verify-secrets
+
+# 代理或数据库凭据变更时轮换；默认保留 Collection API key
+.\run_owned_full_secure.ps1 rotate
+```
+
+`configure` 会优先复用当前进程已配置的 `AMAZON_PROXY_USER` / `AMAZON_PROXY_PASS` 和完整 PostgreSQL DSN，只对缺失项使用安全输入。密钥仓 ACL 只授权创建者 SID 和 LocalSystem。计划任务或服务必须固定为该账号；账号不一致时启动器明确返回 `vault-owner-mismatch`，不再只显示模糊的 unprotect 失败。
 
 ## 12. 测试矩阵
 

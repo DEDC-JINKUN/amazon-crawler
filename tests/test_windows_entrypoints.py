@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -12,6 +13,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+CONFIGURE = ROOT / "configure_owned_full.ps1"
 
 
 def test_windows_entrypoints_reference_existing_python_scripts():
@@ -96,6 +98,105 @@ def test_secure_dpapi_launcher_works_under_windows_powershell(request):
     assert b"fake-user" not in result.stdout
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows DPAPI runtime test")
+def test_dpapi_envelope_verifies_and_launches_for_calling_windows_user(request):
+    tmp_path = Path(tempfile.mkdtemp(prefix="amazon-configure-"))
+    request.addfinalizer(lambda: shutil.rmtree(tmp_path, ignore_errors=True))
+    powershell = Path(os.environ["SystemRoot"]) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    vault = tmp_path / "amazon_us.secrets.dpapi"
+    configure = tmp_path / "configure_owned_full.ps1"
+    launcher = tmp_path / "secure_dpapi_launcher.ps1"
+    shutil.copy2(CONFIGURE, configure)
+    shutil.copy2(ROOT / "scripts" / "secure_dpapi_launcher.ps1", launcher)
+
+    configure_env = os.environ.copy()
+    configure_env.update({
+        "AMAZON_PROXY_USER": "fake-login__cr.us",
+        "AMAZON_PROXY_PASS": "fake-proxy-pass",
+        "AMAZON_US_POSTGRES_DSN": "host=127.0.0.1 password=fake-pg-pass",
+        "AMAZON_COLLECTION_API_KEY": "fake-api-key",
+    })
+    configured = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", configure,
+         "-Mode", "Configure", "-SecretPath", vault],
+        env=configure_env,
+        capture_output=True,
+    )
+    assert configured.returncode == 0, configured.stderr.decode("utf-8", errors="replace")
+    assert vault.exists(), configured.stdout.decode("utf-8", errors="replace")
+    envelope = json.loads(vault.read_text(encoding="ascii"))
+    assert envelope["schema"] == "amazon-us-dpapi-envelope-v1"
+    assert envelope["scope"] == "CurrentUser"
+    assert re.fullmatch(r"S-\d(?:-\d+)+", envelope["owner_sid"])
+    assert envelope["ciphertext"]
+    combined = configured.stdout + configured.stderr
+    for secret in (b"fake-login", b"fake-proxy-pass", b"fake-pg-pass", b"fake-api-key"):
+        assert secret not in combined
+    marker = tmp_path / "configured.ok"
+    child = tmp_path / "child.ps1"
+    child.write_text(textwrap.dedent(rf"""
+        if ($env:AMAZON_PROXY_USER -ne 'fake-login__cr.us') {{ exit 11 }}
+        if ($env:AMAZON_PROXY_PASS -ne 'fake-proxy-pass') {{ exit 12 }}
+        if ($env:AMAZON_US_POSTGRES_DSN -notlike '*password=fake-pg-pass') {{ exit 13 }}
+        if ([string]::IsNullOrWhiteSpace($env:AMAZON_COLLECTION_API_KEY)) {{ exit 14 }}
+        [IO.File]::WriteAllText('{str(marker).replace("'", "''")}','ok')
+    """), encoding="utf-8")
+    launch_wrapper = tmp_path / "launch.ps1"
+    launch_wrapper.write_text(textwrap.dedent(rf"""
+        & '{str(launcher).replace("'", "''")}' `
+          -SecretPath '{str(vault).replace("'", "''")}' `
+          -FilePath '{str(powershell).replace("'", "''")}' `
+          -ArgumentList @('-NoProfile','-File','{str(child).replace("'", "''")}')
+        exit $LASTEXITCODE
+    """), encoding="utf-8")
+    launched = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", launch_wrapper],
+        capture_output=True,
+    )
+    assert launched.returncode == 0, launched.stderr.decode("utf-8", errors="replace")
+    assert marker.read_text(encoding="utf-8") == "ok"
+
+    verified = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", configure,
+         "-Mode", "Verify", "-SecretPath", vault],
+        capture_output=True,
+    )
+    assert verified.returncode == 0, verified.stderr.decode("utf-8", errors="replace")
+    assert b"verified for the current Windows user" in verified.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows DPAPI runtime test")
+def test_secure_launcher_rejects_a_vault_owned_by_another_windows_sid(request):
+    tmp_path = Path(tempfile.mkdtemp(prefix="amazon-dpapi-owner-"))
+    request.addfinalizer(lambda: shutil.rmtree(tmp_path, ignore_errors=True))
+    powershell = Path(os.environ["SystemRoot"]) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    vault = tmp_path / "amazon_us.secrets.dpapi"
+    vault.write_text(json.dumps({
+        "schema": "amazon-us-dpapi-envelope-v1",
+        "scope": "CurrentUser",
+        "owner_sid": "S-1-0-0",
+        "ciphertext": "not-read-because-owner-does-not-match",
+    }), encoding="ascii")
+
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+         ROOT / "scripts" / "secure_dpapi_launcher.ps1", "-SecretPath", vault,
+         "-SecretNames", "AMAZON_PROXY_USER", "-FilePath", powershell,
+         "-ArgumentList", "-NoProfile,-Command,exit 0"],
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert b"secure launcher failed at vault-owner-mismatch" in result.stderr
+
+
+def test_configure_owned_full_uses_current_user_dpapi_and_secure_prompts():
+    configure = CONFIGURE.read_text(encoding="utf-8")
+    assert "Read-Host $Prompt -AsSecureString" in configure
+    assert "DataProtectionScope]::CurrentUser" in configure
+    assert "WindowsIdentity]::GetCurrent().User.Value" in configure
+    assert "amazon-us-dpapi-envelope-v1" in configure
+
+
 def test_owned_full_secure_wrapper_uses_dpapi_and_fixed_tenant():
     wrapper = (ROOT / "run_owned_full_secure.ps1").read_text(encoding="utf-8")
     assert "secure_dpapi_launcher.ps1" in wrapper
@@ -103,5 +204,6 @@ def test_owned_full_secure_wrapper_uses_dpapi_and_fixed_tenant():
     assert "manifest_1093.csv" in wrapper
     assert "owned_us_full.toml" in wrapper
     assert "ConfirmLargeBatch" in wrapper
-    assert "ValidateSet('egress','probe','run','reviews','status','console','stop')" in wrapper
+    assert "'configure','verify-secrets','rotate'" in wrapper
+    assert "configure_owned_full.ps1" in wrapper
     assert "[int]$Port = 8770" in wrapper

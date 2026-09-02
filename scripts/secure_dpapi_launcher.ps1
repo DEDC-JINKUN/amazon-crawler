@@ -21,6 +21,19 @@ function Get-Secrets([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw 'DPAPI secret vault was not found.' }
     $script:LauncherStage = 'get-secrets-read'
     $encoded = ([IO.File]::ReadAllText((Resolve-Path -LiteralPath $Path))).Trim()
+    if ($encoded.StartsWith('{')) {
+        $script:LauncherStage = 'vault-envelope'
+        $envelope = $encoded | ConvertFrom-Json
+        if ([string]$envelope.schema -ne 'amazon-us-dpapi-envelope-v1' -or
+            [string]$envelope.scope -ne 'CurrentUser') { throw 'Unsupported DPAPI vault envelope.' }
+        $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        if ([string]$envelope.owner_sid -ne $currentSid) {
+            $script:LauncherStage = 'vault-owner-mismatch'
+            throw 'DPAPI vault owner does not match the current Windows account.'
+        }
+        $encoded = [string]$envelope.ciphertext
+    }
+    $script:LauncherStage = 'get-secrets-ciphertext'
     $cipher = [Convert]::FromBase64String($encoded)
     $script:LauncherStage = 'get-secrets-unprotect'
     [void][System.Reflection.Assembly]::LoadWithPartialName('System.Security')
@@ -74,8 +87,10 @@ try {
     }
     else {
         foreach ($name in $SecretNames) {
+            $script:LauncherStage = "environment-read-$name"
             $value = [string]$material.Values.$name
             if ([string]::IsNullOrWhiteSpace($value)) { throw "Required secret '$name' is unavailable." }
+            $script:LauncherStage = "environment-set-$name"
             $startInfo.EnvironmentVariables[$name] = $value
             $value = $null
         }
@@ -88,7 +103,14 @@ try {
 }
 catch {
     # Never serialize exception internals: these can contain command line or provider data.
-    [Console]::Error.WriteLine("secure launcher failed at $script:LauncherStage")
+    $errorType = $_.Exception.GetType().Name
+    $errorCode = ('0x{0:X8}' -f ($_.Exception.HResult -band 0xffffffffL))
+    if ($script:LauncherStage -in @('vault-owner-mismatch','get-secrets-unprotect')) {
+        [Console]::Error.WriteLine("secure launcher failed at $script:LauncherStage ($errorType/$errorCode); run .\run_owned_full_secure.ps1 configure as the intended Windows account")
+    }
+    else {
+        [Console]::Error.WriteLine("secure launcher failed at $script:LauncherStage ($errorType/$errorCode)")
+    }
     exit 2
 }
 finally {

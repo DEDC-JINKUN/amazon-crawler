@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('egress','probe','run','reviews','status','console','stop')][string]$Mode = 'status',
+    [ValidateSet('egress','probe','run','reviews','status','console','stop','configure','verify-secrets','rotate')][string]$Mode = 'status',
     [int]$Limit = 0,
     [switch]$ConfirmLargeBatch,
     [int]$Port = 8770
@@ -11,10 +11,24 @@ $ErrorActionPreference = 'Stop'
 
 $root = $PSScriptRoot
 $launcher = Join-Path $root 'scripts\secure_dpapi_launcher.ps1'
+$credentialTool = Join-Path $root 'configure_owned_full.ps1'
 $controller = Join-Path $root 'crawler.ps1'
 $shell = (Get-Process -Id $PID).Path
 $tenant = 'owned_us_asin_20260902_full_01'
 $output = 'data\owned_us_asin_20260902_full_01'
+
+if ($Mode -eq 'configure') {
+    & $credentialTool -Mode Configure
+    exit $LASTEXITCODE
+}
+if ($Mode -eq 'verify-secrets') {
+    & $credentialTool -Mode Verify
+    exit $LASTEXITCODE
+}
+if ($Mode -eq 'rotate') {
+    & $credentialTool -Mode Rotate
+    exit $LASTEXITCODE
+}
 
 $arguments = [Collections.Generic.List[string]]::new()
 foreach ($value in @(
