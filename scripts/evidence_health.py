@@ -9,6 +9,13 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+try:
+    from raw_html_store import read_raw_html
+except ModuleNotFoundError:
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from raw_html_store import read_raw_html
+
 
 def audit(db_path: Path, raw_html_dir: Path | None = None) -> dict[str, Any]:
     if not db_path.exists():
@@ -43,7 +50,7 @@ def audit(db_path: Path, raw_html_dir: Path | None = None) -> dict[str, Any]:
                 # Worker hashes the UTF-8 text body; normalize through the
                 # same text path so Windows newline translation is not a
                 # false mismatch.
-                actual = hashlib.sha256(path.read_text(encoding="utf-8", errors="replace").encode("utf-8")).hexdigest()
+                actual = hashlib.sha256(read_raw_html(path).encode("utf-8")).hexdigest()
                 if actual != expected:
                     hash_mismatch.append(str(relative))
         return {

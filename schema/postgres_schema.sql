@@ -86,6 +86,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_refresh_request_active_asin
     ON refresh_request (tenant_id, marketplace, asin, subject_type)
     WHERE status IN ('queued', 'claimed');
 
+CREATE TABLE IF NOT EXISTS collection_api_audit (
+    id bigserial PRIMARY KEY,
+    tenant_id text NOT NULL DEFAULT 'default',
+    agent_id text NOT NULL,
+    action text NOT NULL,
+    resource text NOT NULL,
+    outcome text NOT NULL,
+    recorded_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_collection_api_audit_tenant_time
+    ON collection_api_audit (tenant_id, recorded_at DESC);
+
 ALTER TABLE item_state ADD COLUMN IF NOT EXISTS next_retry_at timestamptz;
 ALTER TABLE item_state ADD COLUMN IF NOT EXISTS lease_token text;
 ALTER TABLE item_state ADD COLUMN IF NOT EXISTS lease_owner text;

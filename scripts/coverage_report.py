@@ -11,6 +11,13 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
+try:
+    from raw_html_store import read_raw_html
+except ModuleNotFoundError:
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from raw_html_store import read_raw_html
+
 FIELD_GROUPS = {
     "identity": ("canonical_url", "title", "brand"),
     "commercial": ("price", "availability"),
@@ -91,7 +98,7 @@ def _html_field_state(path: Path) -> dict[str, str]:
     if path is None or not path.exists():
         return {"bullets": "uninspectable", "description": "uninspectable"}
     try:
-        html = path.read_text(encoding="utf-8", errors="replace")
+        html = read_raw_html(path)
     except OSError:
         return {"bullets": "uninspectable", "description": "uninspectable"}
     result: dict[str, str] = {}

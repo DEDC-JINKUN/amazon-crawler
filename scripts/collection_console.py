@@ -389,7 +389,7 @@ class PostgresConsoleRepository:
             )
             recent_runs = [dict(row) for row in cursor.fetchall()]
 
-        files = list(raw_html_dir.rglob("*.html")) if raw_html_dir and raw_html_dir.exists() else None
+        files = [*raw_html_dir.rglob("*.html"), *raw_html_dir.rglob("*.html.gz")] if raw_html_dir and raw_html_dir.exists() else None
         raw_bytes = sum(path.stat().st_size for path in files) if files is not None else None
         touched = int(evidence.get("touched") or 0)
         actions = int(evidence.get("actions") or 0)

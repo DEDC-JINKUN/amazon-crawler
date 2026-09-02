@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hmac
+import hashlib
 import json
 import os
 import re
@@ -27,6 +28,28 @@ except ModuleNotFoundError:
 API_SCHEMA_VERSION = "amazon-us-collection-v1"
 ASIN_PATH = re.compile(r"^/v1/asin/([A-Za-z]{2})/([A-Za-z0-9]{10})$")
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+DEFAULT_AGENT_SCOPES = {
+    "read-agent": frozenset({"read"}),
+    "refresh-agent": frozenset({"read", "refresh"}),
+}
+
+
+def derive_agent_key(master_key: str, agent_id: str) -> str:
+    """Derive a non-master, per-agent credential from the sealed service key."""
+    if not master_key or agent_id not in DEFAULT_AGENT_SCOPES:
+        raise ValueError("a configured agent identity and service key are required")
+    material = f"amazon-us-collection-agent-v1:{agent_id}".encode("utf-8")
+    return hmac.new(master_key.encode("utf-8"), material, hashlib.sha256).hexdigest()
+
+
+def agent_headers(master_key: str, agent_id: str) -> dict[str, str]:
+    return {"X-Collection-Agent": agent_id, "X-Collection-Agent-Key": derive_agent_key(master_key, agent_id)}
+
+
+class AgentPrincipal:
+    def __init__(self, agent_id: str, scopes: frozenset[str]):
+        self.agent_id = agent_id
+        self.scopes = scopes
 
 
 def load_product(db_path: Path, marketplace: str, asin: str) -> dict[str, Any] | None:
@@ -64,19 +87,53 @@ class CollectionHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _authorized(self) -> bool:
+    def _audit(self, principal: AgentPrincipal | None, action: str, resource: str, outcome: str) -> None:
+        recorder = getattr(self.server.repository, "record_api_audit", None)
+        if recorder is None:
+            return
+        try:
+            recorder(agent_id=principal.agent_id if principal else "unauthenticated", action=action, resource=resource, outcome=outcome)
+        except Exception:
+            # Audit availability must not turn a read request into a data leak;
+            # PostgreSQL production uses a durable table and is checked by readyz.
+            return
+
+    def _authorized(self, required_scope: str, action: str, resource: str) -> AgentPrincipal | None:
         expected = self.server.api_key
         if not expected:
-            return True
+            return AgentPrincipal("insecure-local", frozenset({"read", "refresh"}))
+        agent_id = self.headers.get("X-Collection-Agent", "")
+        supplied_agent_key = self.headers.get("X-Collection-Agent-Key", "")
+        if agent_id in self.server.agent_scopes and supplied_agent_key:
+            expected_agent_key = derive_agent_key(expected, agent_id)
+            if hmac.compare_digest(supplied_agent_key, expected_agent_key):
+                principal = AgentPrincipal(agent_id, self.server.agent_scopes[agent_id])
+                if required_scope in principal.scopes:
+                    if not self.server.allow_request(principal.agent_id):
+                        self._send_json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "rate_limited"})
+                        self._audit(principal, action, resource, "rate_limited")
+                        return None
+                    return principal
+                self._send_json(HTTPStatus.FORBIDDEN, {"error": "insufficient_scope", "required_scope": required_scope})
+                self._audit(principal, action, resource, "forbidden")
+                return None
+        # The service key remains a local operator credential for compatibility
+        # with existing loopback tooling. It is never exposed by the agent client.
         supplied = self.headers.get("X-Collection-API-Key", "")
         if hmac.compare_digest(supplied, expected):
-            return True
+            principal = AgentPrincipal("local-operator", frozenset({"read", "refresh"}))
+            if self.server.allow_request(principal.agent_id):
+                return principal
+            self._send_json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "rate_limited"})
+            self._audit(principal, action, resource, "rate_limited")
+            return None
         self.send_response(HTTPStatus.UNAUTHORIZED)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("WWW-Authenticate", "ApiKey")
         self.end_headers()
         self.wfile.write(b'{"error":"unauthorized"}')
-        return False
+        self._audit(None, action, resource, "unauthorized")
+        return None
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
         path = urlsplit(self.path).path
@@ -88,7 +145,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 checker = getattr(self.server.repository, "load_schema_contract", None)
                 if checker is not None:
                     contract = checker()
-                    if contract.get("item_state") != ["next_retry_at"] or contract.get("collection_evidence") != ["context_json", "transfer_bytes"]:
+                    if contract.get("item_state") != ["lease_expires_at", "lease_owner", "lease_token", "next_retry_at"] or contract.get("collection_evidence") != ["context_json", "transfer_bytes"]:
                         self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "schema_not_ready"})
                         return
                 self.server.repository.load_job_status()
@@ -104,11 +161,16 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 payload["tenant_id"] = tenant_id
             self._send_json(HTTPStatus.OK, payload)
             return
-        if not self._authorized():
-            return
+        principal: AgentPrincipal | None = None
+        if path not in {"/healthz", "/readyz"}:
+            principal = self._authorized("read", "read", path)
+            if principal is None:
+                return
         if path == "/v1/jobs/status":
             try:
-                self._send_json(HTTPStatus.OK, self.server.repository.load_job_status())
+                payload = self.server.repository.load_job_status()
+                self._audit(principal, "read", path, "ok")
+                self._send_json(HTTPStatus.OK, payload)
             except (OSError, RuntimeError, sqlite3.Error, Exception):
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable"})
             return
@@ -122,6 +184,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
             if job is None:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "job_not_found", "job_id": job_match.group(1)})
                 return
+            self._audit(principal, "read", path, "ok")
             self._send_json(HTTPStatus.OK, {"schema_version": API_SCHEMA_VERSION, "job": job})
             return
         evidence_match = re.fullmatch(r"/v1/asin/([A-Za-z]{2})/([A-Za-z0-9]{10})/evidence", path)
@@ -135,6 +198,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
             if not evidence:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "evidence_not_found", "asin": asin, "marketplace": marketplace})
                 return
+            self._audit(principal, "read", path, "ok")
             self._send_json(HTTPStatus.OK, {"schema_version": API_SCHEMA_VERSION, "marketplace": marketplace, "asin": asin, "items": evidence})
             return
         history_match = re.fullmatch(r"/v1/asin/([A-Za-z]{2})/([A-Za-z0-9]{10})/history", path)
@@ -148,6 +212,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
             if not history:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "history_not_found", "asin": asin, "marketplace": marketplace})
                 return
+            self._audit(principal, "read", path, "ok")
             self._send_json(HTTPStatus.OK, {"schema_version": API_SCHEMA_VERSION, "marketplace": marketplace, "asin": asin, "items": history})
             return
         match = ASIN_PATH.fullmatch(path)
@@ -167,13 +232,18 @@ class CollectionHandler(BaseHTTPRequestHandler):
                     self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_fields"})
                     return
                 payload["freshness"] = FreshnessPolicy().evaluate(payload.get("retrieved_at"), requested)
+            self._audit(principal, "read", path, "ok")
             self._send_json(HTTPStatus.OK, payload)
             return
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "route_not_found"})
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
         path = urlsplit(self.path).path
-        if not self._authorized():
+        if path == "/v1/asin/batch":
+            principal = self._authorized("read", "batch_read", path)
+        else:
+            principal = self._authorized("refresh", "request_refresh", path)
+        if principal is None:
             return
         if path == "/v1/asin/batch":
             try:
@@ -206,6 +276,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
             except Exception:
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable"})
                 return
+            self._audit(principal, "batch_read", path, "ok")
             self._send_json(HTTPStatus.OK, {"schema_version": API_SCHEMA_VERSION, "marketplace": marketplace, "items": items})
             return
         match = re.fullmatch(r"/v1/asin/([A-Za-z]{2})/([A-Za-z0-9]{10})/refresh", path)
@@ -220,10 +291,9 @@ class CollectionHandler(BaseHTTPRequestHandler):
             body = json.loads(raw.decode("utf-8"))
             if not isinstance(body, dict):
                 raise ValueError("request body must be a JSON object")
-            requested_by = str(body.get("requested_by") or "collection-api")[:120]
             reason = str(body.get("reason") or "on_demand")[:240]
             marketplace, asin = match.group(1).upper(), match.group(2).upper()
-            request = self.server.repository.request_refresh(marketplace, asin, requested_by, reason)
+            request = self.server.repository.request_refresh(marketplace, asin, principal.agent_id, reason)
         except ValueError as exc:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request", "detail": str(exc)})
             return
@@ -233,6 +303,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
         except Exception:
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "database_unavailable"})
             return
+        self._audit(principal, "request_refresh", f"{marketplace}/{asin}", "accepted")
         self._send_json(HTTPStatus.ACCEPTED, {"schema_version": API_SCHEMA_VERSION, "job": request})
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -240,7 +311,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
 
 
 class CollectionServer(ThreadingHTTPServer):
-    def __init__(self, address: tuple[str, int], db_path: Path | None = None, repository: CollectionRepository | None = None, api_key: str | None = None):
+    def __init__(self, address: tuple[str, int], db_path: Path | None = None, repository: CollectionRepository | None = None, api_key: str | None = None, agent_scopes: dict[str, frozenset[str]] | None = None, agent_rate_limit: int = 60):
         if address[0] not in LOOPBACK_HOSTS:
             raise ValueError("Collection API only allows loopback host by default")
         if repository is None:
@@ -250,12 +321,27 @@ class CollectionServer(ThreadingHTTPServer):
         super().__init__(address, CollectionHandler)
         self.repository = repository
         self.api_key = api_key or ""
+        self.agent_scopes = dict(agent_scopes or DEFAULT_AGENT_SCOPES)
+        self.agent_rate_limit = max(1, int(agent_rate_limit))
+        self._agent_windows: dict[str, tuple[float, int]] = {}
+
+    def allow_request(self, agent_id: str) -> bool:
+        import time
+        now = time.monotonic()
+        start, count = self._agent_windows.get(agent_id, (now, 0))
+        if now - start >= 60:
+            start, count = now, 0
+        if count >= self.agent_rate_limit:
+            self._agent_windows[agent_id] = (start, count)
+            return False
+        self._agent_windows[agent_id] = (start, count + 1)
+        return True
 
 
-def serve(db_path: Path | None = None, host: str = "127.0.0.1", port: int = 8765, repository: CollectionRepository | None = None, api_key: str | None = None) -> None:
+def serve(db_path: Path | None = None, host: str = "127.0.0.1", port: int = 8765, repository: CollectionRepository | None = None, api_key: str | None = None, agent_rate_limit: int = 60) -> None:
     if host not in LOOPBACK_HOSTS:
         raise ValueError("Collection API only allows loopback host by default")
-    server = CollectionServer((host, port), db_path, repository, api_key)
+    server = CollectionServer((host, port), db_path, repository, api_key, agent_rate_limit=agent_rate_limit)
     try:
         print(f"Collection API listening on http://{host}:{server.server_port}")
         server.serve_forever()
@@ -283,15 +369,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db", type=Path, default=Path("state/amazon_us.sqlite3"))
     parser.add_argument("--backend", choices=("sqlite", "postgres"), default="sqlite")
     parser.add_argument("--dsn", default="", help="PostgreSQL DSN (required with --backend postgres)")
+    parser.add_argument("--dsn-env", default="", help="Environment variable containing the PostgreSQL DSN")
     parser.add_argument("--tenant-id", default="default", help="PostgreSQL tenant to expose")
     parser.add_argument("--api-key-env", default="AMAZON_COLLECTION_API_KEY", help="Environment variable containing optional API key")
     parser.add_argument("--require-api-key", action="store_true", help="Fail startup when the API key environment variable is empty")
+    parser.add_argument("--allow-insecure-local-testing", action="store_true", help="Only for offline tests; production startup requires an API key")
+    parser.add_argument("--agent-rate-limit", type=int, default=60, help="Maximum authenticated requests per agent per minute")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args(argv)
     try:
-        repository = create_repository(args.backend, args.db, args.dsn, args.tenant_id)
-        serve(args.db if args.backend == "sqlite" else None, args.host, args.port, repository, resolve_api_key(args.api_key_env, args.require_api_key))
+        dsn = args.dsn or (os.environ.get(args.dsn_env, "") if args.dsn_env else "")
+        repository = create_repository(args.backend, args.db, dsn, args.tenant_id)
+        require_key = not args.allow_insecure_local_testing or args.require_api_key
+        serve(args.db if args.backend == "sqlite" else None, args.host, args.port, repository, resolve_api_key(args.api_key_env, require_key), args.agent_rate_limit)
     except (OSError, ValueError) as exc:
         print(f"error: {exc}")
         return 1

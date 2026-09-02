@@ -9,6 +9,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+try:
+    from raw_html_store import read_raw_html
+except ModuleNotFoundError:
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from raw_html_store import read_raw_html
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -23,10 +30,10 @@ def _load_worker():
 def benchmark(raw_html_dir: Path, repeat: int = 1) -> dict[str, Any]:
     if repeat < 1 or repeat > 10000:
         raise ValueError("repeat must be between 1 and 10000")
-    files = sorted(raw_html_dir.glob("**/*.html"))
+    files = sorted([*raw_html_dir.glob("**/*.html"), *raw_html_dir.glob("**/*.html.gz")])
     if not files:
         raise FileNotFoundError(f"No HTML files found under {raw_html_dir}")
-    payloads = [(path, path.read_text(encoding="utf-8", errors="replace")) for path in files]
+    payloads = [(path, read_raw_html(path)) for path in files]
     worker = _load_worker()
     started = time.perf_counter()
     page_count = 0

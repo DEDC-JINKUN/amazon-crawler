@@ -32,6 +32,13 @@
 
 2026-09-01最新美国VPN隔离100条自有ASIN验收已替代上述“当前必须等待新出口”的运行结论：100/100均形成evidence，92个商品成功、8个同Parent兄弟变体跳转、0 blocked，未出现403/429/CAPTCHA/WAF/login；详见11.6。统一Console、run ledger、Ctrl+C/heartbeat、reviews-only和DataImpulse认证整合后的最新完整离线回归为 `287 passed, 1 skipped`；真实PostgreSQL专项因当前没有`AMAZON_TEST_POSTGRES_DSN`按合同skip。
 
+### 1.5 2026-09-02 自有 1,093 ASIN 生产准备与真实阻塞
+
+- 新隔离 tenant 为 `owned_us_asin_20260902_full_01`。清单由授权源 `美国仓Asin清单.xlsx` 的 `Sheet2!A2:A1094` 只读生成，1,093 条均为唯一合法 ASIN；来源 SHA-256 为 `f0b8fb0fb892edcefe188bfd531dd5434387579e1cb4f69fae7657aa69013e0e`。manifest 和元数据在 `data/owned_us_asin_20260902_full_01/`（Git 忽略）。PostgreSQL 已只执行 manifest 初始化：1,093 条，未发起 Amazon 网络请求。
+- 原始 evidence 新写入改为 UTF-8 明文 SHA-256 内容寻址的 `.html.gz`；数据库只保留相对路径、hash 与 metadata。相同 ASIN 的相同 body 跨 run 复用同一 raw 文件；旧 `.html` 保留且离线健康检查、覆盖率、回填和基准解析兼容两种格式。
+- `scripts/secure_dpapi_launcher.ps1` 只在短生命周期子进程环境中解密 Windows CurrentUser DPAPI 仓；不会把值放入命令行、stdout/stderr、文件、数据库或 Git。Collection API 可从同一密钥派生只读/refresh Agent 的不同 scoped key；API 将 `requested_by` 固定派生为认证 Agent，并将无凭据、越权和接受的 refresh 写入无秘密审计记录。
+- **真实出口阻塞，尚未开始 3→20→100→剩余 1,093 商品阶梯：** 当日 DataImpulse 配置 `gw.dataimpulse.com:823`、已确认的 `__cr.us` 用户名和 DPAPI 凭据在 live preflight 返回 `network_error`；本机随后对该 host:port 的 TCP 连通性为 `False`。未发生 403/429/CAPTCHA/WAF/login，也没有代理轮换、替代出口、Cookie/登录或 CAPTCHA 绕过。恢复条件是让此 Windows 主机可达已批准的 DataImpulse `gw.dataimpulse.com:823`（或由供应商确认并授权的新已批准 endpoint）；恢复后必须从 3-ASIN product gate 重新开始，不能把本次初始化当作真实采集。
+
 ## 2. 系统架构
 
 ```mermaid

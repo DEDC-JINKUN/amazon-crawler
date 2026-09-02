@@ -26,6 +26,8 @@ class CollectionRepository(Protocol):
 
     def request_refresh(self, marketplace: str, asin: str, requested_by: str, reason: str) -> dict[str, Any]: ...
 
+    def record_api_audit(self, *, agent_id: str, action: str, resource: str, outcome: str) -> None: ...
+
 
 def _dict_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
@@ -156,6 +158,12 @@ class SQLiteCollectionRepository:
     def request_refresh(self, marketplace: str, asin: str, requested_by: str, reason: str) -> dict[str, Any]:
         conn = self._connection(read_only=False)
         try:
+            active = conn.execute(
+                "SELECT * FROM refresh_request WHERE marketplace=? AND asin=? AND status IN ('queued','claimed') ORDER BY requested_at DESC LIMIT 1",
+                (marketplace, asin),
+            ).fetchone()
+            if active is not None:
+                return _dict_row(active) or {}
             exists = conn.execute("SELECT 1 FROM item_state WHERE marketplace=? AND asin=?", (marketplace, asin)).fetchone()
             if exists is None:
                 raise KeyError(f"ASIN not found: {marketplace}/{asin}")
@@ -182,6 +190,23 @@ class SQLiteCollectionRepository:
         try:
             row = conn.execute("SELECT * FROM refresh_request WHERE job_id=?", (job_id,)).fetchone()
             return _dict_row(row)
+        finally:
+            conn.close()
+
+    def record_api_audit(self, *, agent_id: str, action: str, resource: str, outcome: str) -> None:
+        """Keep local test audits durable without storing credentials or bodies."""
+        conn = self._connection(read_only=False)
+        try:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS collection_api_audit ("
+                "id INTEGER PRIMARY KEY,recorded_at TEXT NOT NULL,agent_id TEXT NOT NULL,"
+                "action TEXT NOT NULL,resource TEXT NOT NULL,outcome TEXT NOT NULL)"
+            )
+            conn.execute(
+                "INSERT INTO collection_api_audit(recorded_at,agent_id,action,resource,outcome) VALUES(?,?,?,?,?)",
+                (_now(), agent_id[:120], action[:80], resource[:240], outcome[:80]),
+            )
+            conn.commit()
         finally:
             conn.close()
 
@@ -334,17 +359,32 @@ class PostgresCollectionRepository:
         with self._connect_factory() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(
-                    "SELECT 1 FROM amazon_us.item_state WHERE tenant_id=%s AND marketplace=%s AND asin=%s LIMIT 1",
+                    "SELECT subject_type FROM amazon_us.item_state WHERE tenant_id=%s AND marketplace=%s AND asin=%s "
+                    "ORDER BY CASE subject_type WHEN 'own' THEN 0 WHEN 'competitor' THEN 1 ELSE 2 END LIMIT 1",
                     (self.tenant_id, marketplace, asin),
                 )
-                if cursor.fetchone() is None:
+                state = cursor.fetchone()
+                if state is None:
                     raise KeyError(f"ASIN not found: {marketplace}/{asin}")
+                subject_type = (state if isinstance(state, dict) else dict(state)).get("subject_type", "own")
                 cursor.execute(
-                    "INSERT INTO amazon_us.refresh_request(job_id,tenant_id,marketplace,asin,requested_by,reason,status) VALUES(%s,%s,%s,%s,%s,%s,%s)",
-                    (request["job_id"], self.tenant_id, marketplace, asin, request["requested_by"], request["reason"], request["status"]),
+                    "INSERT INTO amazon_us.refresh_request(job_id,tenant_id,marketplace,asin,subject_type,requested_by,reason,status) "
+                    "VALUES(%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (tenant_id,marketplace,asin,subject_type) "
+                    "WHERE status IN ('queued','claimed') DO NOTHING RETURNING *",
+                    (request["job_id"], self.tenant_id, marketplace, asin, subject_type, request["requested_by"], request["reason"], request["status"]),
                 )
+                inserted = cursor.fetchone()
+                if inserted is None:
+                    cursor.execute(
+                        "SELECT * FROM amazon_us.refresh_request WHERE tenant_id=%s AND marketplace=%s AND asin=%s AND subject_type=%s "
+                        "AND status IN ('queued','claimed') ORDER BY requested_at DESC LIMIT 1",
+                        (self.tenant_id, marketplace, asin, subject_type),
+                    )
+                    inserted = cursor.fetchone()
+                if inserted is not None:
+                    request = inserted if isinstance(inserted, dict) else dict(inserted)
             conn.commit()
-        request["requested_at"] = _now()
+        request.setdefault("requested_at", _now())
         return request
 
     def load_refresh_request(self, job_id: str) -> dict[str, Any] | None:
@@ -353,3 +393,13 @@ class PostgresCollectionRepository:
                 cursor.execute("SELECT * FROM amazon_us.refresh_request WHERE tenant_id=%s AND job_id=%s", (self.tenant_id, job_id))
                 row = cursor.fetchone()
                 return dict(row) if row is not None else None
+
+    def record_api_audit(self, *, agent_id: str, action: str, resource: str, outcome: str) -> None:
+        with self._connect_factory() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO amazon_us.collection_api_audit "
+                    "(tenant_id,agent_id,action,resource,outcome) VALUES(%s,%s,%s,%s,%s)",
+                    (self.tenant_id, agent_id[:120], action[:80], resource[:240], outcome[:80]),
+                )
+            conn.commit()

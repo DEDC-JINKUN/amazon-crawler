@@ -10,6 +10,12 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
+try:
+    from raw_html_store import read_raw_html
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from raw_html_store import read_raw_html
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -62,7 +68,7 @@ def backfill_identity_evidence(
                 missing_raw += 1
                 continue
             try:
-                data = parser(raw_path.read_text(encoding="utf-8", errors="replace"), str(row.get("url") or ""))
+                data = parser(read_raw_html(raw_path), str(row.get("url") or ""))
                 identity = {
                     "requested_asin": str(row["asin"]).upper(),
                     "observed_asin": str(data.get("asin") or "").upper(),
