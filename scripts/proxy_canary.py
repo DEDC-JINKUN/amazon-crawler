@@ -34,6 +34,16 @@ APPROVED_CANARY_URLS = frozenset({DEFAULT_CANARY_URL})
 MAX_PROXY_SESSION_PORTS = 40
 
 
+def effective_slot_budget(config: dict[str, Any]) -> int:
+    scope = str(config.get("proxy_product_session_scope") or "per_asin").strip().lower()
+    if scope not in {"per_asin", "bounded"}:
+        raise ValueError("proxy_product_session_scope must be per_asin or bounded")
+    configured = int(config.get("proxy_session_max_asins") or 3)
+    if configured < 1 or configured > 5:
+        raise ValueError("proxy_session_max_asins must be between 1 and 5")
+    return 1 if scope == "per_asin" else configured
+
+
 def validate_canary_target_url(value: str) -> str:
     target_url = str(value or "").strip()
     if target_url not in APPROVED_CANARY_URLS:
@@ -47,6 +57,11 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 def _validated_shape(config: dict[str, Any]) -> dict[str, Any]:
+    profile = str(config.get("egress_profile") or "").strip().lower()
+    if not profile and config.get("proxy_url") and config.get("proxy_session_ports"):
+        profile = "proxy_sessions"
+    if profile != "proxy_sessions":
+        raise ValueError("formal collection requires the paid proxy_sessions profile")
     base = urlsplit(str(config.get("proxy_url") or "").strip())
     if (
         base.scheme not in {"http", "https"} or not base.hostname or base.username or base.password
@@ -58,9 +73,7 @@ def _validated_shape(config: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"proxy_session_ports must contain 1 to {MAX_PROXY_SESSION_PORTS} approved ports")
     if len(set(ports)) != len(ports) or any(value < 1 or value > 65535 for value in ports):
         raise ValueError("proxy_session_ports must be unique valid ports")
-    max_asins = int(config.get("proxy_session_max_asins") or 3)
-    if max_asins < 1 or max_asins > 5:
-        raise ValueError("proxy_session_max_asins must be between 1 and 5")
+    max_asins = effective_slot_budget(config)
     target_url = validate_canary_target_url(str(config.get("proxy_canary_url") or DEFAULT_CANARY_URL))
     target = urlsplit(target_url)
     target_host = (target.hostname or "").lower().rstrip(".")
@@ -93,6 +106,7 @@ def capacity_config_hash(config: dict[str, Any]) -> str:
         "proxy_path": shape["base"].path,
         "ports": shape["ports"],
         "max_asins": shape["max_asins"],
+        "product_session_scope": str(config.get("proxy_product_session_scope") or "per_asin"),
         "target_url": shape["target_url"],
         "timeout_seconds": shape["timeout_seconds"],
         "credential_generation": credential_generation,
@@ -416,6 +430,7 @@ __all__ = [
     "capacity_config_hash",
     "capacity_resource_slot_ids",
     "execute_canary",
+    "effective_slot_budget",
     "probe_proxy_slot",
     "run_proxy_canary",
     "validate_canary_target_url",

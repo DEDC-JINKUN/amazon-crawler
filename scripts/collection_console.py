@@ -70,6 +70,58 @@ def latest_proxy_session_pool(rows: list[dict[str, Any]]) -> dict[str, Any] | No
     return None
 
 
+def latest_capacity_authorization(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for row in reversed(rows):
+        value = _context_value(row).get("capacity_authorization")
+        if isinstance(value, dict):
+            return dict(value)
+    return None
+
+
+def project_proxy_connectivity(authorization: dict[str, Any] | None) -> dict[str, Any]:
+    authorization = authorization or {}
+    snapshot = authorization.get("capacity_snapshot") or {}
+    return {
+        "egress_profile": "proxy_sessions" if authorization else None,
+        "canary_operation_id": authorization.get("canary_operation_id"),
+        "canary_status": snapshot.get("canary_status"),
+        "tested_slots": snapshot.get("tested_slots"),
+        "available_slots": snapshot.get("available_slots"),
+        "unique_egress_count": snapshot.get("unique_egress_count"),
+        "slot_capacity": snapshot.get("slot_capacity"),
+        "gate_status": snapshot.get("capacity_gate_status"),
+        "gate_reason": snapshot.get("capacity_gate_reason"),
+        "fact_expires_at": authorization.get("fact_expires_at"),
+    }
+
+
+def project_amazon_business(
+    items: list[dict[str, Any]],
+    *,
+    requested_actions: int | None,
+    recorded_actions: int | None,
+    unrequested_actions: int | None,
+) -> dict[str, Any]:
+    counts = {
+        outcome: sum(item.get("outcome") == outcome for item in items)
+        for outcome in ("completed", "variant_redirect", "failed", "blocked")
+    }
+    access_control_rate = (
+        round(counts["blocked"] / recorded_actions, 4)
+        if recorded_actions not in {None, 0} else None
+    )
+    return {
+        "requested_actions": requested_actions,
+        "recorded_actions": recorded_actions,
+        "completed_actions": counts["completed"],
+        "variant_redirect_actions": counts["variant_redirect"],
+        "failed_actions": counts["failed"],
+        "blocked_actions": counts["blocked"],
+        "unrequested_actions": unrequested_actions,
+        "access_control_rate": access_control_rate,
+    }
+
+
 def _explicit_sibling_identity(row: dict[str, Any]) -> bool:
     identity = _context_value(row).get("identity") or {}
     if not isinstance(identity, dict):
@@ -868,6 +920,9 @@ class PostgresConsoleRepository:
         traffic_summary = summarize_traffic(evidence_rows)
         context_quality_counts = summarize_context_quality(evidence_rows)
         proxy_session_pool = latest_proxy_session_pool(evidence_rows)
+        authorization = (ledger or {}).get("capacity_authorization_json") or latest_capacity_authorization(evidence_rows)
+        requested_actions = int((ledger or {}).get("requested_actions") or len(evidence_rows))
+        recorded_actions = len(evidence_rows)
         duration_projection = project_run_durations(ledger, started_at, ended_at)
         effective_started_at = duration_projection.pop("effective_started_at")
         effective_finished_at = duration_projection.pop("effective_finished_at")
@@ -877,13 +932,20 @@ class PostgresConsoleRepository:
             "run_id": run_id,
             "started_at": effective_started_at,
             "ended_at": effective_finished_at,
-            "requested_actions": int((ledger or {}).get("requested_actions") or len(evidence_rows)),
-            "recorded_actions": len(evidence_rows),
+            "requested_actions": requested_actions,
+            "recorded_actions": recorded_actions,
             "inferred_actions": sum(1 for item in items if item["attribution"] == "time_window_inference"),
             "known_transfer_bytes": sum(int(item.get("transfer_bytes") or 0) for item in evidence_rows),
             "traffic": traffic_summary,
             "context_quality_counts": context_quality_counts,
             "proxy_session_pool": proxy_session_pool,
+            "proxy_connectivity": project_proxy_connectivity(authorization),
+            "amazon_business": project_amazon_business(
+                items,
+                requested_actions=requested_actions,
+                recorded_actions=recorded_actions,
+                unrequested_actions=(proxy_session_pool or {}).get("unrequested_count"),
+            ),
             "outcome_counts": {
                 outcome: sum(item["outcome"] == outcome for item in items)
                 for outcome in ("completed", "variant_redirect", "failed", "blocked")
@@ -891,7 +953,7 @@ class PostgresConsoleRepository:
             "items": items,
             "terminal_status": (ledger or {}).get("status") or ("legacy_blocked" if any(item["outcome"] == "blocked" for item in items) else "legacy_complete"),
             "termination_reason": (ledger or {}).get("termination_reason"),
-            "capacity_authorization": (ledger or {}).get("capacity_authorization_json"),
+            "capacity_authorization": authorization,
             **duration_projection,
             "warning": "time_window_inference is legacy fallback; new network failures write run evidence",
         }

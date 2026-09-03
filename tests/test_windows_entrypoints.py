@@ -268,6 +268,7 @@ def test_agent_service_runtime_fingerprint_covers_worker_pool_api_storage_and_co
         "proxy_session_pool.py",
         "proxy_canary.py",
         "proxy_capacity_gate.py",
+        "proxy_connect_relay.py",
         "collection_api.py",
         "collection_storage.py",
         "postgres_worker_storage.py",

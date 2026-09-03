@@ -57,6 +57,7 @@ def config(**overrides):
         "proxy_session_consecutive_block_limit": 2,
         "proxy_session_window_size": 20,
         "proxy_session_window_block_limit": 3,
+        "proxy_product_session_scope": "bounded",
     }
     value.update(overrides)
     return value
@@ -316,7 +317,7 @@ def test_postgres_runner_reports_circuit_and_nineteen_unrequested_actions():
     assert len(storage.saved) == 1
     assert context["circuit_open_reason"] == "consecutive_new_sessions_blocked"
     assert context["unrequested_count"] == 19
-    assert len(context["attempts"]) == 1
+    assert len(context["attempts"]) == 2
 
 
 def test_blocked_attempt_is_preserved_when_retry_session_has_network_error():
@@ -379,6 +380,106 @@ def test_captcha_then_inner_retry_transport_failure_retires_slot_before_next_asi
     assert sessions[1]["quarantine_reason"] == "transport_error"
     assert sessions[1]["network_error"] == 1
     assert sessions[2]["health"] == "healthy"
+
+
+def test_breadth_products_rotate_per_asin_while_same_asin_review_pages_stay_sticky():
+    module = load_pool()
+    adapters = []
+
+    def factory(slot_config):
+        adapter = FakeAdapter(slot_config, [("ok", 200, 10)] * 4)
+        adapters.append(adapter)
+        return adapter
+
+    pool = module.ProxySessionPool(
+        config(proxy_product_session_scope="per_asin", proxy_session_max_asins=3),
+        factory, classifier,
+    )
+    pool.begin_run("run-strategy", "tenant-a", "worker-a")
+    pool.fetch("https://www.amazon.com/dp/B000000001")
+    pool.fetch("https://www.amazon.com/dp/B000000002")
+    pool.fetch("https://www.amazon.com/product-reviews/B000000002?pageNumber=1")
+    pool.fetch("https://www.amazon.com/product-reviews/B000000002?pageNumber=2")
+
+    assert len(adapters) == 2
+    sessions = pool.evidence_context()["sessions"]
+    strategy = pool.evidence_context()
+    assert strategy["product_session_scope"] == "per_asin"
+    assert strategy["product_asins_per_session"] == 1
+    assert strategy["review_session_scope"] == "same_asin_sticky"
+    assert [item["asin_count"] for item in sessions] == [1, 1]
+    assert sessions[0]["health"] == "exhausted"
+    assert sessions[1]["request_count"] == 3
+
+
+def test_two_http_captchas_allow_one_stock_firefox_verification_on_last_proxy_session():
+    worker = load_worker()
+    pool_module = load_pool()
+    adapters = []
+
+    class BrowserCapableAdapter(FakeAdapter):
+        def fetch_browser(self, _url, **_kwargs):
+            self.source_type = "selenium_dom"
+            self.last_transfer_bytes = None
+            self.last_browser_traffic = {"main_document_bytes": None, "subresource_bytes": None}
+            self.browser_attempted = True
+            return product_html("B000000001"), 200
+
+        def commit_browser_context(self, *_args, **_kwargs): return 0
+
+    def factory(slot_config):
+        adapter = BrowserCapableAdapter(slot_config, [("captcha", 200, 25)])
+        adapters.append(adapter)
+        return adapter
+
+    pool = pool_module.ProxySessionPool(config(), factory, worker.classify_block)
+    storage = ProductStorage()
+    worker_config = {
+        **worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None, "context": {},
+        "proxy_firefox_verify_on_access_block": True,
+    }
+
+    assert worker._run_postgres_actions_impl(
+        storage, pool, worker_config, limit=1, run_id="run-firefox-verify", worker_id="worker-a"
+    ) == 1
+
+    assert "product" in storage.saved[0]
+    pool_context = storage.saved[0]["evidence"]["context_json"]["proxy_session_pool"]
+    sessions = pool_context["sessions"]
+    assert len(pool_context["attempts"]) == 2
+    assert all("body" not in attempt and attempt["content_hash"] for attempt in pool_context["attempts"])
+    assert [item["firefox_verification"] for item in sessions] == [None, "succeeded"]
+    assert sessions[0]["health"] == "quarantined"
+    assert sessions[1]["health"] == "healthy"
+
+
+def test_firefox_challenge_after_two_http_captchas_keeps_circuit_open_and_stops():
+    worker = load_worker()
+    pool_module = load_pool()
+
+    class ChallengedAdapter(FakeAdapter):
+        def fetch_browser(self, _url, **_kwargs):
+            self.source_type = "selenium_dom"
+            self.last_transfer_bytes = None
+            self.last_browser_traffic = {"main_document_bytes": None, "subresource_bytes": None}
+            self.browser_attempted = True
+            return "captcha", 200
+
+    pool = pool_module.ProxySessionPool(config(), lambda slot_config: ChallengedAdapter(slot_config, [("captcha", 200, 25)]), worker.classify_block)
+    storage = ProductStorage(count=2)
+    worker_config = {
+        **worker.DEFAULTS, "max_actions_per_run": 2, "raw_html_dir": None, "context": {},
+        "proxy_firefox_verify_on_access_block": True,
+    }
+
+    assert worker._run_postgres_actions_impl(
+        storage, pool, worker_config, limit=2, run_id="run-firefox-blocked", worker_id="worker-a"
+    ) == -1
+    assert len(storage.saved) == 1
+    context = storage.saved[0]["evidence"]["context_json"]["proxy_session_pool"]
+    assert context["sessions"][1]["firefox_verification"] == "failed"
+    assert context["circuit_open_reason"] == "consecutive_new_sessions_blocked"
+    assert context["unrequested_count"] == 1
 
 
 def test_transport_failure_with_unknown_bytes_does_not_become_zero():

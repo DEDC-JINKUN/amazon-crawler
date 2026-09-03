@@ -24,11 +24,13 @@ def load_module():
 
 def config(**overrides):
     value = {
+        "egress_profile": "proxy_sessions",
         "proxy_url": "http://proxy.example:10000",
         "proxy_username_env": "PROXY_USER",
         "proxy_password_env": "PROXY_PASS",
         "proxy_session_ports": [10000, 10001, 10002],
         "proxy_session_max_asins": 3,
+        "proxy_product_session_scope": "bounded",
         "proxy_canary_url": "https://api.ipify.org?format=json",
         "proxy_canary_timeout_seconds": 5,
         "proxy_credential_generation": "test-generation-1",
@@ -78,6 +80,28 @@ def test_all_sessions_succeed_and_public_result_contains_only_redacted_capacity(
     rendered = repr(result)
     for forbidden in ("203.0.113", "10000", "10001", "10002", "private-user", "private-pass", "proxy.example"):
         assert forbidden not in rendered
+
+
+def test_per_asin_product_scope_counts_one_action_per_unique_proxy_session(monkeypatch):
+    module = load_module()
+    cfg = config(proxy_product_session_scope="per_asin")
+    monkeypatch.setenv("PROXY_USER", "fixture-user")
+    monkeypatch.setenv("PROXY_PASS", "fixture-pass")
+    identities = iter(["203.0.113.10", "203.0.113.11", "203.0.113.12"])
+
+    result = module.run_proxy_canary(
+        cfg, requested_actions=3,
+        probe_slot=lambda **_kwargs: {
+            "ok": True, "egress_ip": next(identities), "http_status": 200,
+            "latency_ms": 10.0, "auth_status": "succeeded", "connect_tls_status": "succeeded",
+            "error_class": None,
+        },
+    )
+
+    assert result["slot_budget"] == 1
+    assert result["required_slots"] == 3
+    assert result["slot_capacity"] == 3
+    assert result["capacity_gate_status"] == "allowed"
 
 
 def test_partial_port_failure_can_allow_only_the_capacity_proven_by_unique_egress(monkeypatch):
@@ -425,11 +449,13 @@ def test_execute_canary_records_the_same_sanitized_fact_in_operation_ledger(tmp_
     config_path = tmp_path / "worker.toml"
     config_path.write_text(
         "[worker]\n"
+        "egress_profile='proxy_sessions'\n"
         "proxy_url='http://proxy.example:10000'\n"
         "proxy_username_env='PROXY_USER'\n"
         "proxy_password_env='PROXY_PASS'\n"
         "proxy_session_ports=[10000]\n"
-        "proxy_session_max_asins=3\n",
+        "proxy_session_max_asins=3\n"
+        "proxy_product_session_scope='bounded'\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("PROXY_USER", "private-user")

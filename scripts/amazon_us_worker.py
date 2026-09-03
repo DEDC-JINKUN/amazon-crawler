@@ -18,6 +18,7 @@ import inspect
 import json
 import math
 import os
+import random
 import re
 import sqlite3
 import sys
@@ -49,6 +50,12 @@ try:
 except ModuleNotFoundError:
     sys.path.insert(0, str(ROOT / "scripts"))
     from proxy_tunnel_auth import ProxyTunnelAuthHTTPSHandler
+
+try:
+    from proxy_connect_relay import ProxyConnectRelay
+except ModuleNotFoundError:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from proxy_connect_relay import ProxyConnectRelay
 
 try:
     from proxy_capacity_gate import ProxyCapacityGateDenied, acquire_capacity_reservation, capacity_config_hash, reservation_slots_for
@@ -107,6 +114,7 @@ DEFAULTS: dict[str, Any] = {
     "geckodriver_path": "/snap/bin/geckodriver",
     "firefox_binary": "",
     "marketplace": "US",
+    "egress_profile": "proxy_sessions",
     "proxy_url": "",
     "proxy_username_env": "",
     "proxy_password_env": "",
@@ -117,6 +125,10 @@ DEFAULTS: dict[str, Any] = {
     "proxy_session_consecutive_block_limit": 2,
     "proxy_session_window_size": 20,
     "proxy_session_window_block_limit": 3,
+    "firefox_proxy_auth_mode": "disabled",
+    "proxy_product_session_scope": "per_asin",
+    "proxy_request_jitter_seconds": 0.0,
+    "proxy_firefox_verify_on_access_block": True,
     "proxy_canary_url": "https://api.ipify.org?format=json",
     "proxy_canary_timeout_seconds": 15,
     "proxy_canary_max_age_seconds": 3600,
@@ -247,6 +259,7 @@ class AdapterFetchError(RuntimeError):
 
 class FallbackReason(str, Enum):
     HTTP_TRANSPORT_ERROR = "http_transport_error"
+    ACCESS_CONTROL_VERIFICATION = "access_control_verification"
     MISSING_ASIN = "missing_asin"
     MISSING_CANONICAL_URL = "missing_canonical_url"
     MISSING_TITLE = "missing_title"
@@ -1376,6 +1389,28 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     config["max_attempts"] = max(1, int(config["max_attempts"]))
     config["max_actions_per_run"] = max(1, int(config["max_actions_per_run"]))
     config["review_page_limit"] = max(0, int(config["review_page_limit"]))
+    if "firefox_proxy_auth_mode" not in worker and config.get("proxy_username_env") and config.get("proxy_password_env"):
+        config["firefox_proxy_auth_mode"] = "loopback_connect_relay"
+    if "proxy_request_jitter_seconds" not in worker and config.get("proxy_url"):
+        config["proxy_request_jitter_seconds"] = 1.0
+    if str(config.get("firefox_proxy_auth_mode") or "") not in {"disabled", "loopback_connect_relay"}:
+        raise ValueError("firefox_proxy_auth_mode must be disabled or loopback_connect_relay")
+    if str(config.get("proxy_product_session_scope") or "") not in {"per_asin", "bounded"}:
+        raise ValueError("proxy_product_session_scope must be per_asin or bounded")
+    jitter = float(config.get("proxy_request_jitter_seconds") or 0.0)
+    if jitter < 0 or jitter > 5:
+        raise ValueError("proxy_request_jitter_seconds must be between 0 and 5")
+    config["proxy_request_jitter_seconds"] = jitter
+    if config.get("proxy_url"):
+        for rate_name in ("global_requests_per_second", "egress_requests_per_second"):
+            rate = float(config.get(rate_name) or 0.0)
+            if rate <= 0:
+                rate = 0.2
+            if rate > 0.2:
+                raise ValueError(f"{rate_name} must be between 0 and 0.2 for paid proxy production")
+            config[rate_name] = rate
+        if int(config.get("rate_burst") or 1) != 1:
+            raise ValueError("rate_burst must be 1 for paid proxy production")
     config["proxy_credential_generation"] = os.environ.get("AMAZON_PROXY_CREDENTIAL_GENERATION", "").strip()
     return config
 
@@ -1906,6 +1941,11 @@ class HttpFirstAdapter:
         self.user_agent = str(self.config.get("user_agent") or "")
         self._opener_handlers: list[Any] = []
         self._proxy_auth_configured = False
+        self._proxy_upstream_url = ""
+        self._proxy_username_env = ""
+        self._proxy_password_env = ""
+        self._proxy_relay: ProxyConnectRelay | None = None
+        self._proxy_request_jitter_seconds = max(0.0, min(float(self.config.get("proxy_request_jitter_seconds") or 0.0), 5.0))
         proxy_url = str(self.config.get("proxy_url") or "").strip()
         if proxy_url:
             proxy_parts = urlsplit(proxy_url)
@@ -1915,6 +1955,7 @@ class HttpFirstAdapter:
                 raise ValueError("proxy credentials must not be embedded in proxy_url")
             proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
             self._opener_handlers.append(proxy_handler)
+            self._proxy_upstream_url = proxy_url
             username_env = str(self.config.get("proxy_username_env") or "").strip()
             password_env = str(self.config.get("proxy_password_env") or "").strip()
             if bool(username_env) != bool(password_env):
@@ -1926,6 +1967,8 @@ class HttpFirstAdapter:
                     raise ValueError("proxy credential environment variables are not both populated")
                 self._opener_handlers.append(ProxyTunnelAuthHTTPSHandler(username, password))
                 self._proxy_auth_configured = True
+                self._proxy_username_env = username_env
+                self._proxy_password_env = password_env
         self.cookie_session = RunScopedAmazonCookieSession(
             "adapter-instance", str(self.config.get("tenant_id") or "local"), str(self.config.get("worker_id") or "worker")
         )
@@ -1998,6 +2041,10 @@ class HttpFirstAdapter:
         last_error: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             self.limiter.acquire(self.egress_id)
+            if self._proxy_upstream_url and self._proxy_request_jitter_seconds:
+                delay = random.uniform(0.0, self._proxy_request_jitter_seconds)
+                if delay > 0:
+                    time.sleep(delay)
             request = urllib.request.Request(
                 url,
                 headers={
@@ -2068,11 +2115,34 @@ class HttpFirstAdapter:
         if not isinstance(fallback_reason, FallbackReason):
             raise TypeError("fallback reason must be a FallbackReason")
         self.last_fallback_reason = fallback_reason.value
+        browser_config = getattr(self, "config", DEFAULTS)
         if getattr(self, "_proxy_auth_configured", False):
-            raise AdapterFetchError("Firefox proxy authentication is unavailable")
+            if str(self.config.get("firefox_proxy_auth_mode") or "disabled") != "loopback_connect_relay":
+                raise AdapterFetchError("Firefox proxy authentication is unavailable")
+            if self._proxy_relay is None:
+                username = os.environ.get(self._proxy_username_env, "")
+                password = os.environ.get(self._proxy_password_env, "")
+                if not username or not password:
+                    raise AdapterFetchError("Firefox proxy authentication relay is unavailable")
+                try:
+                    self._proxy_relay = ProxyConnectRelay(
+                        self._proxy_upstream_url, username, password,
+                        connect_timeout_seconds=self.timeout,
+                    )
+                    self._proxy_relay.start()
+                except (OSError, RuntimeError, ValueError):
+                    self._proxy_relay = None
+                    raise AdapterFetchError("Firefox proxy authentication relay is unavailable") from None
+            relay_host, relay_port = self._proxy_relay.address
+            browser_config = {
+                **self.config,
+                "proxy_url": f"http://{relay_host}:{relay_port}",
+                "proxy_username_env": "",
+                "proxy_password_env": "",
+            }
         if self.browser is None:
             try:
-                self.browser = SeleniumFirefoxAdapter(self.config)
+                self.browser = SeleniumFirefoxAdapter(browser_config)
             except (RuntimeError, OSError) as exc:
                 raise AdapterFetchError(str(exc)) from exc
         browser = self.browser
@@ -2096,6 +2166,9 @@ class HttpFirstAdapter:
         self.last_browser_context_confirmed = bool(self.browser._context_initialized)
         return body, status
 
+    def proxy_relay_summary(self) -> dict[str, Any] | None:
+        return self._proxy_relay.audit_summary() if self._proxy_relay is not None else None
+
     def commit_browser_context(self, run_id: str, *, context_confirmed: bool) -> int:
         if self.browser is None or not context_confirmed or not self.browser._context_initialized:
             return 0
@@ -2118,7 +2191,12 @@ class HttpFirstAdapter:
             if self.browser is not None:
                 self.browser.close()
         finally:
-            self.cookie_session.close()
+            try:
+                if self._proxy_relay is not None:
+                    self._proxy_relay.close()
+            finally:
+                self._proxy_relay = None
+                self.cookie_session.close()
 
 
 def _canonical_asin(value: Any) -> str:
@@ -2208,6 +2286,8 @@ def _fetch_browser_once(
     asin: str,
     ledger: BrowserFallbackLedger,
 ) -> tuple[str, int | None] | None:
+    if bool(getattr(adapter, "browser_attempted", False)):
+        return None
     if not hasattr(adapter, "fetch_browser") or not ledger.claim(run_id, asin, fallback_reason):
         return None
     setattr(adapter, "last_fallback_reason", fallback_reason.value)
@@ -2269,6 +2349,13 @@ def _evidence_context(base_context: dict[str, Any] | None, adapter: Any) -> dict
     pool_context = getattr(adapter, "evidence_context", None)
     if callable(pool_context):
         context["proxy_session_pool"] = pool_context()
+    relay_summary = getattr(adapter, "proxy_relay_summary", None)
+    if callable(relay_summary):
+        relay = relay_summary()
+        if relay:
+            context["proxy_connect_relay"] = relay
+    if config_profile := str(getattr(adapter, "config", {}).get("egress_profile") or "proxy_sessions"):
+        context["egress_profile"] = config_profile
     return context
 
 
@@ -2300,6 +2387,13 @@ def _proxy_circuit_reason(adapter: Any) -> str | None:
 def _proxy_capacity_available(adapter: Any) -> bool:
     method = getattr(adapter, "can_claim_new_asin", None)
     return bool(method()) if callable(method) else True
+
+
+def _browser_fallback_available(adapter: Any) -> bool:
+    method = getattr(adapter, "browser_fallback_available", None)
+    if callable(method):
+        return bool(method())
+    return callable(getattr(adapter, "fetch_browser", None))
 
 
 def _record_proxy_outcome(adapter: Any, outcome: str) -> None:
@@ -2982,6 +3076,26 @@ def _run_postgres_actions_impl(
                 continue
             body, response_status = browser_result
         reason = classify_block(response_status, body)
+        if (
+            reason
+            and bool(config.get("proxy_firefox_verify_on_access_block", True))
+            and callable(getattr(adapter, "evidence_context", None))
+            and _browser_fallback_available(adapter)
+        ):
+            try:
+                browser_result = _fetch_browser_once(
+                    adapter, task["url"], fallback_reason=FallbackReason.ACCESS_CONTROL_VERIFICATION,
+                    run_id=run_id, asin=task["asin"], ledger=fallback_ledger,
+                )
+            except AdapterFetchError:
+                browser_result = None
+            if browser_result is not None:
+                browser_body, browser_status = browser_result
+                browser_reason = classify_block(browser_status, browser_body)
+                browser_verification = getattr(adapter, "record_browser_verification", None)
+                if callable(browser_verification):
+                    browser_verification(browser_reason is None)
+                body, response_status, reason = browser_body, browser_status, browser_reason
         data = parse_product_html(body, task["url"]) if not reason else {"asin": "", "canonical_url": ""}
         core_reason = _core_fallback_reason(data, task["asin"]) if not reason else None
         if core_reason is not None:

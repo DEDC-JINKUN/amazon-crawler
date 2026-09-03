@@ -20,11 +20,13 @@ def load(name: str):
 
 def config(**overrides):
     value = {
+        "egress_profile": "proxy_sessions",
         "proxy_url": "http://proxy.example:10000",
         "proxy_username_env": "PROXY_USER",
         "proxy_password_env": "PROXY_PASS",
         "proxy_session_ports": [10000, 10001, 10002],
         "proxy_session_max_asins": 3,
+        "proxy_product_session_scope": "bounded",
         "proxy_canary_url": "https://api.ipify.org?format=json",
         "proxy_canary_max_age_seconds": 3600,
         "proxy_credential_generation": "test-generation-1",
@@ -71,6 +73,19 @@ def test_capacity_gate_allows_only_fresh_matching_evidence_covering_the_requeste
     }
 
 
+def test_per_asin_product_scope_requires_one_unique_proxy_session_per_action():
+    module = load("proxy_capacity_gate")
+    cfg = config(proxy_product_session_scope="per_asin")
+    per_asin_fact = fact(
+        module, cfg, requested_capacity=3, required_slots=3, slot_budget=1, slot_capacity=3,
+    )
+
+    decision = module.evaluate_capacity_fact(per_asin_fact, cfg, requested_actions=3)
+
+    assert decision["status"] == "allowed"
+    assert decision["required_slots"] == 3
+
+
 @pytest.mark.parametrize(
     ("overrides", "requested", "reason"),
     [
@@ -98,6 +113,18 @@ def test_capacity_gate_denies_missing_fact_and_missing_session_configuration():
 
     assert module.evaluate_capacity_fact(None, config(), requested_actions=3)["reason"] == "capacity_evidence_missing"
     assert module.evaluate_capacity_fact(None, config(proxy_session_ports=[]), requested_actions=3)["reason"] == "proxy_sessions_not_configured"
+
+
+def test_formal_gate_rejects_direct_vpn_profile_without_paid_proxy_sessions():
+    module = load("proxy_capacity_gate")
+    decision = module.evaluate_capacity_fact(
+        None,
+        config(egress_profile="direct_vpn", proxy_url="", proxy_session_ports=[]),
+        requested_actions=3,
+    )
+
+    assert decision["status"] == "denied"
+    assert decision["reason"] == "proxy_sessions_not_configured"
 
 
 def test_production_runner_denies_before_adapter_begin_claim_or_amazon_fetch():

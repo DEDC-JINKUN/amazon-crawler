@@ -42,3 +42,14 @@ def test_read_raw_html_supports_new_gzip_and_legacy_plain_html():
         legacy.write_text("legacy", encoding="utf-8")
         assert store.read_raw_html(root / relative) == "new"
         assert store.read_raw_html(legacy) == "legacy"
+
+
+def test_read_raw_html_preserves_crlf_bytes_for_content_hash_verification():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        raw = "<html>\r\n<body>line</body>\r\n</html>"
+        relative = store.LocalRawHtmlStore(root).put("run", "B00RCPDCQU", raw)
+        restored = store.read_raw_html(root / relative)
+
+        assert restored == raw
+        assert hashlib.sha256(restored.encode("utf-8")).hexdigest() == Path(relative).name.split(".")[0]

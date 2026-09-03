@@ -60,6 +60,8 @@ console      http://127.0.0.1:8770
 
 所有任务固定使用 `--product-only`、`--once` 和PostgreSQL事实源。遇CAPTCHA/403/429/WAF时，Worker仍按配置立即停止；控制脚本不会自动换IP、重排blocked或继续剩余任务。
 
+生产出口仅接受付费`proxy_sessions`配置；VPN/直连只可作人工诊断对照，不能通过正式Gate。商品广度的有效容量按每ASIN一个会话计算，评论分页对同一ASIN保持粘滞。HTTP challenge最多进行一次新代理会话重试和一次stock Firefox验证；Firefox通过临时loopback CONNECT认证中继走同一获准代理，中继不解密TLS且不保存凭据。Firefox仍返回challenge时立即隔离并熔断。
+
 ## 运行产物
 
 每次run写入：

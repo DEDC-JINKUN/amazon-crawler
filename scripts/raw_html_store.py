@@ -21,9 +21,9 @@ class RawHtmlStore(Protocol):
 def read_raw_html(path: Path) -> str:
     """Read both new gzip evidence and pre-existing plain HTML evidence."""
     if path.name.endswith(".gz"):
-        with gzip.open(path, "rt", encoding="utf-8", errors="replace") as handle:
-            return handle.read()
-    return path.read_text(encoding="utf-8", errors="replace")
+        with gzip.open(path, "rb") as handle:
+            return handle.read().decode("utf-8", errors="replace")
+    return path.read_bytes().decode("utf-8", errors="replace")
 
 
 class LocalRawHtmlStore:

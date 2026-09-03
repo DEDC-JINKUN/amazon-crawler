@@ -492,8 +492,59 @@ class HttpAdapterTests(unittest.TestCase):
         self.assertIn("<title>ok</title>", body)
         self.assertEqual(opener.timeout, 7)
         self.assertEqual(opener.request.get_header("User-agent"), "Agent/test-agent")
+        self.assertEqual(opener.request.get_header("Accept"), "text/html,application/xhtml+xml")
+        self.assertEqual(opener.request.get_header("Accept-encoding"), "gzip")
+        self.assertEqual(opener.request.get_header("Connection"), "close")
         self.assertEqual(adapter.source_type, "http_html")
         adapter.close()
+
+    def test_loaded_paid_proxy_config_defaults_to_per_asin_relay_and_bounded_jitter(self):
+        worker = load_worker()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "worker.toml"
+            path.write_text(
+                "[worker]\n"
+                "agent_name='amazon-us-worker'\n"
+                "user_agent='Mozilla/5.0 Agent/amazon-us-worker'\n"
+                "proxy_url='http://proxy.example:10000'\n"
+                "proxy_username_env='PROXY_USER'\n"
+                "proxy_password_env='PROXY_PASS'\n"
+                "proxy_session_ports=[10000,10001,10002]\n"
+                "egress_requests_per_second=0.2\n"
+                "rate_burst=1\n",
+                encoding="utf-8",
+            )
+
+            config = worker.load_config(path)
+
+        assert config["egress_profile"] == "proxy_sessions"
+        assert config["proxy_product_session_scope"] == "per_asin"
+        assert config["firefox_proxy_auth_mode"] == "loopback_connect_relay"
+        assert config["proxy_request_jitter_seconds"] == 1.0
+        assert config["global_requests_per_second"] == 0.2
+        assert config["egress_requests_per_second"] == 0.2
+        assert config["rate_burst"] == 1
+
+    def test_loaded_paid_proxy_config_rejects_rates_above_serial_safety_limit(self):
+        worker = load_worker()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "worker.toml"
+            path.write_text(
+                "[worker]\n"
+                "agent_name='amazon-us-worker'\n"
+                "user_agent='Mozilla/5.0 Agent/amazon-us-worker'\n"
+                "proxy_url='http://proxy.example:10000'\n"
+                "proxy_username_env='PROXY_USER'\n"
+                "proxy_password_env='PROXY_PASS'\n"
+                "proxy_session_ports=[10000]\n"
+                "global_requests_per_second=0.21\n"
+                "egress_requests_per_second=0.2\n"
+                "rate_burst=1\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "must be between 0 and 0.2"):
+                worker.load_config(path)
 
     def test_http_first_can_build_an_explicit_proxy_opener(self):
         worker = load_worker()
@@ -546,6 +597,77 @@ class HttpAdapterTests(unittest.TestCase):
                 )
         firefox.assert_not_called()
         adapter.close()
+
+    def test_proxy_request_jitter_is_bounded_and_applied_before_each_http_request(self):
+        worker = load_worker()
+        opener = _Opener(_Response(b"<html><title>ok</title></html>"))
+        sleeps = []
+        config = {
+            **worker.DEFAULTS, "proxy_url": "http://127.0.0.1:8080",
+            "user_agent": "Agent/test-agent", "proxy_request_jitter_seconds": 2.0,
+        }
+        with patch.object(worker.urllib.request, "build_opener", return_value=opener), \
+             patch.object(worker.random, "uniform", return_value=1.25), \
+             patch.object(worker.time, "sleep", side_effect=sleeps.append):
+            adapter = worker.HttpFirstAdapter(config)
+            adapter.fetch("https://www.amazon.com/dp/B00RCPDCQU")
+            adapter.close()
+
+        assert sleeps == [1.25]
+
+    def test_authenticated_proxy_browser_uses_ephemeral_loopback_connect_relay_without_persisting_credentials(self):
+        worker = load_worker()
+        created = {}
+
+        class Relay:
+            address = ("127.0.0.1", 43123)
+
+            def __init__(self, upstream, username, password, **_kwargs):
+                created["upstream"] = upstream
+                created["credential_pair"] = (username, password)
+                created["relay"] = self
+                self.started = False
+                self.closed = False
+
+            def start(self): self.started = True
+            def close(self): self.closed = True
+            def audit_summary(self):
+                return {"transport": "loopback_connect_relay", "status": "running", "accepted_connections": 1,
+                        "rejected_connections": 0, "active_connections": 0}
+
+        class Browser:
+            def __init__(self, config):
+                created["browser_config"] = config
+                self.last_traffic = {}
+                self._context_initialized = False
+
+            def fetch(self, url): return "<html>verified</html>", 200
+            def close(self): return None
+
+        with patch.dict(worker.os.environ, {"PROXY_USER": "fixture-user", "PROXY_PASS": "fixture-pass"}, clear=False), \
+             patch.object(worker, "ProxyConnectRelay", Relay, create=True), \
+             patch.object(worker, "SeleniumFirefoxAdapter", Browser):
+            adapter = worker.HttpFirstAdapter({
+                **worker.DEFAULTS,
+                "proxy_url": "http://127.0.0.1:8080",
+                "proxy_username_env": "PROXY_USER",
+                "proxy_password_env": "PROXY_PASS",
+                "firefox_proxy_auth_mode": "loopback_connect_relay",
+            })
+            body, status = adapter.fetch_browser(
+                "https://www.amazon.com/dp/B00RCPDCQU",
+                fallback_reason=worker.FallbackReason.CONTEXT_MISMATCH,
+                run_id="run-a", asin="B00RCPDCQU",
+            )
+            summary = adapter.proxy_relay_summary()
+            adapter.close()
+
+        assert (body, status) == ("<html>verified</html>", 200)
+        assert created["relay"].started is True and created["relay"].closed is True
+        assert created["browser_config"]["proxy_url"] == "http://127.0.0.1:43123"
+        assert created["browser_config"]["proxy_username_env"] == ""
+        assert created["browser_config"]["proxy_password_env"] == ""
+        assert "fixture-user" not in repr(summary) and "fixture-pass" not in repr(summary)
 
 
 if __name__ == "__main__":

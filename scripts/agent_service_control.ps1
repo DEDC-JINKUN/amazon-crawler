@@ -17,6 +17,7 @@ $workerScript = Join-Path $PSScriptRoot 'amazon_us_worker.py'
 $proxyPoolScript = Join-Path $PSScriptRoot 'proxy_session_pool.py'
 $proxyCanaryScript = Join-Path $PSScriptRoot 'proxy_canary.py'
 $proxyCapacityGateScript = Join-Path $PSScriptRoot 'proxy_capacity_gate.py'
+$proxyConnectRelayScript = Join-Path $PSScriptRoot 'proxy_connect_relay.py'
 $collectionApiScript = Join-Path $PSScriptRoot 'collection_api.py'
 $collectionStorageScript = Join-Path $PSScriptRoot 'collection_storage.py'
 $postgresStorageScript = Join-Path $PSScriptRoot 'postgres_worker_storage.py'
@@ -68,6 +69,7 @@ function Get-AgentRuntimeFingerprint {
         $proxyPoolScript,
         $proxyCanaryScript,
         $proxyCapacityGateScript,
+        $proxyConnectRelayScript,
         $collectionApiScript,
         $collectionStorageScript,
         $postgresStorageScript,

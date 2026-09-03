@@ -240,16 +240,19 @@ def test_controller_projection_preserves_real_partial_blocked_counts_and_unknown
     command = rf"""
 $tokens=$null; $errors=$null
 $ast=[System.Management.Automation.Language.Parser]::ParseFile('{script_path}',[ref]$tokens,[ref]$errors)
-foreach($name in @('Test-ProbeRunQuality','Test-RunCompleteness')) {{
+foreach($name in @('Test-ProbeRunQuality','Test-RunCompleteness','Get-RunObservability')) {{
   $fn=$ast.FindAll({{param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name}},$true) | Select-Object -First 1
-  Invoke-Expression $fn.Extent.Text
+  if($null -ne $fn) {{ Invoke-Expression $fn.Extent.Text }}
 }}
 $items=@()
 1..6 | ForEach-Object {{ $items += [pscustomobject]@{{outcome='completed';attribution='evidence'}} }}
 1..3 | ForEach-Object {{ $items += [pscustomobject]@{{outcome='variant_redirect';attribution='evidence'}} }}
 $items += [pscustomobject]@{{outcome='blocked';attribution='evidence'}}
 $run=[pscustomobject]@{{requested_actions=20;recorded_actions=10;inferred_actions=0;items=$items;traffic=@{{known_bytes=4049923}};proxy_session_pool=[pscustomobject]@{{unrequested_count=10}}}}
-[ordered]@{{quality=(Test-ProbeRunQuality $run 20);complete=(Test-RunCompleteness $run 20);unknown=(Test-ProbeRunQuality $null 20)}} | ConvertTo-Json -Depth 8 -Compress
+$quality=Test-ProbeRunQuality $run 20
+$capacity=[pscustomobject]@{{canary_operation_id='op-canary-1';fact_expires_at='2026-09-03T10:00:00Z';capacity_snapshot=[pscustomobject]@{{canary_status='partial';tested_slots=34;available_slots=32;unique_egress_count=32;slot_capacity=32;capacity_gate_status='allowed';capacity_gate_reason='capacity_sufficient'}}}}
+$observability=if(Get-Command Get-RunObservability -ErrorAction SilentlyContinue) {{ Get-RunObservability $capacity $quality 20 }} else {{ $null }}
+[ordered]@{{quality=$quality;complete=(Test-RunCompleteness $run 20);unknown=(Test-ProbeRunQuality $null 20);observability=$observability}} | ConvertTo-Json -Depth 8 -Compress
 """
     result = subprocess.run(
         [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
@@ -269,6 +272,11 @@ $run=[pscustomobject]@{{requested_actions=20;recorded_actions=10;inferred_action
         assert payload["unknown"][field] is None
     assert payload["unknown"]["quality_gate_ok"] is False
     assert payload["unknown"]["quality_gate_reason"] == "run_projection_unavailable"
+    assert payload["observability"]["proxy_connectivity"]["available_slots"] == 32
+    assert payload["observability"]["proxy_connectivity"]["gate_status"] == "allowed"
+    assert payload["observability"]["amazon_business"]["requested_actions"] == 20
+    assert payload["observability"]["amazon_business"]["recorded_actions"] == 10
+    assert payload["observability"]["amazon_business"]["access_control_rate"] == 0.1
 
 
 def test_probe_quality_function_requires_complete_successful_evidence():

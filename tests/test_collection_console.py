@@ -529,6 +529,38 @@ def test_console_tooltips_explain_all_operational_terms_accessibly():
     assert html.count("aria-label=") >= 12
 
 
+def test_console_projects_proxy_connectivity_separately_from_amazon_business_outcomes():
+    module = load_module()
+    authorization = {
+        "canary_operation_id": "op-canary-1", "fact_expires_at": "2026-09-03T10:00:00Z",
+        "capacity_snapshot": {
+            "canary_status": "partial", "tested_slots": 34, "available_slots": 32,
+            "unique_egress_count": 32, "slot_capacity": 32,
+            "capacity_gate_status": "allowed", "capacity_gate_reason": "capacity_sufficient",
+        },
+    }
+    items = (
+        [{"outcome": "completed"}] * 6
+        + [{"outcome": "variant_redirect"}] * 3
+        + [{"outcome": "blocked"}]
+    )
+
+    connectivity = module.project_proxy_connectivity(authorization)
+    business = module.project_amazon_business(items, requested_actions=20, recorded_actions=10, unrequested_actions=10)
+
+    assert connectivity == {
+        "egress_profile": "proxy_sessions", "canary_operation_id": "op-canary-1",
+        "canary_status": "partial", "tested_slots": 34, "available_slots": 32,
+        "unique_egress_count": 32, "slot_capacity": 32, "gate_status": "allowed",
+        "gate_reason": "capacity_sufficient", "fact_expires_at": "2026-09-03T10:00:00Z",
+    }
+    assert business == {
+        "requested_actions": 20, "recorded_actions": 10, "completed_actions": 6,
+        "variant_redirect_actions": 3, "failed_actions": 0, "blocked_actions": 1,
+        "unrequested_actions": 10, "access_control_rate": 0.1,
+    }
+
+
 def test_variant_redirect_requires_explicit_same_parent_sibling_evidence():
     module = load_module()
     explicit = {

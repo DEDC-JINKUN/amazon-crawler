@@ -14,10 +14,10 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from proxy_canary import capacity_config_hash, capacity_resource_slot_ids
+    from proxy_canary import capacity_config_hash, capacity_resource_slot_ids, effective_slot_budget
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from proxy_canary import capacity_config_hash, capacity_resource_slot_ids
+    from proxy_canary import capacity_config_hash, capacity_resource_slot_ids, effective_slot_budget
 
 
 class ProxyCapacityGateDenied(RuntimeError):
@@ -34,7 +34,7 @@ def reservation_slots_for(config: dict[str, Any], requested_actions: int) -> int
     if requested_actions < 1:
         raise ValueError("requested_actions must be positive")
     planned_slots = len(list(config.get("proxy_session_ports") or []))
-    slot_budget = int(config.get("proxy_session_max_asins") or 3)
+    slot_budget = effective_slot_budget(config)
     if planned_slots < 1 or slot_budget < 1:
         raise ValueError("proxy session capacity is invalid")
     required_slots = math.ceil(requested_actions / slot_budget)
@@ -71,7 +71,10 @@ def evaluate_capacity_fact(
 ) -> dict[str, Any]:
     if requested_actions < 1:
         raise ValueError("requested_actions must be positive")
-    budget = int(config.get("proxy_session_max_asins") or 3)
+    try:
+        budget = effective_slot_budget(config)
+    except (TypeError, ValueError):
+        budget = 0
     required = math.ceil(requested_actions / budget) if budget > 0 else requested_actions
     if not list(config.get("proxy_session_ports") or []):
         return _decision("denied", "proxy_sessions_not_configured", requested_actions, required, None, None)
@@ -183,7 +186,10 @@ def acquire_capacity_reservation(
     reservation_id = str(reservation_id or f"capacity-{uuid.uuid4().hex}")
     if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", reservation_id):
         raise ValueError("invalid capacity reservation id")
-    slot_budget = int(config.get("proxy_session_max_asins") or 3)
+    try:
+        slot_budget = effective_slot_budget(config)
+    except (TypeError, ValueError):
+        raise ProxyCapacityGateDenied("capacity_configuration_invalid") from None
     if slot_budget < 1 or slot_budget > 5:
         raise ProxyCapacityGateDenied("capacity_configuration_invalid")
     required_slots = math.ceil(requested_actions / slot_budget) if slot_budget > 0 else requested_actions

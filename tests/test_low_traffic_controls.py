@@ -634,6 +634,35 @@ def test_fallback_reason_is_enumerated_and_deduplicated_by_run_asin_reason():
         ledger.claim("run-1", "B00RCPDCQU", "free-form-reason")
 
 
+def test_one_action_allows_at_most_one_firefox_navigation_across_fallback_reasons():
+    worker = load_worker()
+    calls = []
+
+    class Adapter:
+        browser_attempted = False
+
+        def fetch_browser(self, url, **kwargs):
+            calls.append((url, kwargs["fallback_reason"]))
+            return "<html>browser</html>", 200
+
+    adapter = Adapter()
+    ledger = worker.BrowserFallbackLedger()
+    first = worker._fetch_browser_once(
+        adapter, "https://www.amazon.com/dp/B00RCPDCQU",
+        fallback_reason=worker.FallbackReason.ACCESS_CONTROL_VERIFICATION,
+        run_id="run-1", asin="B00RCPDCQU", ledger=ledger,
+    )
+    second = worker._fetch_browser_once(
+        adapter, "https://www.amazon.com/dp/B00RCPDCQU",
+        fallback_reason=worker.FallbackReason.CONTEXT_MISMATCH,
+        run_id="run-1", asin="B00RCPDCQU", ledger=ledger,
+    )
+
+    assert first == ("<html>browser</html>", 200)
+    assert second is None
+    assert len(calls) == 1
+
+
 class OneProductStorage:
     tenant_id = "tenant-a"
 

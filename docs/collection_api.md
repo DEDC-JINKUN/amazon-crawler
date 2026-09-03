@@ -153,7 +153,7 @@ Content-Type: application/json
 {"requested_by":"agent-name","reason":"price_is_stale"}
 ```
 
-HTTP线程只负责登记队列并返回 `202 Accepted`；真实采集由后台受控 Worker 执行。同一次 Agent 批量的最多5条由一个 runner run 领取，保证会话预算和跨ASIN主动换槽不会被逐条重置。Agent Worker 与普通 Worker 共用同一 adapter factory；配置 `proxy_session_ports` 时两者均经过 `ProxySessionPool`。若 Worker 达到有界会话池熔断或因内部错误进入 `blocked/failed`，`/readyz` 返回 503，服务拒绝新增刷新，避免任务无限积压。
+HTTP线程只负责登记队列并返回 `202 Accepted`；真实采集由后台受控 Worker 执行。同一次 Agent 批量的最多5条由一个 runner run 领取，保证会话预算和跨ASIN主动换槽不会被逐条重置。Agent Worker 与普通 Worker 共用同一 adapter factory、付费代理Gate和stock Firefox CONNECT认证中继；商品广度每ASIN新会话，同ASIN评论分页粘滞。若 Worker 达到有界会话池熔断或因内部错误进入 `blocked/failed`，`/readyz` 返回 503，服务拒绝新增刷新，避免任务无限积压。
 
 若Worker在领取后发生未预期异常，服务按固定脱敏原因将该Worker仍持有的refresh job置为`failed`，释放对应item lease并写状态历史；异常正文不进入API响应或健康状态。Agent客户端只允许HTTP loopback基址，拒绝外部主机、URL内嵌凭据、路径、query、fragment和HTTP重定向，避免scoped key外发。
 

@@ -29,6 +29,7 @@ class _Slot:
         self.bytes = 0
         self.latency_ms = 0
         self.quarantine_reason: str | None = None
+        self.firefox_verification: str | None = None
         self.action_generation = -1
 
     def public(self, mode: str) -> dict[str, Any]:
@@ -46,6 +47,7 @@ class _Slot:
             "bytes": self.bytes,
             "latency_ms": self.latency_ms,
             "quarantine_reason": self.quarantine_reason,
+            "firefox_verification": self.firefox_verification,
         }
 
 
@@ -77,6 +79,9 @@ class ProxySessionPool:
         self._session_ids = [f"session-{index + 1:02d}" for index in range(len(self._all_ports))]
         self._capacity_validator: Callable[[], Any] | None = None
         self.max_asins = self._bounded(config, "proxy_session_max_asins", 3, 1, 5)
+        self.product_scope = str(config.get("proxy_product_session_scope") or "per_asin").strip().lower()
+        if self.product_scope not in {"per_asin", "bounded"}:
+            raise ValueError("proxy_product_session_scope must be per_asin or bounded")
         self.retry_per_asin = self._bounded(config, "proxy_session_retry_per_asin", 1, 0, 1)
         self.consecutive_limit = self._bounded(config, "proxy_session_consecutive_block_limit", 2, 1, 5)
         self.window_size = self._bounded(config, "proxy_session_window_size", 20, 1, 100)
@@ -202,7 +207,12 @@ class ProxySessionPool:
 
     def _select(self, asin: str, *, force_new: bool = False) -> _Slot:
         slot = self._current
-        if force_new or slot is None or slot.health != "healthy" or (asin not in slot.asins and len(slot.asins) >= self.max_asins):
+        different_asin = slot is not None and asin not in slot.asins
+        if (
+            force_new or slot is None or slot.health != "healthy"
+            or (different_asin and self.product_scope == "per_asin")
+            or (different_asin and len(slot.asins) >= self.max_asins)
+        ):
             if slot is not None:
                 if slot.health == "healthy" and not force_new:
                     slot.health = "exhausted"
@@ -215,7 +225,6 @@ class ProxySessionPool:
     def _quarantine(self, slot: _Slot, reason: str) -> None:
         slot.health = "quarantined"
         slot.quarantine_reason = reason
-        slot.adapter.close()
         self._consecutive_blocks += 1
         self._block_window.append(True)
         if self._consecutive_blocks >= self.consecutive_limit:
@@ -262,13 +271,7 @@ class ProxySessionPool:
             slot.blocked += 1
             self._quarantine(slot, block_reason)
             retries = self._retries.get(asin, 0)
-            if self.circuit_open_reason or retries >= self.retry_per_asin:
-                return body, status
-            if self._next_port >= len(self._ports):
-                self.circuit_open_reason = "session_pool_exhausted"
-                return body, status
-            self._retries[asin] = retries + 1
-            self._intermediate.append({
+            attempt = {
                 "session_id": slot.session_id,
                 "mode": self.mode,
                 "url": url,
@@ -277,8 +280,32 @@ class ProxySessionPool:
                 "latency_ms": latency,
                 "block_reason": block_reason,
                 "body": body,
-            })
+            }
+            if self.circuit_open_reason or retries >= self.retry_per_asin:
+                self._intermediate.append(attempt)
+                return body, status
+            if self._next_port >= len(self._ports):
+                self.circuit_open_reason = "session_pool_exhausted"
+                self._intermediate.append(attempt)
+                return body, status
+            self._retries[asin] = retries + 1
+            self._intermediate.append(attempt)
             force_new = True
+
+    def record_browser_verification(self, succeeded: bool) -> None:
+        if self._current is None:
+            return
+        self._current.firefox_verification = "succeeded" if succeeded else "failed"
+        if not succeeded:
+            return
+        self._current.health = "healthy"
+        self._current.quarantine_reason = None
+        self._consecutive_blocks = 0
+        if self._block_window and self._block_window[-1]:
+            self._block_window.pop()
+            self._block_window.append(False)
+        if sum(self._block_window) < self.window_block_limit:
+            self.circuit_open_reason = None
 
     def record_outcome(self, outcome: str) -> None:
         if self._current is None or self._current.health == "quarantined":
@@ -299,6 +326,9 @@ class ProxySessionPool:
     def evidence_context(self) -> dict[str, Any]:
         return {
             "mode": self.mode,
+            "product_session_scope": self.product_scope,
+            "product_asins_per_session": 1 if self.product_scope == "per_asin" else self.max_asins,
+            "review_session_scope": "same_asin_sticky",
             "current_session_id": self._current.session_id if self._current else None,
             "circuit_open_reason": self.circuit_open_reason,
             "unrequested_count": self.unrequested_count,
@@ -326,6 +356,9 @@ class ProxySessionPool:
         if self._current is None:
             raise ProxyCircuitOpen("proxy session is not initialized")
         return self._current.adapter.fetch_browser(*args, **kwargs)
+
+    def browser_fallback_available(self) -> bool:
+        return self._current is not None and callable(getattr(self._current.adapter, "fetch_browser", None))
 
     def commit_browser_context(self, *args: Any, **kwargs: Any) -> Any:
         if self._current is None:

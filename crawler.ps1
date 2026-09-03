@@ -548,6 +548,39 @@ function Test-RunCompleteness([object]$Run, [int]$ExpectedActions) {
     }
 }
 
+function Get-RunObservability([object]$CapacityAuthorization, [object]$Quality, [int]$RequestedActions) {
+    $snapshot = if ($null -eq $CapacityAuthorization) { $null } else { $CapacityAuthorization.capacity_snapshot }
+    $recorded = $Quality.recorded_actions
+    $blocked = $Quality.blocked_actions
+    $accessControlRate = if ($null -ne $recorded -and [int]$recorded -gt 0 -and $null -ne $blocked) {
+        [Math]::Round(([double]$blocked / [double]$recorded), 4)
+    } else { $null }
+    return [pscustomobject][ordered]@{
+        proxy_connectivity = [ordered]@{
+            egress_profile = 'proxy_sessions'
+            canary_operation_id = if ($null -eq $CapacityAuthorization) { $null } else { $CapacityAuthorization.canary_operation_id }
+            canary_status = if ($null -eq $snapshot) { $null } else { $snapshot.canary_status }
+            tested_slots = if ($null -eq $snapshot) { $null } else { $snapshot.tested_slots }
+            available_slots = if ($null -eq $snapshot) { $null } else { $snapshot.available_slots }
+            unique_egress_count = if ($null -eq $snapshot) { $null } else { $snapshot.unique_egress_count }
+            slot_capacity = if ($null -eq $snapshot) { $null } else { $snapshot.slot_capacity }
+            gate_status = if ($null -eq $snapshot) { $null } else { $snapshot.capacity_gate_status }
+            gate_reason = if ($null -eq $snapshot) { $null } else { $snapshot.capacity_gate_reason }
+            fact_expires_at = if ($null -eq $CapacityAuthorization) { $null } else { $CapacityAuthorization.fact_expires_at }
+        }
+        amazon_business = [ordered]@{
+            requested_actions = $RequestedActions
+            recorded_actions = $Quality.recorded_actions
+            completed_actions = $Quality.completed_actions
+            variant_redirect_actions = $Quality.variant_redirect_actions
+            failed_actions = $Quality.failed_actions
+            blocked_actions = $Quality.blocked_actions
+            unrequested_actions = $Quality.unrequested_actions
+            access_control_rate = $accessControlRate
+        }
+    }
+}
+
 function Start-EgressOperation([string]$ConfigValue) {
     $stamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
     $entropy = [Guid]::NewGuid().ToString('N').Substring(0, 10)
@@ -823,6 +856,7 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             $controllerExitCode = 4
         }
         $finishedAt = [DateTime]::UtcNow
+        $observability = Get-RunObservability $capacityAuthorization $quality $ActionLimit
         Write-Host ("Final: {0}/{1} completed={2} variant={3} failed={4} blocked={5} unrequested={6} inferred={7} quality_gate_ok={8}" -f $quality.recorded_actions,$ActionLimit,$quality.completed_actions,$quality.variant_redirect_actions,$quality.failed_actions,$quality.blocked_actions,$quality.unrequested_actions,$quality.inferred_actions,$qualityGateOk)
         if ($runVerificationReason) { Write-Host "Final verification: $runVerificationReason" }
         $receipt = [ordered]@{
@@ -845,6 +879,8 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             traffic = $quality.traffic
             proxy_session_pool = if ($null -ne $finalSnapshot.run) { $finalSnapshot.run.proxy_session_pool } else { $null }
             capacity_authorization = $capacityAuthorization
+            proxy_connectivity = $observability.proxy_connectivity
+            amazon_business = $observability.amazon_business
             quality_gate_ok = $qualityGateOk
             completion_gate_ok = $completionGateOk
             run_verification_reason = $runVerificationReason
@@ -911,6 +947,8 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             traffic = $null
             proxy_session_pool = $null
             capacity_authorization = $capacityAuthorization
+            proxy_connectivity = (Get-RunObservability $capacityAuthorization (Test-ProbeRunQuality $null $ActionLimit) $ActionLimit).proxy_connectivity
+            amazon_business = (Get-RunObservability $capacityAuthorization (Test-ProbeRunQuality $null $ActionLimit) $ActionLimit).amazon_business
             quality_gate_ok = $false
             run_verification_reason = $failureReason
             termination_reason = $failureReason

@@ -11,7 +11,7 @@
 
 ## 当前开发边界
 
-- HTTP 优先获取公开 HTML；页面字段不足时再使用 Firefox 渲染。
+- HTTP 优先获取公开 HTML；页面字段不足时再使用 stock Firefox 渲染。付费HTTP CONNECT代理认证通过仅监听loopback的临时中继完成：中继只给上游CONNECT增加认证并转发不透明TLS字节，不做MITM、指纹伪装或验证码处理。
 - PostgreSQL 是正式任务、断点、结果和历史的唯一事实源；SQLite 仅保留给历史回放和离线回归测试。
 - 原始 HTML、采集时间、来源和解析器版本必须可追溯。
 - PostgreSQL 使用租约和 `FOR UPDATE SKIP LOCKED` 支持多个 Worker 安全领取；当前 Windows 默认仍以单 Worker 小批量运行。
@@ -57,7 +57,7 @@ Windows本机推荐使用统一控制入口：
 .\crawler.ps1 stop
 ```
 
-`canary` 对每个计划会话只访问一次精确允许的非Amazon HTTPS端点，禁止重定向，验证认证、CONNECT/TLS、延迟和本次运行内的出口去重；真实IP只在内存比较。DPAPI vault每次轮换生成非秘密credential generation，使旧canary立即不匹配。`probe/run/reviews`先原子预约未被其他消费者占用的槽，并把canary operation、事实/过期时间、reservation和容量快照写入operation、collection run、receipt、evidence及Console。超过100个action仍需显式 `-ConfirmLargeBatch`。
+`canary` 对每个计划会话只访问一次精确允许的非Amazon HTTPS端点，禁止重定向，验证认证、CONNECT/TLS、延迟和本次运行内的出口去重；真实IP只在内存比较。它只证明代理连通容量，不证明Amazon业务成功。DPAPI vault每次轮换生成非秘密credential generation，使旧canary立即不匹配。`probe/run/reviews`先原子预约未被其他消费者占用的槽，并把canary operation、事实/过期时间、reservation和容量快照写入operation、collection run、receipt、evidence及Console；Console/receipt另列Amazon completed/variant/failed/blocked及访问控制率。超过100个action仍需显式 `-ConfirmLargeBatch`。
 
 ```powershell
 $env:AMAZON_US_POSTGRES_DSN = 'host=127.0.0.1 port=5432 dbname=postgres user=postgres'
@@ -123,7 +123,7 @@ Agent 调用使用 DPAPI 派生的 scoped key，子进程不会得到 PostgreSQL
 
 带 `-Wait` 的刷新会等待 PostgreSQL job 进入 `completed`、`failed` 或 `cancelled`，并返回最新商品快照、evidence、请求到终态的耗时及可用流量字段。等待客户端每次只轮询一个job、请求间隔至少1.1秒，并遵守本机API的`Retry-After`；CLI自行以UTF-8输出JSON，不依赖Windows当前代码页。
 
-同一次 Agent 批量的最多5条由一个runner run处理，但容量按当时实际可领取的1至5条计算。`agent-health`分别报告`processed_actions`、`succeeded_actions`、`failed_actions`与`blocked_actions`；兼容字段`completed_actions`只等于成功数，不再表示已处理数。Agent与普通Worker共享原子容量reservation：每次claim和创建新槽前复核TTL，只使用分配给自己的生产槽和最多两个有界替换槽；耗尽内部HTTP重试的transport-bad槽会隔离，下一ASIN不得复用。拒绝事实持久化并通过`/readyz`与Console解释。单ASIN因访问控制最多换会话一次，不做无限轮换、验证码处理、登录或个人Cookie读取。
+同一次 Agent 批量的最多5条由一个runner run处理，但容量按当时实际可领取的1至5条计算。商品广度默认每ASIN一个代理会话；同一ASIN的评论分页在该会话内粘滞。`agent-health`分别报告`processed_actions`、`succeeded_actions`、`failed_actions`与`blocked_actions`；兼容字段`completed_actions`只等于成功数，不再表示已处理数。Agent与普通Worker共享原子容量reservation：每次claim和创建新槽前复核TTL，只使用分配给自己的生产槽和最多两个有界替换槽；耗尽内部HTTP重试的transport-bad槽会隔离，下一ASIN不得复用。HTTP challenge最多换一个出口，并只允许一次stock Firefox验证；Firefox仍为challenge即熔断。拒绝事实持久化并通过`/readyz`与Console解释，不做无限轮换、验证码填写/破解、登录或个人Cookie读取。
 
 本机只读运营控制台：
 

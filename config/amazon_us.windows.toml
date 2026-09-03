@@ -11,6 +11,7 @@ agent_name = "amazon-us-worker"
 user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0 Agent/amazon-us-worker"
 geckodriver_path = "tools/geckodriver-v0.37.1/geckodriver.exe"
 firefox_binary = "C:/Program Files/Mozilla Firefox/firefox.exe"
+egress_profile = "proxy_sessions"
 # Production-only approved egress; keep empty for this POC.
 proxy_url = ""
 # Optional: names of environment variables containing proxy credentials.
@@ -21,6 +22,7 @@ proxy_password_env = ""
 proxy_session_ports = []
 proxy_session_mode = "sticky"
 proxy_session_max_asins = 3
+proxy_product_session_scope = "per_asin"
 proxy_session_retry_per_asin = 1
 proxy_session_consecutive_block_limit = 2
 proxy_session_window_size = 20
@@ -28,6 +30,9 @@ proxy_session_window_block_limit = 3
 proxy_canary_url = "https://api.ipify.org?format=json"
 proxy_canary_timeout_seconds = 15
 proxy_canary_max_age_seconds = 3600
+firefox_proxy_auth_mode = "loopback_connect_relay"
+proxy_firefox_verify_on_access_block = true
+proxy_request_jitter_seconds = 1.0
 # Set these only after an approved live-collection budget is agreed.
 global_requests_per_second = 0
 egress_requests_per_second = 0
