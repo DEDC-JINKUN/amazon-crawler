@@ -2,11 +2,27 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "operation_ledger.py"
+
+
+def test_operation_ledger_cli_help_builds_capacity_authorization_parser():
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--help"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--capacity-authorization" in result.stdout
+    assert "NameError" not in result.stderr
 
 
 def load_module():
