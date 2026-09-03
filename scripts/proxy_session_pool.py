@@ -27,6 +27,7 @@ class _Slot:
         self.blocked = 0
         self.network_error = 0
         self.bytes = 0
+        self.unknown_byte_count = 0
         self.latency_ms = 0
         self.quarantine_reason: str | None = None
         self.firefox_verification: str | None = None
@@ -46,6 +47,7 @@ class _Slot:
             "blocked": self.blocked,
             "network_error": self.network_error,
             "bytes": self.bytes,
+            "unknown_byte_count": self.unknown_byte_count,
             "latency_ms": self.latency_ms,
             "quarantine_reason": self.quarantine_reason,
             "firefox_verification": self.firefox_verification,
@@ -109,6 +111,7 @@ class ProxySessionPool:
         self.circuit_open_reason: str | None = None
         self.unrequested_count = 0
         self._action_http_bytes = 0
+        self._action_http_unknown_count = 0
         self._last_transfer_bytes: int | None = None
         self._browser_traffic_parts: list[dict[str, Any]] = []
 
@@ -141,6 +144,7 @@ class ProxySessionPool:
         self.circuit_open_reason = None
         self.unrequested_count = 0
         self._action_http_bytes = 0
+        self._action_http_unknown_count = 0
         self._last_transfer_bytes = None
         self._browser_traffic_parts = []
 
@@ -183,12 +187,15 @@ class ProxySessionPool:
         self._action_generation += 1
         self._persisted_attempts = []
         self._action_http_bytes = 0
+        self._action_http_unknown_count = 0
         self._last_transfer_bytes = None
         self._browser_traffic_parts = []
         for name in ("last_fallback_reason", "action_fallback_reasons"):
             self.__dict__.pop(name, None)
         self.browser_attempted = False
         self.browser_attempt_count = 0
+        self.last_cookie_bridge_status = None
+        self.last_cookie_bridge_error_code = None
         if self._current is not None:
             self._prepare(self._current)
 
@@ -264,16 +271,33 @@ class ProxySessionPool:
         except Exception:
             raw_byte_count = getattr(slot.adapter, "last_transfer_bytes", None)
             byte_count = None if raw_byte_count is None else max(0, int(raw_byte_count))
+            latency = max(0, round((self._clock() - started) * 1000))
             self._last_transfer_bytes = byte_count
             if byte_count is not None:
                 self._action_http_bytes += byte_count
+            else:
+                self._action_http_unknown_count += 1
             slot.request_count += 1
             slot.network_error += 1
             if byte_count is not None:
                 slot.bytes += byte_count
-            slot.latency_ms += max(0, round((self._clock() - started) * 1000))
+            else:
+                slot.unknown_byte_count += 1
+            slot.latency_ms += latency
             slot.health = "quarantined"
             slot.quarantine_reason = "transport_error"
+            slot.adapter.close()
+            self._intermediate.append({
+                "session_id": slot.session_id,
+                "mode": "http",
+                "url": url,
+                "http_status": None,
+                "transfer_bytes": byte_count,
+                "latency_ms": latency,
+                "block_reason": None,
+                "error_code": "transport_error",
+                "body": "",
+            })
             raise
         latency = max(0, round((self._clock() - started) * 1000))
         byte_count = max(0, int(getattr(slot.adapter, "last_transfer_bytes", 0) or 0))
@@ -298,8 +322,7 @@ class ProxySessionPool:
             })
         return body, status
 
-    def rotate_after_browser_failure(self, url: str) -> bool:
-        """Select one final recovery slot explicitly after same-slot Firefox fails."""
+    def _rotate_after_quarantine(self, url: str) -> bool:
         if self.circuit_open_reason:
             return False
         asin = self._asin(url)
@@ -314,6 +337,14 @@ class ProxySessionPool:
         self._retries[asin] = retries + 1
         self._select(asin, force_new=True)
         return True
+
+    def rotate_after_browser_failure(self, url: str) -> bool:
+        """Select one final recovery slot explicitly after same-slot Firefox fails."""
+        return self._rotate_after_quarantine(url)
+
+    def rotate_after_transport_failure(self, url: str) -> bool:
+        """Select one final HTTP-first recovery slot after a terminal transport error."""
+        return self._rotate_after_quarantine(url)
 
     def preserve_browser_attempt(
         self,
@@ -432,8 +463,12 @@ class ProxySessionPool:
                 pass
 
     @property
-    def action_http_transfer_bytes(self) -> int:
-        return self._action_http_bytes
+    def action_http_transfer_bytes(self) -> int | None:
+        return None if self._action_http_unknown_count else self._action_http_bytes
+
+    @property
+    def action_http_transfer_unknown_count(self) -> int:
+        return self._action_http_unknown_count
 
     @property
     def last_transfer_bytes(self) -> int | None:

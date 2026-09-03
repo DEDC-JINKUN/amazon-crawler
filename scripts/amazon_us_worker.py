@@ -2322,8 +2322,11 @@ def _evidence_context(base_context: dict[str, Any] | None, adapter: Any) -> dict
     context = dict(base_context or {})
     traffic: dict[str, Any] = {}
     action_http_transfer = getattr(adapter, "action_http_transfer_bytes", None)
-    if action_http_transfer is not None:
+    action_http_unknown = int(getattr(adapter, "action_http_transfer_unknown_count", 0) or 0)
+    if action_http_transfer is not None or action_http_unknown:
         traffic["http_compressed_response_bytes"] = action_http_transfer
+        if action_http_unknown:
+            traffic["http_compressed_response_unknown_count"] = action_http_unknown
     elif getattr(adapter, "source_type", "http_html") == "http_html":
         transfer = getattr(adapter, "last_transfer_bytes", None)
         traffic["http_compressed_response_bytes"] = transfer
@@ -3057,17 +3060,28 @@ def _run_postgres_actions_impl(
             _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, task["asin"])
         except AdapterFetchError as exc:
             _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, task["asin"])
-            postal_code = str((config.get("context") or {}).get("postal_code") or "").strip()
             browser_result = None
-            if postal_code:
+            transport_recovered = False
+            rotate_transport = getattr(adapter, "rotate_after_transport_failure", None)
+            if callable(rotate_transport) and rotate_transport(task["url"]):
                 try:
-                    browser_result = _fetch_browser_once(
-                        adapter, task["url"], fallback_reason=FallbackReason.HTTP_TRANSPORT_ERROR,
-                        run_id=run_id, asin=task["asin"], ledger=fallback_ledger,
-                    )
-                except AdapterFetchError:
-                    browser_result = None
-            if browser_result is None:
+                    body, response_status = adapter.fetch(task["url"])
+                    _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, task["asin"])
+                    transport_recovered = True
+                except AdapterFetchError as retry_exc:
+                    exc = retry_exc
+                    _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, task["asin"])
+            elif not callable(rotate_transport):
+                postal_code = str((config.get("context") or {}).get("postal_code") or "").strip()
+                if postal_code:
+                    try:
+                        browser_result = _fetch_browser_once(
+                            adapter, task["url"], fallback_reason=FallbackReason.HTTP_TRANSPORT_ERROR,
+                            run_id=run_id, asin=task["asin"], ledger=fallback_ledger,
+                        )
+                    except AdapterFetchError:
+                        browser_result = None
+            if not transport_recovered and browser_result is None:
                 _record_proxy_outcome(adapter, "failed", task["asin"])
                 failure_transfer_bytes = (
                     None
@@ -3079,12 +3093,14 @@ def _run_postgres_actions_impl(
                     raw_html_dir, _evidence_context(config.get("context"), adapter), failure_transfer_bytes,
                     error_code="fetch_error",
                 )
-                storage.save_failure(task=task, reason="fetch_error", error=str(exc), evidence=evidence)
+                failure_error = "fetch_error" if callable(rotate_transport) else str(exc)
+                storage.save_failure(task=task, reason="fetch_error", error=failure_error, evidence=evidence)
                 if refresh_job_id:
                     storage.finish_refresh_request(refresh_job_id, "failed")
                 actions += 1
                 continue
-            body, response_status = browser_result
+            if browser_result is not None:
+                body, response_status = browser_result
         reason = classify_block(response_status, body)
         if (
             reason

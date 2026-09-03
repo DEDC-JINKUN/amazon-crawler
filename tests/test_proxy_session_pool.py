@@ -860,6 +860,196 @@ def test_transport_failure_with_unknown_bytes_does_not_become_zero():
     assert pool.last_transfer_bytes is None
 
 
+def test_transport_failure_rotates_once_then_second_slot_http_succeeds_with_first_attempt_audited():
+    worker = load_worker()
+    pool_module = load_pool()
+    adapters = []
+
+    class TransportAwareAdapter(FakeAdapter):
+        browser_calls = 0
+
+        def fetch_browser(self, _url, **_kwargs):
+            self.browser_calls += 1
+            raise worker.AdapterFetchError("browser must not run on transport-bad slot")
+
+    def factory(slot_config):
+        scripted = (
+            [worker.AdapterFetchError("TLS handshake failed")]
+            if not adapters else [(product_html("B000000001"), 200, 100)]
+        )
+        adapter = TransportAwareAdapter(slot_config, scripted)
+        if not adapters:
+            adapter.last_transfer_bytes = None
+        adapters.append(adapter)
+        return adapter
+
+    pool = pool_module.ProxySessionPool(config(), factory, worker.classify_block)
+    storage = ProductStorage(count=1)
+    worker_config = {**worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None, "context": {}}
+
+    assert worker._run_postgres_actions_impl(
+        storage, pool, worker_config, limit=1, run_id="run-transport-retry", worker_id="worker-a"
+    ) == 1
+    assert "product" in storage.saved[0]
+    context = storage.saved[0]["evidence"]["context_json"]["proxy_session_pool"]
+    traffic = storage.saved[0]["evidence"]["context_json"]["traffic"]
+    assert len(adapters) == 2
+    assert adapters[0].closed is True
+    assert adapters[0].browser_calls == 0
+    assert [item["request_count"] for item in context["sessions"]] == [1, 1]
+    assert context["sessions"][0]["quarantine_reason"] == "transport_error"
+    assert context["sessions"][0]["unknown_byte_count"] == 1
+    assert traffic["http_compressed_response_bytes"] is None
+    assert traffic["http_compressed_response_unknown_count"] == 1
+    assert context["attempts"] == [{
+        "session_id": "session-01", "mode": "http", "http_status": None,
+        "transfer_bytes": None, "latency_ms": context["attempts"][0]["latency_ms"],
+        "block_reason": None, "error_code": "transport_error",
+        "content_hash": None, "raw_html_path": None,
+    }]
+
+
+def test_transport_retry_slot_http_captcha_uses_same_slot_firefox_and_succeeds():
+    worker = load_worker()
+    pool_module = load_pool()
+    adapters = []
+
+    class TransportThenBrowserAdapter(FakeAdapter):
+        def fetch_browser(self, _url, **_kwargs):
+            self.source_type = "selenium_dom"
+            self.last_transfer_bytes = None
+            self.last_browser_traffic = {"main_document_bytes": None, "subresource_bytes": None}
+            return product_html("B000000001"), 200
+
+        def commit_browser_context(self, *_args, **_kwargs): return 0
+
+    def factory(slot_config):
+        scripted = [worker.AdapterFetchError("TLS handshake failed")] if not adapters else [("captcha", 200, 25)]
+        adapter = TransportThenBrowserAdapter(slot_config, scripted)
+        if not adapters:
+            adapter.last_transfer_bytes = None
+        adapters.append(adapter)
+        return adapter
+
+    pool = pool_module.ProxySessionPool(config(), factory, worker.classify_block)
+    storage = ProductStorage(count=1)
+    worker_config = {
+        **worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None, "context": {},
+        "proxy_firefox_verify_on_access_block": True,
+    }
+
+    assert worker._run_postgres_actions_impl(
+        storage, pool, worker_config, limit=1, run_id="run-transport-browser", worker_id="worker-a"
+    ) == 1
+    assert "product" in storage.saved[0]
+    context = storage.saved[0]["evidence"]["context_json"]["proxy_session_pool"]
+    assert [attempt.get("error_code") for attempt in context["attempts"]] == ["transport_error", None]
+    assert [item["firefox_attempts"] for item in context["sessions"]] == [0, 1]
+    assert context["sessions"][0]["health"] == "quarantined"
+    assert context["sessions"][1]["health"] == "healthy"
+
+
+def test_transport_retry_slot_captcha_and_firefox_challenge_record_one_blocked_action_without_third_slot():
+    worker = load_worker()
+    pool_module = load_pool()
+    adapters = []
+
+    class TransportThenChallengeAdapter(FakeAdapter):
+        def fetch_browser(self, _url, **_kwargs):
+            self.source_type = "selenium_dom"
+            self.last_transfer_bytes = None
+            self.last_browser_traffic = {"main_document_bytes": None, "subresource_bytes": None}
+            return "captcha", 200
+
+    def factory(slot_config):
+        scripted = [worker.AdapterFetchError("TLS handshake failed")] if not adapters else [("captcha", 200, 25)]
+        adapter = TransportThenChallengeAdapter(slot_config, scripted)
+        if not adapters:
+            adapter.last_transfer_bytes = None
+        adapters.append(adapter)
+        return adapter
+
+    pool = pool_module.ProxySessionPool(
+        config(proxy_session_ports=[10000, 10001, 10002]), factory, worker.classify_block,
+    )
+    storage = ProductStorage(count=1)
+    worker_config = {
+        **worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None, "context": {},
+        "proxy_firefox_verify_on_access_block": True,
+    }
+
+    assert worker._run_postgres_actions_impl(
+        storage, pool, worker_config, limit=1, run_id="run-transport-blocked", worker_id="worker-a"
+    ) == 1
+    assert len(storage.saved) == 1
+    assert storage.saved[0]["reason"] == "captcha"
+    context = storage.saved[0]["evidence"]["context_json"]["proxy_session_pool"]
+    assert len(adapters) == 2
+    assert [attempt["mode"] for attempt in context["attempts"]] == ["http", "http", "firefox"]
+    assert [item["firefox_attempts"] for item in context["sessions"]] == [0, 1]
+    assert all(adapter.closed for adapter in adapters)
+    assert pool.circuit_open_reason is None
+
+
+def test_two_transport_failures_record_one_fetch_error_then_next_asin_uses_new_slot():
+    worker = load_worker()
+    pool_module = load_pool()
+    adapters = []
+
+    def factory(slot_config):
+        index = len(adapters)
+        scripted = (
+            [worker.AdapterFetchError("TLS handshake failed")]
+            if index < 2 else [(product_html("B000000001"), 200, 100)]
+        )
+        adapter = FakeAdapter(slot_config, scripted)
+        if index < 2:
+            adapter.last_transfer_bytes = None
+        adapters.append(adapter)
+        return adapter
+
+    pool = pool_module.ProxySessionPool(
+        config(proxy_session_ports=[10000, 10001, 10002, 10003]), factory, worker.classify_block,
+    )
+    storage = ProductStorage(count=2)
+    worker_config = {**worker.DEFAULTS, "max_actions_per_run": 2, "raw_html_dir": None, "context": {}}
+
+    assert worker._run_postgres_actions_impl(
+        storage, pool, worker_config, limit=2, run_id="run-two-transport", worker_id="worker-a"
+    ) == 2
+    assert len(storage.saved) == 2
+    assert storage.saved[0]["reason"] == "fetch_error"
+    assert storage.saved[0]["error"] == "fetch_error"
+    assert "product" in storage.saved[1]
+    attempts = storage.saved[0]["evidence"]["context_json"]["proxy_session_pool"]["attempts"]
+    traffic = storage.saved[0]["evidence"]["context_json"]["traffic"]
+    assert len(attempts) == 2
+    assert all(item["error_code"] == "transport_error" and item["content_hash"] is None for item in attempts)
+    assert traffic["http_compressed_response_bytes"] is None
+    assert traffic["http_compressed_response_unknown_count"] == 2
+    assert adapters[0].closed is True and adapters[1].closed is True
+    assert len(adapters) == 3
+
+
+def test_pool_begin_action_clears_prior_cookie_bridge_projection():
+    module = load_pool()
+    pool = module.ProxySessionPool(
+        config(proxy_session_ports=[10000, 10001]),
+        lambda slot_config: FakeAdapter(slot_config, [("ok", 200, 10)]),
+        classifier,
+    )
+    pool.begin_run("run-cookie-lifecycle", "tenant-a", "worker-a")
+    pool.begin_action()
+    pool.fetch("https://www.amazon.com/dp/B000000001")
+    pool.last_cookie_bridge_status = "committed"
+    pool.last_cookie_bridge_error_code = None
+
+    pool.begin_action()
+
+    assert getattr(pool, "last_cookie_bridge_status", None) is None
+    assert getattr(pool, "last_cookie_bridge_error_code", None) is None
+
+
 def test_console_projects_latest_sanitized_pool_context_for_run_and_receipt():
     spec = importlib.util.spec_from_file_location("collection_console_pool_test", ROOT / "scripts" / "collection_console.py")
     console = importlib.util.module_from_spec(spec)
