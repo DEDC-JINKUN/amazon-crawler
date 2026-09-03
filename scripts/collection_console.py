@@ -764,7 +764,7 @@ class PostgresConsoleRepository:
                 cursor.execute(
                     """
                     SELECT reservation_id,tenant_id,owner_id,canary_operation_id,requested_capacity,
-                           required_slots,reserved_slots,status,reason,fact_finished_at,fact_expires_at,
+                           required_slots,reserved_slots,slot_ids_json,status,reason,fact_finished_at,fact_expires_at,
                            expires_at,capacity_snapshot_json,created_at,released_at,updated_at,
                            CURRENT_TIMESTAMP AS observed_at
                     FROM amazon_us.proxy_capacity_reservation
@@ -823,6 +823,7 @@ class PostgresConsoleRepository:
                             "reservation_id": reservation.get("reservation_id"),
                             "canary_operation_id": reservation.get("canary_operation_id"),
                             "reserved_slots": reservation.get("reserved_slots"),
+                            "slot_ids": list(reservation.get("slot_ids_json") or []),
                             "fact_finished_at": reservation.get("fact_finished_at"),
                             "fact_expires_at": reservation.get("fact_expires_at"),
                             "reservation_expires_at": reservation.get("expires_at"),

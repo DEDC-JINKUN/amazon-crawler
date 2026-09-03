@@ -398,11 +398,45 @@ class PostgresWorkerStorage:
                                 for row in cursor.fetchall()
                                 for slot_id in list((dict(row) if isinstance(row, Mapping) else {"resource_slot_ids_json": row[0]}).get("resource_slot_ids_json") or [])
                             }
+                            cursor.execute(
+                                """
+                                SELECT slot.value AS resource_slot_id,MAX(r.created_at) AS last_reserved_at
+                                FROM amazon_us.proxy_capacity_reservation r
+                                CROSS JOIN LATERAL jsonb_array_elements_text(r.resource_slot_ids_json) AS slot(value)
+                                WHERE r.status IN ('active','released','expired')
+                                  AND r.resource_slot_ids_json ?| %s
+                                GROUP BY slot.value
+                                """,
+                                (resource_slot_ids,),
+                            )
+                            last_reserved_at = {}
+                            for row in cursor.fetchall():
+                                if isinstance(row, Mapping):
+                                    resource_id = row.get("resource_slot_id")
+                                    reserved_at = row.get("last_reserved_at")
+                                else:
+                                    resource_id, reserved_at = row[0], row[1]
+                                if resource_id is not None and reserved_at is not None:
+                                    last_reserved_at[str(resource_id)] = reserved_at
                             usable_pairs = [
-                                (slot_id, resource_slot_ids[int(slot_id.rsplit("-", 1)[1]) - 1])
+                                (
+                                    slot_id,
+                                    resource_slot_ids[int(slot_id.rsplit("-", 1)[1]) - 1],
+                                    int(slot_id.rsplit("-", 1)[1]) - 1,
+                                )
                                 for slot_id in usable
                             ]
-                            selected_pairs = [pair for pair in usable_pairs if pair[1] not in occupied][:reservation_slots]
+                            available_pairs = [
+                                pair for pair in usable_pairs if pair[1] not in occupied
+                            ]
+                            available_pairs.sort(
+                                key=lambda pair: (
+                                    pair[1] in last_reserved_at,
+                                    last_reserved_at.get(pair[1]),
+                                    pair[2],
+                                )
+                            )
+                            selected_pairs = available_pairs[:reservation_slots]
                             slot_ids = [pair[0] for pair in selected_pairs]
                             selected_resource_slot_ids = [pair[1] for pair in selected_pairs]
                             if len(slot_ids) < reservation_slots:

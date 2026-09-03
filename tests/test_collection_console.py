@@ -466,6 +466,7 @@ def test_console_operations_include_bound_run_capacity_and_agent_reservation_den
         "reservation_id": "reservation-denied", "tenant_id": "tenant-a", "owner_id": "agent-refresh",
         "canary_operation_id": "op-canary-1", "requested_capacity": 5, "required_slots": 2,
         "reserved_slots": 0, "status": "denied", "reason": "capacity_reserved_elsewhere",
+        "slot_ids_json": [],
         "fact_finished_at": None, "fact_expires_at": None, "expires_at": None,
         "capacity_snapshot_json": {"unique_egress_count": 1, "slot_capacity": 3},
         "created_at": None, "released_at": None, "updated_at": None, "observed_at": None,
@@ -473,7 +474,7 @@ def test_console_operations_include_bound_run_capacity_and_agent_reservation_den
     expired_reservation = {
         **denied_reservation,
         "reservation_id": "reservation-expired", "status": "active", "reason": "capacity_reserved",
-        "reserved_slots": 1,
+        "reserved_slots": 1, "slot_ids_json": ["session-04"],
         "expires_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
         "observed_at": datetime(2026, 1, 2, tzinfo=timezone.utc),
     }
@@ -516,6 +517,7 @@ def test_console_operations_include_bound_run_capacity_and_agent_reservation_den
     assert expired["status"] == "expired"
     assert expired["capacity_gate_status"] == "denied"
     assert expired["capacity_gate_reason"] == "reservation_expired"
+    assert expired["capacity_authorization_json"]["slot_ids"] == ["session-04"]
 
 
 def test_console_tooltips_explain_all_operational_terms_accessibly():

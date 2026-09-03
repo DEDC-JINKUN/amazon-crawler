@@ -203,6 +203,8 @@ def test_atomic_reservation_kernel_prevents_two_tenants_from_overbooking_one_slo
                     "finished_at": now, "fact_expires_at": now + timedelta(hours=1),
                     "observed_at": now, "is_fresh": True,
                 }]
+            elif "jsonb_array_elements_text" in sql:
+                self.rows = []
             elif "FROM amazon_us.proxy_capacity_reservation" in sql and "resource_slot_ids_json" in sql:
                 self.rows = list(shared.active_slot_rows)
             elif "INSERT INTO amazon_us.proxy_capacity_reservation" in sql:
@@ -252,7 +254,114 @@ def test_atomic_reservation_kernel_prevents_two_tenants_from_overbooking_one_slo
     assert next(item for item in results if item["status"] == "denied")["reason"] == "capacity_reserved_elsewhere"
     lock_index = next(index for index, sql in enumerate(shared.events) if "pg_advisory_xact_lock" in sql)
     active_index = next(index for index, sql in enumerate(shared.events) if "resource_slot_ids_json" in sql and "SELECT" in sql)
-    assert lock_index < active_index
+    history_index = next(index for index, sql in enumerate(shared.events) if "jsonb_array_elements_text" in sql)
+    assert lock_index < active_index < history_index
+
+
+def test_released_reservations_rotate_least_recently_used_slots_deterministically():
+    storage = load_storage()
+    now = datetime.now(timezone.utc)
+    resources = ["resource-" + digit * 64 for digit in ("1", "2", "3")]
+
+    class RotationDatabase:
+        def __init__(self):
+            self.rows = []
+            self.sequence = 0
+
+    database = RotationDatabase()
+
+    class RotationCursor:
+        rowcount = 0
+
+        def __init__(self):
+            self.result = []
+
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+
+        def execute(self, sql, params=()):
+            self.rowcount = 0
+            if "pg_advisory_xact_lock" in sql or "reservation_expired" in sql:
+                self.result = []
+            elif "WHERE reservation_id=%s FOR UPDATE" in sql:
+                self.result = []
+            elif "FROM amazon_us.operation_run" in sql:
+                self.result = [{
+                    "operation_id": "op-canary-rotation",
+                    "canary_status": "succeeded", "planned_slots": 3, "tested_slots": 3,
+                    "available_slots": 3, "unique_egress_count": 3, "duplicate_egress_count": 0,
+                    "requested_capacity": 1, "required_slots": 1, "slot_budget": 1, "slot_capacity": 3,
+                    "capacity_gate_status": "allowed", "capacity_gate_reason": "capacity_sufficient",
+                    "capacity_config_hash": "a" * 64, "credential_generation": "test-generation-rotation",
+                    "canary_p95_latency_ms": 10.0,
+                    "capacity_detail_json": {"sessions": [
+                        {"session_id": f"session-{index:02d}", "status": "available", "usable": True}
+                        for index in range(1, 4)
+                    ]},
+                    "finished_at": now, "fact_expires_at": now + timedelta(hours=1),
+                    "observed_at": now, "is_fresh": True,
+                }]
+            elif "jsonb_array_elements_text" in sql:
+                latest = {}
+                for row in database.rows:
+                    for resource_id in row["resource_slot_ids_json"]:
+                        latest[resource_id] = max(latest.get(resource_id, -1), row["created_order"])
+                self.result = [
+                    {"resource_slot_id": resource_id, "last_reserved_at": now + timedelta(seconds=order)}
+                    for resource_id, order in latest.items()
+                ]
+            elif "FROM amazon_us.proxy_capacity_reservation" in sql and "resource_slot_ids_json" in sql:
+                self.result = [
+                    {"resource_slot_ids_json": row["resource_slot_ids_json"]}
+                    for row in database.rows if row["status"] == "active"
+                ]
+            elif "INSERT INTO amazon_us.proxy_capacity_reservation" in sql:
+                database.sequence += 1
+                database.rows.append({
+                    "reservation_id": params[0], "owner_id": params[2],
+                    "slot_ids_json": json.loads(params[9]),
+                    "resource_slot_ids_json": json.loads(params[10]),
+                    "status": params[11], "created_order": database.sequence,
+                })
+                self.result = []
+            elif "SET status='released'" in sql:
+                reservation_id, owner_id = params
+                for row in database.rows:
+                    if row["reservation_id"] == reservation_id and row["owner_id"] == owner_id and row["status"] == "active":
+                        row["status"] = "released"
+                        self.rowcount = 1
+                self.result = []
+            else:
+                self.result = []
+
+        def fetchone(self): return self.result.pop(0) if self.result else None
+        def fetchall(self): rows, self.result = self.result, []; return rows
+
+    class RotationConnection:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def cursor(self): return RotationCursor()
+        def commit(self): pass
+        def rollback(self): pass
+
+    repository = storage.PostgresWorkerStorage(
+        "postgresql://example", tenant_id="tenant-rotation", connect=RotationConnection
+    )
+    selected = []
+    for index in range(4):
+        reservation = repository.reserve_proxy_capacity(
+            reservation_id=f"reservation-rotation-{index}", owner_id=f"worker-rotation-{index}",
+            capacity_config_hash="a" * 64, credential_generation="test-generation-rotation",
+            resource_slot_ids=resources, requested_capacity=1, required_slots=1,
+            reservation_slots=1, slot_budget=1, max_age_seconds=3600, lease_seconds=600,
+        )
+        selected.append(reservation["slot_ids"])
+        assert reservation["slot_ids"] == [
+            f"session-{resources.index(database.rows[-1]['resource_slot_ids_json'][0]) + 1:02d}"
+        ]
+        assert repository.release_proxy_capacity(reservation["reservation_id"], reservation["owner_id"])
+
+    assert selected == [["session-01"], ["session-02"], ["session-03"], ["session-01"]]
 
 
 def test_capacity_denial_releases_owned_task_and_requeues_refresh_request():

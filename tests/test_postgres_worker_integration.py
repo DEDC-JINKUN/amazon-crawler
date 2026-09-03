@@ -625,6 +625,67 @@ def test_proxy_capacity_reservations_are_atomic_across_tenants_and_recheck_canar
 
 
 @pytest.mark.skipif(not DSN, reason="AMAZON_TEST_POSTGRES_DSN is not configured")
+def test_released_proxy_capacity_reservations_rotate_all_usable_slots_before_reuse():
+    import psycopg
+
+    operation = load_script("operation_ledger")
+    canary = load_script("proxy_canary")
+    storage_module = load_storage()
+    tenant_id = f"capacity-rotation-{uuid.uuid4().hex}"
+    operation_id = f"op-canary-{uuid.uuid4().hex}"
+    config = {
+        "proxy_url": "http://proxy.example:15000",
+        "proxy_username_env": "PROXY_USER", "proxy_password_env": "PROXY_PASS",
+        "proxy_session_ports": [15000, 15001, 15002], "proxy_session_max_asins": 1,
+        "proxy_product_session_scope": "per_asin",
+        "proxy_canary_url": "https://api.ipify.org?format=json",
+        "proxy_canary_timeout_seconds": 5,
+        "proxy_credential_generation": "integration-generation-rotation",
+    }
+    config_hash = canary.capacity_config_hash(config)
+    resource_slot_ids = canary.capacity_resource_slot_ids(config)
+    fact = {
+        "schema_version": "amazon-us-proxy-canary-v1", "canary_status": "succeeded",
+        "planned_slots": 3, "tested_slots": 3, "available_slots": 3, "unique_egress_count": 3,
+        "duplicate_egress_count": 0, "requested_capacity": 1, "required_slots": 1,
+        "slot_budget": 1, "slot_capacity": 3, "capacity_gate_status": "allowed",
+        "capacity_gate_reason": "capacity_sufficient",
+        "credential_generation": config["proxy_credential_generation"], "p95_latency_ms": 10.0,
+        "config_hash": config_hash,
+        "sessions": [
+            {"session_id": f"session-{index:02d}", "status": "available", "usable": True,
+             "auth_status": "succeeded", "connect_tls_status": "succeeded",
+             "error_class": None, "http_status": 200, "latency_ms": 10.0}
+            for index in range(1, 4)
+        ],
+    }
+    connect = lambda: psycopg.connect(DSN)
+    operation.ensure_schema(connect)
+    operation.start_operation(operation_id, tenant_id, "canary", "dataimpulse-us", None, connect=connect)
+    operation.finish_operation(operation_id, tenant_id, "succeeded", None, None, capacity_fact=fact, connect=connect)
+    repository = storage_module.PostgresWorkerStorage(DSN, tenant_id=tenant_id)
+
+    try:
+        selected = []
+        for index in range(4):
+            reservation = repository.reserve_proxy_capacity(
+                reservation_id=f"reservation-rotation-{uuid.uuid4().hex}",
+                owner_id=f"worker-rotation-{index}", capacity_config_hash=config_hash,
+                credential_generation=config["proxy_credential_generation"],
+                resource_slot_ids=resource_slot_ids, requested_capacity=1, required_slots=1,
+                reservation_slots=1, slot_budget=1, max_age_seconds=3600, lease_seconds=600,
+            )
+            selected.append(reservation["slot_ids"])
+            assert repository.release_proxy_capacity(reservation["reservation_id"], reservation["owner_id"])
+        assert selected == [["session-01"], ["session-02"], ["session-03"], ["session-01"]]
+    finally:
+        with psycopg.connect(DSN) as connection:
+            connection.execute("DELETE FROM amazon_us.proxy_capacity_reservation WHERE tenant_id=%s", (tenant_id,))
+            connection.execute("DELETE FROM amazon_us.operation_run WHERE tenant_id=%s", (tenant_id,))
+            connection.commit()
+
+
+@pytest.mark.skipif(not DSN, reason="AMAZON_TEST_POSTGRES_DSN is not configured")
 def test_all_healthy_but_insufficient_canary_fact_is_persisted_as_denied():
     import psycopg
 
