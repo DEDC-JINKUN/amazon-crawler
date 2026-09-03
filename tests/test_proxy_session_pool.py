@@ -94,7 +94,7 @@ def test_rotates_after_two_asins_and_keeps_cookie_jars_isolated_until_close():
     assert all(adapter.closed and adapter.cookie_jar == {} for adapter in adapters)
 
 
-def test_captcha_quarantines_session_and_retries_same_asin_once_on_new_session():
+def test_captcha_returns_before_explicit_browser_failure_rotation():
     module = load_pool()
     scripts = [[("captcha page", 200, 25)], [("product", 200, 100)]]
     adapters = []
@@ -107,15 +107,19 @@ def test_captcha_quarantines_session_and_retries_same_asin_once_on_new_session()
     pool = module.ProxySessionPool(config(), factory, classifier)
     pool.begin_run("run-1", "tenant-a", "worker-a")
     body, status = pool.fetch("https://www.amazon.com/dp/B000000001")
-    pool.record_outcome("completed", "B000000001")
 
-    assert (body, status) == ("product", 200)
-    assert len(adapters) == 2
+    assert (body, status) == ("captcha page", 200)
+    assert len(adapters) == 1
     intermediate = pool.drain_intermediate_attempts()
     assert len(intermediate) == 1
     assert intermediate[0]["block_reason"] == "captcha"
     assert intermediate[0]["session_id"] == "session-01"
     assert pool.evidence_context()["sessions"][0]["quarantine_reason"] == "captcha"
+
+    pool.record_browser_verification(False)
+    assert pool.rotate_after_browser_failure("https://www.amazon.com/dp/B000000001") is True
+    assert len(adapters) == 2
+    assert pool.evidence_context()["current_session_id"] == "session-02"
 
 
 def test_consecutive_and_window_breakers_stop_without_unbounded_rotation():
@@ -203,7 +207,7 @@ def test_network_errors_are_separate_and_sensitive_values_never_enter_context():
     assert pool.circuit_open_reason is None
 
 
-def test_exhausted_pool_returns_last_real_block_and_opens_circuit_without_throwing():
+def test_exhausted_pool_opens_circuit_only_after_explicit_browser_failure_rotation():
     module = load_pool()
 
     def factory(slot_config):
@@ -214,6 +218,9 @@ def test_exhausted_pool_returns_last_real_block_and_opens_circuit_without_throwi
     body, status = pool.fetch("https://www.amazon.com/dp/B000000001")
 
     assert (body, status) == ("captcha", 200)
+    assert pool.circuit_open_reason is None
+    pool.record_browser_verification(False)
+    assert pool.rotate_after_browser_failure("https://www.amazon.com/dp/B000000001") is False
     assert pool.circuit_open_reason == "session_pool_exhausted"
     assert pool.can_claim_new_asin() is False
 
@@ -297,11 +304,20 @@ def product_html(asin):
 def test_postgres_runner_records_retry_attribution_and_sanitized_session_metrics():
     worker = load_worker()
     pool_module = load_pool()
-    scripts = [[("captcha", 200, 25)], [(product_html("B000000001"), 200, 100)]]
     adapters = []
 
+    class BrowserCapableAdapter(FakeAdapter):
+        def fetch_browser(self, _url, **_kwargs):
+            self.source_type = "selenium_dom"
+            self.last_transfer_bytes = None
+            self.last_browser_traffic = {"main_document_bytes": None, "subresource_bytes": None}
+            self.browser_attempted = True
+            return product_html("B000000001"), 200
+
+        def commit_browser_context(self, *_args, **_kwargs): return 0
+
     def factory(slot_config):
-        adapter = FakeAdapter(slot_config, scripts[len(adapters)])
+        adapter = BrowserCapableAdapter(slot_config, [("captcha", 200, 25)])
         adapters.append(adapter)
         return adapter
 
@@ -317,12 +333,12 @@ def test_postgres_runner_records_retry_attribution_and_sanitized_session_metrics
 
     assert "product" in storage.saved[0]
     assert context["sessions"][0]["blocked"] == 1
-    assert context["sessions"][1]["completed"] == 1
+    assert context["sessions"][0]["completed"] == 1
     assert context["attempts"][0]["block_reason"] == "captcha"
     assert context["attempts"][0]["content_hash"]
     assert "body" not in context["attempts"][0]
     assert "proxy.example" not in repr(context)
-    assert traffic["http_compressed_response_bytes"] == 125
+    assert traffic["http_compressed_response_bytes"] == 25
 
 
 def test_postgres_runner_reports_circuit_after_two_blocked_asins_and_eighteen_unrequested():
@@ -344,17 +360,16 @@ def test_postgres_runner_reports_circuit_after_two_blocked_asins_and_eighteen_un
     assert len(storage.saved) == 2
     assert context["circuit_open_reason"] == "consecutive_blocked_asins"
     assert context["unrequested_count"] == 18
-    assert len(context["attempts"]) == 2
+    assert len(context["attempts"]) == 1
 
 
-def test_blocked_attempt_is_preserved_when_retry_session_has_network_error():
+def test_blocked_attempt_is_preserved_without_implicit_second_slot_http():
     worker = load_worker()
     pool_module = load_pool()
-    scripts = [[("captcha", 200, 25)], [worker.AdapterFetchError("network unavailable")]]
     adapters = []
 
     def factory(slot_config):
-        adapter = FakeAdapter(slot_config, scripts[len(adapters)])
+        adapter = FakeAdapter(slot_config, [("captcha", 200, 25)])
         adapters.append(adapter)
         return adapter
 
@@ -367,24 +382,21 @@ def test_blocked_attempt_is_preserved_when_retry_session_has_network_error():
     ) == 1
     context = storage.saved[0]["evidence"]["context_json"]["proxy_session_pool"]
 
-    assert storage.saved[0]["reason"] == "fetch_error"
+    assert storage.saved[0]["reason"] == "captcha"
     assert len(context["attempts"]) == 1
     assert context["attempts"][0]["block_reason"] == "captcha"
     assert context["attempts"][0]["content_hash"]
+    assert len(adapters) == 1
 
 
-def test_captcha_then_inner_retry_transport_failure_retires_slot_before_next_asin():
+def test_explicit_browser_failure_rotation_does_not_issue_http_on_replacement_slot():
     worker = load_worker()
     pool_module = load_pool()
-    scripts = [
-        [("captcha", 200, 25)],
-        [worker.AdapterFetchError("TLS retries exhausted")],
-        [(product_html("B000000001"), 200, 100)],
-    ]
     adapters = []
 
     def factory(slot_config):
-        adapter = FakeAdapter(slot_config, scripts[len(adapters)])
+        scripted = [("captcha", 200, 25)] if not adapters else [worker.AdapterFetchError("replacement HTTP must not run")]
+        adapter = FakeAdapter(slot_config, scripted)
         adapters.append(adapter)
         return adapter
 
@@ -395,18 +407,13 @@ def test_captcha_then_inner_retry_transport_failure_retires_slot_before_next_asi
     )
     pool.begin_run("run-transport-sequence", "tenant-a", "worker-a")
 
-    with pytest.raises(worker.AdapterFetchError, match="TLS retries exhausted"):
-        pool.fetch("https://www.amazon.com/dp/B000000002")
     body, status = pool.fetch("https://www.amazon.com/dp/B000000001")
-
-    assert (body, status) == (product_html("B000000001"), 200)
-    assert len(adapters) == 3
-    sessions = pool.evidence_context()["sessions"]
-    assert [item["session_id"] for item in sessions] == ["session-01", "session-02", "session-03"]
-    assert sessions[0]["quarantine_reason"] == "captcha"
-    assert sessions[1]["quarantine_reason"] == "transport_error"
-    assert sessions[1]["network_error"] == 1
-    assert sessions[2]["health"] == "healthy"
+    assert (body, status) == ("captcha", 200)
+    pool.record_browser_verification(False)
+    assert pool.rotate_after_browser_failure("https://www.amazon.com/dp/B000000001") is True
+    assert adapters[0].closed is True
+    assert len(adapters) == 2
+    assert adapters[1].scripted and isinstance(adapters[1].scripted[0], worker.AdapterFetchError)
 
 
 def test_breadth_products_rotate_per_asin_while_same_asin_review_pages_stay_sticky():
@@ -543,7 +550,11 @@ def test_one_blocked_asin_after_firefox_failure_isolated_then_next_asin_succeeds
 
     def factory(slot_config):
         index = len(adapters)
-        scripted = [("captcha", 200, 25)] if index < 2 else [(product_html("B000000001"), 200, 100)]
+        scripted = (
+            [("captcha", 200, 25)] if index == 0
+            else [worker.AdapterFetchError("replacement HTTP must not run")] if index == 1
+            else [(product_html("B000000001"), 200, 100)]
+        )
         adapter = FirefoxFailureAdapter(slot_config, scripted)
         adapters.append(adapter)
         return adapter
@@ -567,13 +578,14 @@ def test_one_blocked_asin_after_firefox_failure_isolated_then_next_asin_succeeds
     first_traffic = storage.saved[0]["evidence"]["context_json"]["traffic"]
     second_traffic = storage.saved[1]["evidence"]["context_json"]["traffic"]
     assert storage.saved[0]["evidence"]["transfer_bytes"] == 25
-    assert first_traffic["http_compressed_response_bytes"] == 50
+    assert first_traffic["http_compressed_response_bytes"] == 25
     assert first_traffic["firefox_main_document_bytes"] is None
     assert second_traffic["http_compressed_response_bytes"] == 100
     final = storage.saved[1]["evidence"]["context_json"]["proxy_session_pool"]
     assert final["circuit_open_reason"] is None
     assert final["unrequested_count"] == 0
     assert len(adapters) == 3
+    assert adapters[0].closed is True
     assert adapters[1].closed is True
 
 
@@ -600,7 +612,7 @@ def test_two_consecutive_blocked_asins_open_global_circuit_and_leave_remainder_u
     assert final["unrequested_count"] == 1
 
 
-def test_two_http_captchas_allow_one_stock_firefox_verification_on_last_proxy_session():
+def test_first_http_captcha_uses_same_slot_firefox_before_rotation():
     worker = load_worker()
     pool_module = load_pool()
     adapters = []
@@ -634,11 +646,158 @@ def test_two_http_captchas_allow_one_stock_firefox_verification_on_last_proxy_se
     assert "product" in storage.saved[0]
     pool_context = storage.saved[0]["evidence"]["context_json"]["proxy_session_pool"]
     sessions = pool_context["sessions"]
-    assert len(pool_context["attempts"]) == 2
+    assert len(pool_context["attempts"]) == 1
     assert all("body" not in attempt and attempt["content_hash"] for attempt in pool_context["attempts"])
-    assert [item["firefox_verification"] for item in sessions] == [None, "succeeded"]
-    assert sessions[0]["health"] == "quarantined"
-    assert sessions[1]["health"] == "healthy"
+    assert len(adapters) == 1
+    assert [item["firefox_verification"] for item in sessions] == ["succeeded"]
+    assert sessions[0]["health"] == "healthy"
+    assert sessions[0]["request_count"] == 1
+
+
+def test_failed_same_slot_firefox_rotates_then_second_slot_browser_recovers_without_http():
+    worker = load_worker()
+    pool_module = load_pool()
+    adapters = []
+
+    class BrowserRecoveryAdapter(FakeAdapter):
+        def fetch_browser(self, _url, **_kwargs):
+            self.source_type = "selenium_dom"
+            self.last_transfer_bytes = None
+            self.last_browser_traffic = {"main_document_bytes": None, "subresource_bytes": None}
+            self.browser_attempted = True
+            if len(adapters) == 1:
+                raise worker.AdapterFetchError("first browser failed")
+            return product_html("B000000001"), 200
+
+        def commit_browser_context(self, *_args, **_kwargs): return 0
+
+    def factory(slot_config):
+        scripted = [("captcha", 200, 25)] if not adapters else [worker.AdapterFetchError("slot B HTTP must not run")]
+        adapter = BrowserRecoveryAdapter(slot_config, scripted)
+        adapters.append(adapter)
+        return adapter
+
+    pool = pool_module.ProxySessionPool(config(), factory, worker.classify_block)
+    storage = ProductStorage()
+    worker_config = {
+        **worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None, "context": {},
+        "proxy_firefox_verify_on_access_block": True,
+    }
+
+    assert worker._run_postgres_actions_impl(
+        storage, pool, worker_config, limit=1, run_id="run-firefox-rotate", worker_id="worker-a"
+    ) == 1
+    assert "product" in storage.saved[0]
+    evidence_context = storage.saved[0]["evidence"]["context_json"]
+    sessions = evidence_context["proxy_session_pool"]["sessions"]
+    assert len(adapters) == 2
+    assert adapters[0].closed is True
+    assert [item["request_count"] for item in sessions] == [1, 0]
+    assert [item["firefox_verification"] for item in sessions] == ["failed", "succeeded"]
+    assert [item["firefox_attempts"] for item in sessions] == [1, 1]
+    assert evidence_context["traffic"]["http_compressed_response_bytes"] == 25
+    assert evidence_context["traffic"]["firefox_main_document_bytes"] is None
+    assert evidence_context["traffic"]["firefox_main_document_unknown_count"] == 2
+    assert evidence_context["fallback_reasons"] == [
+        "access_control_verification", "access_control_retry",
+    ]
+
+
+def test_two_browser_challenges_use_two_slots_but_record_one_blocked_action():
+    worker = load_worker()
+    pool_module = load_pool()
+    adapters = []
+
+    class BrowserChallengeAdapter(FakeAdapter):
+        def fetch_browser(self, _url, **_kwargs):
+            self.source_type = "selenium_dom"
+            self.last_transfer_bytes = None
+            self.last_browser_traffic = {"main_document_bytes": None, "subresource_bytes": None}
+            self.browser_attempted = True
+            return "captcha", 200
+
+    def factory(slot_config):
+        scripted = [("captcha", 200, 25)] if not adapters else [worker.AdapterFetchError("slot B HTTP must not run")]
+        adapter = BrowserChallengeAdapter(slot_config, scripted)
+        adapters.append(adapter)
+        return adapter
+
+    pool = pool_module.ProxySessionPool(
+        config(proxy_session_consecutive_block_limit=2), factory, worker.classify_block,
+    )
+    storage = ProductStorage(count=1)
+    worker_config = {
+        **worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None, "context": {},
+        "proxy_firefox_verify_on_access_block": True,
+    }
+
+    assert worker._run_postgres_actions_impl(
+        storage, pool, worker_config, limit=1, run_id="run-two-browser-blocks", worker_id="worker-a"
+    ) == 1
+    assert len(storage.saved) == 1
+    assert storage.saved[0]["reason"] == "captcha"
+    context = storage.saved[0]["evidence"]["context_json"]
+    sessions = context["proxy_session_pool"]["sessions"]
+    assert len(adapters) == 2
+    assert all(adapter.closed for adapter in adapters)
+    assert [item["firefox_verification"] for item in sessions] == ["failed", "failed"]
+    assert pool.circuit_open_reason is None
+    assert [attempt["mode"] for attempt in context["proxy_session_pool"]["attempts"]] == ["http", "firefox"]
+    assert all(attempt["content_hash"] and "body" not in attempt for attempt in context["proxy_session_pool"]["attempts"])
+    assert context["traffic"]["firefox_main_document_bytes"] is None
+    assert context["traffic"]["firefox_main_document_unknown_count"] == 2
+
+
+def test_twenty_asins_each_using_the_two_slot_hard_cap_do_not_exhaust_reserved_pool():
+    worker = load_worker()
+    pool_module = load_pool()
+    adapters = []
+
+    class WorstCaseRecoveryAdapter(FakeAdapter):
+        def fetch_browser(self, url, **_kwargs):
+            self.source_type = "selenium_dom"
+            self.last_transfer_bytes = None
+            self.last_browser_traffic = {"main_document_bytes": None, "subresource_bytes": None}
+            self.browser_attempted = True
+            if len(adapters) % 2 == 1:
+                raise worker.AdapterFetchError("first browser failed")
+            return product_html(pool_module.ProxySessionPool._asin(url)), 200
+
+        def commit_browser_context(self, *_args, **_kwargs): return 0
+
+    def factory(slot_config):
+        scripted = (
+            [("captcha", 200, 25)]
+            if len(adapters) % 2 == 0
+            else [worker.AdapterFetchError("replacement HTTP must not run")]
+        )
+        adapter = WorstCaseRecoveryAdapter(slot_config, scripted)
+        adapters.append(adapter)
+        return adapter
+
+    pool = pool_module.ProxySessionPool(
+        config(
+            proxy_session_ports=list(range(10000, 10040)),
+            proxy_product_session_scope="per_asin",
+        ),
+        factory,
+        worker.classify_block,
+    )
+    storage = ProductStorage(count=20)
+    worker_config = {
+        **worker.DEFAULTS, "max_actions_per_run": 20, "raw_html_dir": None, "context": {},
+        "proxy_firefox_verify_on_access_block": True,
+    }
+
+    assert worker._run_postgres_actions_impl(
+        storage, pool, worker_config, limit=20, run_id="run-worst-case-twenty", worker_id="worker-a"
+    ) == 20
+    assert len(storage.saved) == 20
+    failed = [(item.get("reason"), item.get("error")) for item in storage.saved if "product" not in item]
+    assert failed == []
+    assert len(adapters) == 40
+    assert pool.circuit_open_reason is None
+    assert pool.evidence_context()["unrequested_count"] == 0
 
 
 def test_firefox_challenge_after_two_http_captchas_keeps_circuit_open_and_stops():

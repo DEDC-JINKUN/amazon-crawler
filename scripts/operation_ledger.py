@@ -108,8 +108,11 @@ BEGIN
     IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname='operation_canary_state_v2_check' AND conrelid='amazon_us.operation_run'::regclass) THEN
         ALTER TABLE amazon_us.operation_run DROP CONSTRAINT operation_canary_state_v2_check;
     END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='operation_canary_state_v3_check' AND conrelid='amazon_us.operation_run'::regclass) THEN
-        ALTER TABLE amazon_us.operation_run ADD CONSTRAINT operation_canary_state_v3_check CHECK (
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname='operation_canary_state_v3_check' AND conrelid='amazon_us.operation_run'::regclass) THEN
+        ALTER TABLE amazon_us.operation_run DROP CONSTRAINT operation_canary_state_v3_check;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='operation_canary_state_v4_check' AND conrelid='amazon_us.operation_run'::regclass) THEN
+        ALTER TABLE amazon_us.operation_run ADD CONSTRAINT operation_canary_state_v4_check CHECK (
             canary_status IS NULL OR
             (canary_status='unknown' AND capacity_gate_status='denied' AND tested_slots=0
              AND available_slots IS NULL AND unique_egress_count IS NULL
@@ -118,14 +121,18 @@ BEGIN
              AND tested_slots=planned_slots AND available_slots=planned_slots
              AND unique_egress_count=planned_slots AND duplicate_egress_count=0
              AND requested_capacity IS NOT NULL AND required_slots IS NOT NULL AND slot_capacity IS NOT NULL
-             AND capacity_gate_status IN ('allowed','denied')
-             AND ((capacity_gate_status='allowed')=(slot_capacity>=requested_capacity AND unique_egress_count>=required_slots))) OR
+             AND ((capacity_gate_status='allowed' AND slot_capacity>=requested_capacity AND unique_egress_count>=required_slots)
+                  OR (capacity_gate_status='denied' AND
+                      (slot_capacity<requested_capacity OR unique_egress_count<required_slots
+                       OR capacity_gate_reason='replacement_capacity_insufficient')))) OR
             (canary_status='partial' AND unique_egress_count>0
              AND NOT (tested_slots=planned_slots AND available_slots=planned_slots
                        AND unique_egress_count=planned_slots AND duplicate_egress_count=0)
              AND requested_capacity IS NOT NULL AND required_slots IS NOT NULL AND slot_capacity IS NOT NULL
-             AND capacity_gate_status IN ('allowed','denied')
-             AND ((capacity_gate_status='allowed')=(slot_capacity>=requested_capacity AND unique_egress_count>=required_slots))) OR
+             AND ((capacity_gate_status='allowed' AND slot_capacity>=requested_capacity AND unique_egress_count>=required_slots)
+                  OR (capacity_gate_status='denied' AND
+                      (slot_capacity<requested_capacity OR unique_egress_count<required_slots
+                       OR capacity_gate_reason='replacement_capacity_insufficient')))) OR
             (canary_status='failed' AND capacity_gate_status='denied' AND unique_egress_count=0)
         ) NOT VALID;
     END IF;
@@ -332,7 +339,16 @@ def _validated_capacity_fact(value: dict[str, Any] | None) -> dict[str, Any] | N
         available_from_sessions = sum(item.get("status") == "available" for item in sessions)
         usable_from_sessions = sum(item.get("usable") is True for item in sessions)
         all_unique = tested == planned == available == unique and duplicates == 0
-        allowed = slot_capacity >= requested and unique >= required
+        productive_allowed = slot_capacity >= requested and unique >= required
+        gate_reason = value.get("capacity_gate_reason")
+        gate_consistent = bool(
+            (gate_status == "allowed" and productive_allowed and gate_reason == "capacity_sufficient")
+            or (gate_status == "denied" and not productive_allowed and gate_reason != "capacity_sufficient")
+            or (
+                gate_status == "denied" and productive_allowed
+                and gate_reason == "replacement_capacity_insufficient"
+            )
+        )
         consistent = bool(
             planned >= 1 and tested == planned and len(sessions) == tested
             and 0 <= unique <= available <= tested and duplicates == available - unique
@@ -342,8 +358,7 @@ def _validated_capacity_fact(value: dict[str, Any] | None) -> dict[str, Any] | N
             and ((canary_status == "succeeded" and all_unique)
                  or (canary_status == "partial" and unique > 0 and not all_unique)
                  or (canary_status == "failed" and unique == 0))
-            and ((gate_status == "allowed") == allowed)
-            and ((value.get("capacity_gate_reason") == "capacity_sufficient") == allowed)
+            and gate_consistent
         )
         if not consistent:
             raise ValueError("inconsistent capacity fact")

@@ -30,6 +30,7 @@ class _Slot:
         self.latency_ms = 0
         self.quarantine_reason: str | None = None
         self.firefox_verification: str | None = None
+        self.firefox_attempts = 0
         self.action_generation = -1
 
     def public(self, mode: str) -> dict[str, Any]:
@@ -48,6 +49,7 @@ class _Slot:
             "latency_ms": self.latency_ms,
             "quarantine_reason": self.quarantine_reason,
             "firefox_verification": self.firefox_verification,
+            "firefox_attempts": self.firefox_attempts,
         }
 
 
@@ -108,6 +110,7 @@ class ProxySessionPool:
         self.unrequested_count = 0
         self._action_http_bytes = 0
         self._last_transfer_bytes: int | None = None
+        self._browser_traffic_parts: list[dict[str, Any]] = []
 
     @staticmethod
     def _bounded(config: dict[str, Any], name: str, default: int, minimum: int, maximum: int) -> int:
@@ -139,6 +142,7 @@ class ProxySessionPool:
         self.unrequested_count = 0
         self._action_http_bytes = 0
         self._last_transfer_bytes = None
+        self._browser_traffic_parts = []
 
     def configure_capacity_reservation(
         self,
@@ -173,14 +177,18 @@ class ProxySessionPool:
         self._session_ids = [f"session-{index + 1:02d}" for index in range(len(self._all_ports))]
         self._capacity_validator = None
         self._breaker_counted_asins = set()
+        self._browser_traffic_parts = []
 
     def begin_action(self) -> None:
         self._action_generation += 1
         self._persisted_attempts = []
         self._action_http_bytes = 0
         self._last_transfer_bytes = None
-        for name in ("last_fallback_reason", "action_fallback_reasons", "browser_attempted"):
+        self._browser_traffic_parts = []
+        for name in ("last_fallback_reason", "action_fallback_reasons"):
             self.__dict__.pop(name, None)
+        self.browser_attempted = False
+        self.browser_attempt_count = 0
         if self._current is not None:
             self._prepare(self._current)
 
@@ -249,63 +257,83 @@ class ProxySessionPool:
         if self.circuit_open_reason:
             raise ProxyCircuitOpen(self.circuit_open_reason)
         asin = self._asin(url)
-        force_new = False
-        while True:
-            slot = self._select(asin, force_new=force_new)
-            started = self._clock()
-            try:
-                body, status = slot.adapter.fetch(url)
-            except Exception:
-                raw_byte_count = getattr(slot.adapter, "last_transfer_bytes", None)
-                byte_count = None if raw_byte_count is None else max(0, int(raw_byte_count))
-                self._last_transfer_bytes = byte_count
-                if byte_count is not None:
-                    self._action_http_bytes += byte_count
-                slot.request_count += 1
-                slot.network_error += 1
-                if byte_count is not None:
-                    slot.bytes += byte_count
-                slot.latency_ms += max(0, round((self._clock() - started) * 1000))
-                slot.health = "quarantined"
-                slot.quarantine_reason = "transport_error"
-                raise
-            latency = max(0, round((self._clock() - started) * 1000))
-            byte_count = max(0, int(getattr(slot.adapter, "last_transfer_bytes", 0) or 0))
+        slot = self._select(asin)
+        started = self._clock()
+        try:
+            body, status = slot.adapter.fetch(url)
+        except Exception:
+            raw_byte_count = getattr(slot.adapter, "last_transfer_bytes", None)
+            byte_count = None if raw_byte_count is None else max(0, int(raw_byte_count))
             self._last_transfer_bytes = byte_count
-            self._action_http_bytes += byte_count
+            if byte_count is not None:
+                self._action_http_bytes += byte_count
             slot.request_count += 1
-            slot.bytes += byte_count
-            slot.latency_ms += latency
-            block_reason = self._classify_block(status, body)
-            if not block_reason:
-                return body, status
+            slot.network_error += 1
+            if byte_count is not None:
+                slot.bytes += byte_count
+            slot.latency_ms += max(0, round((self._clock() - started) * 1000))
+            slot.health = "quarantined"
+            slot.quarantine_reason = "transport_error"
+            raise
+        latency = max(0, round((self._clock() - started) * 1000))
+        byte_count = max(0, int(getattr(slot.adapter, "last_transfer_bytes", 0) or 0))
+        self._last_transfer_bytes = byte_count
+        self._action_http_bytes += byte_count
+        slot.request_count += 1
+        slot.bytes += byte_count
+        slot.latency_ms += latency
+        block_reason = self._classify_block(status, body)
+        if block_reason:
             slot.blocked += 1
             self._quarantine(slot, block_reason)
-            retries = self._retries.get(asin, 0)
-            attempt = {
+            self._intermediate.append({
                 "session_id": slot.session_id,
-                "mode": self.mode,
+                "mode": "http",
                 "url": url,
                 "http_status": status,
                 "transfer_bytes": byte_count,
                 "latency_ms": latency,
                 "block_reason": block_reason,
                 "body": body,
-            }
-            if self.circuit_open_reason or retries >= self.retry_per_asin:
-                self._intermediate.append(attempt)
-                return body, status
-            if self._next_port >= len(self._ports):
-                self.circuit_open_reason = "session_pool_exhausted"
-                self._intermediate.append(attempt)
-                return body, status
-            self._retries[asin] = retries + 1
-            self._intermediate.append(attempt)
-            force_new = True
+            })
+        return body, status
+
+    def rotate_after_browser_failure(self, url: str) -> bool:
+        """Select one final recovery slot explicitly after same-slot Firefox fails."""
+        if self.circuit_open_reason:
+            return False
+        asin = self._asin(url)
+        retries = self._retries.get(asin, 0)
+        if retries >= self.retry_per_asin:
+            return False
+        if self._current is None or self._current.health != "quarantined":
+            raise RuntimeError("browser retry requires a quarantined current slot")
+        if self._next_port >= len(self._ports):
+            self.circuit_open_reason = "session_pool_exhausted"
+            return False
+        self._retries[asin] = retries + 1
+        self._select(asin, force_new=True)
+        return True
+
+    def preserve_browser_attempt(self, url: str, body: str, status: int | None, block_reason: str) -> None:
+        if self._current is None:
+            return
+        self._intermediate.append({
+            "session_id": self._current.session_id,
+            "mode": "firefox",
+            "url": url,
+            "http_status": status,
+            "transfer_bytes": getattr(self._current.adapter, "last_transfer_bytes", None),
+            "latency_ms": None,
+            "block_reason": block_reason,
+            "body": body,
+        })
 
     def record_browser_verification(self, succeeded: bool) -> None:
         if self._current is None:
             return
+        self._current.firefox_attempts += 1
+        self._browser_traffic_parts.append(dict(getattr(self._current.adapter, "last_browser_traffic", None) or {}))
         self._current.firefox_verification = "succeeded" if succeeded else "failed"
         if not succeeded:
             self._current.health = "quarantined"
@@ -360,7 +388,8 @@ class ProxySessionPool:
 
     def can_claim_new_asin(self) -> bool:
         if self.product_scope == "per_asin":
-            return bool(self.circuit_open_reason is None and self._next_port < len(self._ports))
+            required = 1 + self.retry_per_asin
+            return bool(self.circuit_open_reason is None and len(self._ports) - self._next_port >= required)
         return bool(
             self.circuit_open_reason is None
             and (
@@ -402,6 +431,38 @@ class ProxySessionPool:
         if self._current is not None and getattr(self._current.adapter, "source_type", "http_html") != "http_html":
             return getattr(self._current.adapter, "last_transfer_bytes", None)
         return self._last_transfer_bytes
+
+    @property
+    def last_browser_traffic(self) -> dict[str, Any] | None:
+        if not self._browser_traffic_parts:
+            if self._current is None:
+                return None
+            return dict(getattr(self._current.adapter, "last_browser_traffic", None) or {})
+        result: dict[str, Any] = {}
+        for prefix in ("main_document", "subresource"):
+            byte_key = f"{prefix}_bytes"
+            known_key = f"{prefix}_known_count"
+            unknown_key = f"{prefix}_unknown_count"
+            known_bytes = 0
+            known_count = 0
+            unknown_count = 0
+            for part in self._browser_traffic_parts:
+                value = part.get(byte_key)
+                known_count += int(part.get(known_key) or (1 if value is not None else 0))
+                unknown_count += int(part.get(unknown_key) or (1 if value is None else 0))
+                if value is not None:
+                    known_bytes += max(0, int(value))
+            result[byte_key] = None if unknown_count else known_bytes
+            result[known_key] = known_count
+            result[unknown_key] = unknown_count
+        blocked_counts: dict[str, int] = {}
+        for part in self._browser_traffic_parts:
+            for name, count in dict(part.get("blocked_resource_counts") or {}).items():
+                blocked_counts[str(name)] = blocked_counts.get(str(name), 0) + int(count)
+        result["blocked_resource_counts"] = blocked_counts
+        result["blocked_request_race_count"] = sum(int(part.get("blocked_request_race_count") or 0) for part in self._browser_traffic_parts)
+        result["continued_request_race_count"] = sum(int(part.get("continued_request_race_count") or 0) for part in self._browser_traffic_parts)
+        return result
 
     @property
     def source_type(self) -> str:

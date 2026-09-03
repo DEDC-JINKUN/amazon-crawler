@@ -260,6 +260,7 @@ class AdapterFetchError(RuntimeError):
 class FallbackReason(str, Enum):
     HTTP_TRANSPORT_ERROR = "http_transport_error"
     ACCESS_CONTROL_VERIFICATION = "access_control_verification"
+    ACCESS_CONTROL_RETRY = "access_control_retry"
     MISSING_ASIN = "missing_asin"
     MISSING_CANONICAL_URL = "missing_canonical_url"
     MISSING_TITLE = "missing_title"
@@ -2285,13 +2286,22 @@ def _fetch_browser_once(
     run_id: str,
     asin: str,
     ledger: BrowserFallbackLedger,
+    max_attempts: int = 1,
 ) -> tuple[str, int | None] | None:
-    if bool(getattr(adapter, "browser_attempted", False)):
+    attempt_count = int(
+        getattr(
+            adapter,
+            "browser_attempt_count",
+            1 if bool(getattr(adapter, "browser_attempted", False)) else 0,
+        )
+    )
+    if attempt_count >= int(max_attempts):
         return None
     if not hasattr(adapter, "fetch_browser") or not ledger.claim(run_id, asin, fallback_reason):
         return None
     setattr(adapter, "last_fallback_reason", fallback_reason.value)
     setattr(adapter, "browser_attempted", True)
+    setattr(adapter, "browser_attempt_count", attempt_count + 1)
     fallback_reasons = getattr(adapter, "action_fallback_reasons", None)
     if fallback_reasons is None:
         fallback_reasons = []
@@ -3082,6 +3092,7 @@ def _run_postgres_actions_impl(
             and callable(getattr(adapter, "evidence_context", None))
             and _browser_fallback_available(adapter)
         ):
+            first_browser_failed = False
             try:
                 browser_result = _fetch_browser_once(
                     adapter, task["url"], fallback_reason=FallbackReason.ACCESS_CONTROL_VERIFICATION,
@@ -3091,14 +3102,41 @@ def _run_postgres_actions_impl(
                 browser_verification = getattr(adapter, "record_browser_verification", None)
                 if callable(browser_verification):
                     browser_verification(False)
+                first_browser_failed = True
                 browser_result = None
             if browser_result is not None:
                 browser_body, browser_status = browser_result
                 browser_reason = classify_block(browser_status, browser_body)
+                if browser_reason:
+                    preserve = getattr(adapter, "preserve_browser_attempt", None)
+                    if callable(preserve):
+                        preserve(task["url"], browser_body, browser_status, browser_reason)
                 browser_verification = getattr(adapter, "record_browser_verification", None)
                 if callable(browser_verification):
                     browser_verification(browser_reason is None)
                 body, response_status, reason = browser_body, browser_status, browser_reason
+                first_browser_failed = browser_reason is not None
+                if first_browser_failed:
+                    _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, task["asin"])
+            rotate = getattr(adapter, "rotate_after_browser_failure", None)
+            if reason and first_browser_failed and callable(rotate) and rotate(task["url"]):
+                try:
+                    browser_result = _fetch_browser_once(
+                        adapter, task["url"], fallback_reason=FallbackReason.ACCESS_CONTROL_RETRY,
+                        run_id=run_id, asin=task["asin"], ledger=fallback_ledger, max_attempts=2,
+                    )
+                except AdapterFetchError:
+                    browser_verification = getattr(adapter, "record_browser_verification", None)
+                    if callable(browser_verification):
+                        browser_verification(False)
+                    browser_result = None
+                if browser_result is not None:
+                    browser_body, browser_status = browser_result
+                    browser_reason = classify_block(browser_status, browser_body)
+                    browser_verification = getattr(adapter, "record_browser_verification", None)
+                    if callable(browser_verification):
+                        browser_verification(browser_reason is None)
+                    body, response_status, reason = browser_body, browser_status, browser_reason
         data = parse_product_html(body, task["url"]) if not reason else {"asin": "", "canonical_url": ""}
         core_reason = _core_fallback_reason(data, task["asin"]) if not reason else None
         if core_reason is not None:

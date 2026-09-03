@@ -82,9 +82,9 @@ def test_all_sessions_succeed_and_public_result_contains_only_redacted_capacity(
         assert forbidden not in rendered
 
 
-def test_per_asin_product_scope_counts_one_action_per_unique_proxy_session(monkeypatch):
+def test_per_asin_product_scope_without_retry_counts_one_action_per_unique_proxy_session(monkeypatch):
     module = load_module()
-    cfg = config(proxy_product_session_scope="per_asin")
+    cfg = config(proxy_product_session_scope="per_asin", proxy_session_retry_per_asin=0)
     monkeypatch.setenv("PROXY_USER", "fixture-user")
     monkeypatch.setenv("PROXY_PASS", "fixture-pass")
     identities = iter(["203.0.113.10", "203.0.113.11", "203.0.113.12"])
@@ -104,7 +104,33 @@ def test_per_asin_product_scope_counts_one_action_per_unique_proxy_session(monke
     assert result["capacity_gate_status"] == "allowed"
 
 
-def test_partial_port_failure_can_allow_only_the_capacity_proven_by_unique_egress(monkeypatch):
+def test_per_asin_canary_denies_twenty_actions_when_only_thirty_four_recovery_slots_exist(monkeypatch):
+    module = load_module()
+    cfg = config(
+        proxy_product_session_scope="per_asin",
+        proxy_session_retry_per_asin=1,
+        proxy_session_ports=list(range(10000, 10034)),
+    )
+    monkeypatch.setenv("PROXY_USER", "fixture-user")
+    monkeypatch.setenv("PROXY_PASS", "fixture-pass")
+    identity = iter(f"203.0.113.{index}" for index in range(1, 35))
+
+    result = module.run_proxy_canary(
+        cfg, requested_actions=20,
+        probe_slot=lambda **_kwargs: {
+            "ok": True, "egress_ip": next(identity), "http_status": 200,
+            "latency_ms": 10.0, "auth_status": "succeeded", "connect_tls_status": "succeeded",
+            "error_class": None,
+        },
+    )
+
+    assert result["required_slots"] == 20
+    assert result["unique_egress_count"] == 34
+    assert result["capacity_gate_status"] == "denied"
+    assert result["capacity_gate_reason"] == "replacement_capacity_insufficient"
+
+
+def test_partial_port_failure_denies_when_productive_capacity_lacks_reserved_replacement(monkeypatch):
     module = load_module()
     monkeypatch.setenv("PROXY_USER", "private-user")
     monkeypatch.setenv("PROXY_PASS", "private-pass")
@@ -122,8 +148,8 @@ def test_partial_port_failure_can_allow_only_the_capacity_proven_by_unique_egres
     assert result["available_slots"] == 2
     assert result["unique_egress_count"] == 2
     assert result["slot_capacity"] == 6
-    assert result["capacity_gate_status"] == "allowed"
-    assert result["capacity_gate_reason"] == "capacity_sufficient"
+    assert result["capacity_gate_status"] == "denied"
+    assert result["capacity_gate_reason"] == "replacement_capacity_insufficient"
     assert result["sessions"][1] == {
         "session_id": "session-02",
         "status": "unavailable",
@@ -198,6 +224,15 @@ def test_credential_generation_changes_hash_without_hashing_secret_values(monkey
     assert re.fullmatch(r"[0-9a-f]{64}", first)
     with pytest.raises(ValueError, match="credential generation"):
         module.capacity_config_hash(config(proxy_credential_generation=""))
+
+
+def test_retry_policy_change_invalidates_prior_canary_config_hash():
+    module = load_module()
+
+    without_retry = module.capacity_config_hash(config(proxy_session_retry_per_asin=0))
+    with_retry = module.capacity_config_hash(config(proxy_session_retry_per_asin=1))
+
+    assert without_retry != with_retry
 
 
 def test_physical_resource_slots_are_stable_across_capacity_policy_and_credential_rotation():

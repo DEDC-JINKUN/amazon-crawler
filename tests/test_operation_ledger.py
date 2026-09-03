@@ -72,7 +72,7 @@ def test_preflight_failure_remains_visible_as_terminal_operation():
     assert "failure_stage" in sql
     assert "error_class" in sql
     assert "operation_canary_counts_v2_check" in sql
-    assert "operation_canary_state_v3_check" in sql
+    assert "operation_canary_state_v4_check" in sql
     assert "DROP CONSTRAINT operation_canary_state_v2_check" in sql
     assert "operation_capacity_binding_v2_check" in sql
     assert connection.commits == 4
@@ -83,8 +83,26 @@ def test_canary_state_constraint_allows_all_healthy_but_capacity_insufficient():
     normalized = " ".join(module.OPERATION_SCHEMA_SQL.split())
 
     assert "canary_status='succeeded'" in normalized
-    assert "((capacity_gate_status='allowed')=(slot_capacity>=requested_capacity AND unique_egress_count>=required_slots))" in normalized
-    assert "capacity_gate_status IN ('allowed','denied')" in normalized
+    assert "capacity_gate_reason='replacement_capacity_insufficient'" in normalized
+    assert "capacity_gate_status='allowed' AND slot_capacity>=requested_capacity" in normalized
+
+
+def test_capacity_fact_accepts_fail_closed_replacement_capacity_denial():
+    module = load_module()
+    fact = {
+        "schema_version": "amazon-us-proxy-canary-v1", "canary_status": "succeeded",
+        "planned_slots": 1, "tested_slots": 1, "available_slots": 1, "unique_egress_count": 1,
+        "duplicate_egress_count": 0, "requested_capacity": 1, "required_slots": 1,
+        "slot_budget": 1, "slot_capacity": 1, "capacity_gate_status": "denied",
+        "capacity_gate_reason": "replacement_capacity_insufficient",
+        "credential_generation": "test-generation-1", "p95_latency_ms": 1.0,
+        "config_hash": "a" * 64,
+        "sessions": [{"session_id": "session-01", "status": "available", "usable": True,
+                      "auth_status": "succeeded", "connect_tls_status": "succeeded",
+                      "error_class": None, "http_status": 200, "latency_ms": 1.0}],
+    }
+
+    assert module._validated_capacity_fact(fact)["capacity_gate_reason"] == "replacement_capacity_insufficient"
 
 
 def test_capacity_fact_rejects_out_of_range_session_ids():

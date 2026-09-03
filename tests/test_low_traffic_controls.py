@@ -663,6 +663,40 @@ def test_one_action_allows_at_most_one_firefox_navigation_across_fallback_reason
     assert len(calls) == 1
 
 
+def test_access_control_recovery_allows_exactly_two_browser_navigations_not_three():
+    worker = load_worker()
+    calls = []
+
+    class Adapter:
+        browser_attempted = False
+
+        def fetch_browser(self, url, **kwargs):
+            calls.append((url, kwargs["fallback_reason"]))
+            return "<html>browser</html>", 200
+
+    adapter = Adapter()
+    ledger = worker.BrowserFallbackLedger()
+    first = worker._fetch_browser_once(
+        adapter, "https://www.amazon.com/dp/B00RCPDCQU",
+        fallback_reason=worker.FallbackReason.ACCESS_CONTROL_VERIFICATION,
+        run_id="run-1", asin="B00RCPDCQU", ledger=ledger, max_attempts=2,
+    )
+    second = worker._fetch_browser_once(
+        adapter, "https://www.amazon.com/dp/B00RCPDCQU",
+        fallback_reason=worker.FallbackReason.ACCESS_CONTROL_RETRY,
+        run_id="run-1", asin="B00RCPDCQU", ledger=ledger, max_attempts=2,
+    )
+    third = worker._fetch_browser_once(
+        adapter, "https://www.amazon.com/dp/B00RCPDCQU",
+        fallback_reason=worker.FallbackReason.CONTEXT_MISMATCH,
+        run_id="run-1", asin="B00RCPDCQU", ledger=ledger, max_attempts=2,
+    )
+
+    assert first is not None and second is not None
+    assert third is None
+    assert len(calls) == 2
+
+
 class OneProductStorage:
     tenant_id = "tenant-a"
 

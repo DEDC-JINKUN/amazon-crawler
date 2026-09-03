@@ -423,37 +423,40 @@ def test_agent_api_refresh_is_consumed_and_returned_from_real_postgres():
         "raw_html_dir": None,
         "context": {},
         "proxy_url": "http://proxy.example:10000",
-        "proxy_session_ports": [10000],
+        "proxy_session_ports": [10000, 10001],
         "proxy_session_max_asins": 5,
         "proxy_credential_generation": "test-generation-1",
     })
     capacity_fact = {
         "schema_version": "amazon-us-proxy-canary-v1",
         "canary_status": "succeeded",
-        "planned_slots": 1,
-        "tested_slots": 1,
-        "available_slots": 1,
-        "unique_egress_count": 1,
+        "planned_slots": 2,
+        "tested_slots": 2,
+        "available_slots": 2,
+        "unique_egress_count": 2,
         "duplicate_egress_count": 0,
-        "requested_capacity": 5,
+        "requested_capacity": 1,
         "required_slots": 1,
-        "slot_budget": 5,
-        "slot_capacity": 5,
+        "slot_budget": 1,
+        "slot_capacity": 2,
         "capacity_gate_status": "allowed",
         "capacity_gate_reason": "capacity_sufficient",
         "credential_generation": "test-generation-1",
         "p95_latency_ms": 10.0,
         "config_hash": canary_module.capacity_config_hash(config),
-        "sessions": [{
-            "session_id": "session-01",
-            "status": "available",
-            "usable": True,
-            "auth_status": "succeeded",
-            "connect_tls_status": "succeeded",
-            "error_class": None,
-            "http_status": 200,
-            "latency_ms": 10.0,
-        }],
+        "sessions": [
+            {
+                "session_id": f"session-{index:02d}",
+                "status": "available",
+                "usable": True,
+                "auth_status": "succeeded",
+                "connect_tls_status": "succeeded",
+                "error_class": None,
+                "http_status": 200,
+                "latency_ms": 10.0,
+            }
+            for index in range(1, 3)
+        ],
     }
     connect = lambda: psycopg.connect(DSN)
     operation_id = f"op-canary-{uuid.uuid4().hex}"

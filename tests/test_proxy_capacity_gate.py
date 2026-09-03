@@ -75,7 +75,7 @@ def test_capacity_gate_allows_only_fresh_matching_evidence_covering_the_requeste
 
 def test_per_asin_product_scope_requires_one_unique_proxy_session_per_action():
     module = load("proxy_capacity_gate")
-    cfg = config(proxy_product_session_scope="per_asin")
+    cfg = config(proxy_product_session_scope="per_asin", proxy_session_retry_per_asin=0)
     per_asin_fact = fact(
         module, cfg, requested_capacity=3, required_slots=3, slot_budget=1, slot_capacity=3,
     )
@@ -360,7 +360,7 @@ def test_per_asin_single_action_retry_fails_closed_when_replacement_capacity_is_
     assert storage.called is False
 
 
-def test_per_asin_three_actions_keep_two_slot_replacement_buffer_cap():
+def test_per_asin_three_actions_reserve_the_explicit_two_slots_per_asin_hard_cap():
     module = load("proxy_capacity_gate")
     cfg = config(
         proxy_product_session_scope="per_asin",
@@ -369,7 +369,19 @@ def test_per_asin_three_actions_keep_two_slot_replacement_buffer_cap():
         proxy_session_consecutive_block_limit=2,
     )
 
-    assert module.reservation_slots_for(cfg, 3) == 5
+    assert module.reservation_slots_for(cfg, 3) == 6
+
+
+def test_per_asin_twenty_actions_require_forty_slots_instead_of_exhausting_mid_run():
+    module = load("proxy_capacity_gate")
+    cfg = config(
+        proxy_product_session_scope="per_asin",
+        proxy_session_retry_per_asin=1,
+        proxy_session_ports=list(range(10000, 10040)),
+        proxy_session_consecutive_block_limit=2,
+    )
+
+    assert module.reservation_slots_for(cfg, 20) == 40
 
 
 def test_controller_reserve_entry_uses_same_single_action_replacement_contract(tmp_path, monkeypatch):

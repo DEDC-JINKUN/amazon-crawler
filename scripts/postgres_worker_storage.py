@@ -364,6 +364,7 @@ class PostgresWorkerStorage:
                         expected_config_hash=capacity_config_hash,
                         slot_budget=slot_budget,
                         requested_actions=requested_capacity,
+                        reservation_slots=reservation_slots,
                     )
                     if fact is not None and str(fact.get("credential_generation") or "") != credential_generation:
                         decision = {**decision, "status": "denied", "reason": "credential_generation_mismatch"}

@@ -91,6 +91,26 @@ def _validated_shape(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def reservation_slots_for(config: dict[str, Any], requested_actions: int) -> int:
+    """Return the hard run-scoped slot ceiling implied by the recovery policy."""
+    if int(requested_actions) < 1:
+        raise ValueError("requested_actions must be positive")
+    shape = _validated_shape(config)
+    required_slots = math.ceil(int(requested_actions) / shape["max_asins"])
+    scope = str(config.get("proxy_product_session_scope") or "per_asin").strip().lower()
+    retry_value = config.get("proxy_session_retry_per_asin")
+    retry_per_asin = int(1 if retry_value is None else retry_value)
+    if retry_per_asin not in {0, 1}:
+        raise ValueError("proxy_session_retry_per_asin must be 0 or 1")
+    if scope == "per_asin":
+        return required_slots * (1 + retry_per_asin)
+    replacement_buffer = min(
+        max(0, int(requested_actions) - 1),
+        max(0, min(int(config.get("proxy_session_consecutive_block_limit") or 2), 5)),
+    )
+    return min(len(shape["ports"]), required_slots + replacement_buffer)
+
+
 def capacity_config_hash(config: dict[str, Any]) -> str:
     shape = _validated_shape(config)
     credential_generation = str(
@@ -107,6 +127,7 @@ def capacity_config_hash(config: dict[str, Any]) -> str:
         "ports": shape["ports"],
         "max_asins": shape["max_asins"],
         "product_session_scope": str(config.get("proxy_product_session_scope") or "per_asin"),
+        "retry_per_asin": int(config.get("proxy_session_retry_per_asin") if config.get("proxy_session_retry_per_asin") is not None else 1),
         "target_url": shape["target_url"],
         "timeout_seconds": shape["timeout_seconds"],
         "credential_generation": credential_generation,
@@ -318,11 +339,15 @@ def run_proxy_canary(
     unique_count = len(identities)
     required_slots = math.ceil(requested_actions / shape["max_asins"])
     slot_capacity = unique_count * shape["max_asins"]
-    allowed = unique_count >= required_slots
+    recovery_slots = reservation_slots_for(config, requested_actions)
+    productive_allowed = unique_count >= required_slots
+    allowed = productive_allowed and unique_count >= recovery_slots
     canary_status = "succeeded" if unique_count == len(shape["ports"]) else "partial" if unique_count else "failed"
     gate_reason = (
         "capacity_sufficient"
         if allowed
+        else "replacement_capacity_insufficient"
+        if productive_allowed and unique_count < recovery_slots
         else "duplicate_egress_capacity_insufficient"
         if duplicate_count
         else "unique_capacity_insufficient"
@@ -432,6 +457,7 @@ __all__ = [
     "execute_canary",
     "effective_slot_budget",
     "probe_proxy_slot",
+    "reservation_slots_for",
     "run_proxy_canary",
     "validate_canary_target_url",
 ]

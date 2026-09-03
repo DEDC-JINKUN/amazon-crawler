@@ -14,10 +14,10 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from proxy_canary import capacity_config_hash, capacity_resource_slot_ids, effective_slot_budget
+    from proxy_canary import capacity_config_hash, capacity_resource_slot_ids, effective_slot_budget, reservation_slots_for
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from proxy_canary import capacity_config_hash, capacity_resource_slot_ids, effective_slot_budget
+    from proxy_canary import capacity_config_hash, capacity_resource_slot_ids, effective_slot_budget, reservation_slots_for
 
 
 class ProxyCapacityGateDenied(RuntimeError):
@@ -27,28 +27,6 @@ class ProxyCapacityGateDenied(RuntimeError):
         self.reason = str(reason)
         self.decision = dict(decision or {"status": "denied", "reason": self.reason})
         super().__init__(f"proxy_capacity_gate_denied:{self.reason}")
-
-
-def reservation_slots_for(config: dict[str, Any], requested_actions: int) -> int:
-    """Reserve the productive minimum plus a bounded two-slot quarantine buffer."""
-    if requested_actions < 1:
-        raise ValueError("requested_actions must be positive")
-    planned_slots = len(list(config.get("proxy_session_ports") or []))
-    slot_budget = effective_slot_budget(config)
-    if planned_slots < 1 or slot_budget < 1:
-        raise ValueError("proxy session capacity is invalid")
-    required_slots = math.ceil(requested_actions / slot_budget)
-    replacement_buffer = min(
-        max(0, requested_actions - 1),
-        max(0, min(int(config.get("proxy_session_consecutive_block_limit") or 2), 5)),
-    )
-    retry_value = config.get("proxy_session_retry_per_asin")
-    per_asin_retry = (
-        str(config.get("proxy_product_session_scope") or "bounded") == "per_asin"
-        and int(1 if retry_value is None else retry_value) == 1
-    )
-    bounded_slots = min(planned_slots, required_slots + replacement_buffer)
-    return max(required_slots + 1, bounded_slots) if per_asin_retry else bounded_slots
 
 
 def _decision(
@@ -86,6 +64,7 @@ def evaluate_capacity_fact(
         return _decision("denied", "proxy_sessions_not_configured", requested_actions, required, None, None)
     try:
         expected_hash = capacity_config_hash(config)
+        reservation_slots = reservation_slots_for(config, requested_actions)
     except (TypeError, ValueError):
         return _decision("denied", "capacity_configuration_invalid", requested_actions, required, None, None)
     return evaluate_capacity_snapshot(
@@ -93,6 +72,7 @@ def evaluate_capacity_fact(
         expected_config_hash=expected_hash,
         slot_budget=budget,
         requested_actions=requested_actions,
+        reservation_slots=reservation_slots,
     )
 
 
@@ -102,6 +82,7 @@ def evaluate_capacity_snapshot(
     expected_config_hash: str,
     slot_budget: int,
     requested_actions: int,
+    reservation_slots: int,
 ) -> dict[str, Any]:
     budget = int(slot_budget)
     required = math.ceil(requested_actions / budget) if budget > 0 else requested_actions
@@ -118,6 +99,9 @@ def evaluate_capacity_snapshot(
     if canary_status not in {"succeeded", "partial"} or fact_gate_status != "allowed":
         fact_reason = str(fact.get("capacity_gate_reason") or "")
         reason = (
+            "replacement_capacity_insufficient"
+            if canary_status in {"succeeded", "partial"} and fact_reason == "replacement_capacity_insufficient"
+            else
             fact_reason
             if unique is None and slot_capacity is None and fact_reason in {"credentials_missing", "database_credentials_missing"}
             else "canary_fact_denied"
@@ -169,6 +153,8 @@ def evaluate_capacity_snapshot(
         if reason == "capacity_sufficient":
             reason = "unique_capacity_insufficient"
         return _decision("denied", reason, requested_actions, required, unique, slot_capacity)
+    if unique < int(reservation_slots):
+        return _decision("denied", "replacement_capacity_insufficient", requested_actions, required, unique, slot_capacity)
     return _decision("allowed", "capacity_sufficient", requested_actions, required, unique, slot_capacity)
 
 
