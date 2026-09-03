@@ -365,6 +365,60 @@ def test_current_tenant_raw_root_never_proves_another_tenant_legacy_variant(tmp_
     assert module.classify_evidence_outcome(explicit) == "variant_redirect"
 
 
+def test_console_routes_pass_raw_root_to_all_current_tenant_identity_projections_only(tmp_path):
+    module = load_module()
+    calls = []
+
+    class Repository(module.PostgresConsoleRepository):
+        def __init__(self, tenant_id="tenant-a"):
+            self.dsn = "postgresql://fixture"
+            self.tenant_id = tenant_id
+
+        def for_tenant(self, tenant_id):
+            return Repository(tenant_id)
+
+        def list_runs(self, limit=20, raw_html_dir=None):
+            calls.append((self.tenant_id, "runs", raw_html_dir))
+            return []
+
+        def list_items(self, **kwargs):
+            calls.append((self.tenant_id, "items", kwargs.get("raw_html_dir")))
+            return {"items": [], "total": 0}
+
+        def load_run(self, run_id, raw_html_dir=None):
+            calls.append((self.tenant_id, "run", raw_html_dir))
+            return {"run_id": run_id}
+
+        def load_detail(self, asin, raw_html_dir=None):
+            calls.append((self.tenant_id, "detail", raw_html_dir))
+            return {"asin": asin}
+
+        def load_identity(self): return {"tenant_id": self.tenant_id, "task_count": 0}
+
+    server = module.ConsoleServer(
+        ("127.0.0.1", 0), Repository(), raw_html_dir=tmp_path, raw_tenant_id="tenant-a",
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        for path in (
+            "/api/runs?tenant=tenant-a", "/api/items?tenant=tenant-a",
+            "/api/runs/run-1?tenant=tenant-a", "/api/items/B0B9ZFDZNJ?tenant=tenant-a",
+            "/api/runs/run-2?tenant=tenant-b",
+        ):
+            with urllib.request.urlopen(base + path, timeout=2) as response:
+                assert response.status == 200
+    finally:
+        server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+    assert calls[:4] == [
+        ("tenant-a", "runs", tmp_path), ("tenant-a", "items", tmp_path),
+        ("tenant-a", "run", tmp_path), ("tenant-a", "detail", tmp_path),
+    ]
+    assert calls[4] == ("tenant-b", "run", None)
+
+
 def test_run7_shape_projects_four_products_three_legacy_variants_as_quality_complete(tmp_path):
     module = load_module()
     items = [{"outcome": "completed"} for _ in range(4)]

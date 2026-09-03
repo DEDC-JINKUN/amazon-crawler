@@ -683,6 +683,7 @@ class PostgresConsoleRepository:
         query: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        raw_html_dir: Path | None = None,
     ) -> dict[str, Any]:
         tenant_id = self._require_tenant()
         limit = max(1, min(int(limit), 500))
@@ -713,11 +714,11 @@ class PostgresConsoleRepository:
                        s.block_reason,s.updated_at,s.lease_owner,s.lease_expires_at,
                        p.title,p.price,p.availability,p.buy_box,p.rating,p.reported_review_count,
                        e.source_type,e.http_status,e.error_code AS evidence_error,e.block_reason AS evidence_block,
-                       e.context_json,e.raw_html_path,e.retrieved_at
+                       e.context_json,e.raw_html_path,e.content_hash,e.retrieved_at
                 FROM amazon_us.item_state s
                 {join}
                 LEFT JOIN LATERAL (
-                  SELECT source_type,http_status,error_code,block_reason,context_json,raw_html_path,retrieved_at
+                  SELECT source_type,http_status,error_code,block_reason,context_json,raw_html_path,content_hash,retrieved_at
                   FROM amazon_us.collection_evidence ce
                   WHERE ce.tenant_id=s.tenant_id AND ce.marketplace=s.marketplace AND ce.asin=s.asin
                     AND ce.subject_type=s.subject_type
@@ -733,14 +734,16 @@ class PostgresConsoleRepository:
             items = [dict(row) for row in cursor.fetchall()]
         for item in items:
             item["price_status"] = project_price_status(item)
-            item["outcome"] = classify_evidence_outcome({
+            evidence = reconcile_legacy_variant_canonical({
                 **item,
                 "error_code": item.get("evidence_error"),
                 "block_reason": item.get("evidence_block") or item.get("block_reason"),
-            })
+            }, raw_html_dir)
+            item["context_json"] = evidence.get("context_json")
+            item["outcome"] = classify_evidence_outcome(evidence)
         return {"tenant_id": tenant_id, "total": total, "limit": limit, "offset": offset, "items": items}
 
-    def list_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+    def list_runs(self, limit: int = 20, raw_html_dir: Path | None = None) -> list[dict[str, Any]]:
         tenant_id = self._require_tenant()
         limit = max(1, min(int(limit), 100))
         with self._connect() as conn, conn.cursor() as cursor:
@@ -752,13 +755,16 @@ class PostgresConsoleRepository:
                   GROUP BY run_id ORDER BY MAX(retrieved_at) DESC LIMIT %s
                 )
                 SELECT e.run_id,e.asin,e.source_type,e.transfer_bytes,e.retrieved_at,e.error_code,e.block_reason,
-                       e.context_json,e.raw_html_path
+                       e.context_json,e.raw_html_path,e.content_hash
                 FROM amazon_us.collection_evidence e JOIN recent r ON r.run_id=e.run_id
                 WHERE e.tenant_id=%s ORDER BY r.ended_at DESC,e.id
                 """,
                 (tenant_id, limit, tenant_id),
             )
-            evidence_rows = [dict(row) for row in cursor.fetchall()]
+            evidence_rows = [
+                reconcile_legacy_variant_canonical(dict(row), raw_html_dir)
+                for row in cursor.fetchall()
+            ]
             cursor.execute("SELECT to_regclass('amazon_us.collection_run') AS relation")
             has_ledger = cursor.fetchone()["relation"] is not None
             ledger_rows: dict[str, dict[str, Any]] = {}
@@ -1043,7 +1049,7 @@ class PostgresConsoleRepository:
             "warning": "time_window_inference is legacy fallback; new network failures write run evidence",
         }
 
-    def load_detail(self, asin: str) -> dict[str, Any] | None:
+    def load_detail(self, asin: str, raw_html_dir: Path | None = None) -> dict[str, Any] | None:
         tenant_id = self._require_tenant()
         asin = asin.upper()
         with self._connect() as conn, conn.cursor() as cursor:
@@ -1097,7 +1103,10 @@ class PostgresConsoleRepository:
                 "WHERE tenant_id=%s AND marketplace='US' AND asin=%s AND subject_type=%s ORDER BY id DESC LIMIT 30",
                 identity,
             )
-            evidence = [dict(row) for row in cursor.fetchall()]
+            evidence = [
+                reconcile_legacy_variant_canonical(dict(row), raw_html_dir)
+                for row in cursor.fetchall()
+            ]
             cursor.execute(
                 "SELECT snapshot_id,collected_at,price,availability,rating,review_count,status FROM amazon_us.product_snapshot "
                 "WHERE tenant_id=%s AND marketplace='US' AND asin=%s AND subject_type=%s "
@@ -1244,7 +1253,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 limit = int(query.get("limit", ["20"])[0])
                 self._send_json(
                     HTTPStatus.OK,
-                    {"schema_version": "amazon-us-console-v2", "items": repository.list_runs(limit)},
+                    {
+                        "schema_version": "amazon-us-console-v2",
+                        "items": (
+                            repository.list_runs(limit, selected_raw_root)
+                            if isinstance(repository, PostgresConsoleRepository)
+                            else repository.list_runs(limit)
+                        ),
+                    },
                 )
                 return
             if path == "/api/operations":
@@ -1279,8 +1295,15 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     raise ValueError("invalid status")
                 if stage and stage not in {"product", "reviews", "complete"}:
                     raise ValueError("invalid stage")
-                payload = repository.list_items(
-                    status=status, stage=stage, query=term, limit=limit, offset=offset
+                payload = (
+                    repository.list_items(
+                        status=status, stage=stage, query=term, limit=limit, offset=offset,
+                        raw_html_dir=selected_raw_root,
+                    )
+                    if isinstance(repository, PostgresConsoleRepository)
+                    else repository.list_items(
+                        status=status, stage=stage, query=term, limit=limit, offset=offset
+                    )
                 )
                 self._send_json(HTTPStatus.OK, payload)
                 return
@@ -1289,7 +1312,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 asin = match.group(1).upper()
                 if not ASIN_RE.fullmatch(asin):
                     raise ValueError("invalid ASIN")
-                payload = repository.load_detail(asin)
+                payload = (
+                    repository.load_detail(asin, selected_raw_root)
+                    if isinstance(repository, PostgresConsoleRepository)
+                    else repository.load_detail(asin)
+                )
                 if payload is None:
                     self._send_json(HTTPStatus.NOT_FOUND, {"error": "asin_not_found", "asin": asin})
                     return
