@@ -31,7 +31,7 @@ except ModuleNotFoundError:
 SCHEMA_VERSION = "amazon-us-proxy-canary-v1"
 DEFAULT_CANARY_URL = "https://api.ipify.org?format=json"
 APPROVED_CANARY_URLS = frozenset({DEFAULT_CANARY_URL})
-MAX_PROXY_SESSION_PORTS = 40
+MAX_PROXY_SESSION_PORTS = 64
 
 
 def effective_slot_budget(config: dict[str, Any]) -> int:

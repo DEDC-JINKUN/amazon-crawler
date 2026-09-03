@@ -7,7 +7,7 @@ from collections import deque
 from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
 
-MAX_PROXY_SESSION_PORTS = 40
+MAX_PROXY_SESSION_PORTS = 64
 
 
 class ProxyCircuitOpen(RuntimeError):

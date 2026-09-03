@@ -130,6 +130,55 @@ def test_per_asin_canary_denies_twenty_actions_when_only_thirty_four_recovery_sl
     assert result["capacity_gate_reason"] == "replacement_capacity_insufficient"
 
 
+@pytest.mark.parametrize(
+    ("unique_count", "expected_status", "expected_reason"),
+    [
+        (40, "allowed", "capacity_sufficient"),
+        (39, "denied", "replacement_capacity_insufficient"),
+    ],
+)
+def test_fifty_planned_slots_gate_twenty_actions_on_actual_unique_capacity(
+    monkeypatch, unique_count, expected_status, expected_reason,
+):
+    module = load_module()
+    cfg = config(
+        proxy_product_session_scope="per_asin",
+        proxy_session_retry_per_asin=1,
+        proxy_session_ports=list(range(10000, 10050)),
+    )
+    monkeypatch.setenv("PROXY_USER", "fixture-user")
+    monkeypatch.setenv("PROXY_PASS", "fixture-pass")
+    responses = iter([
+        *[
+            {"ok": True, "egress_ip": f"203.0.113.{index}", "http_status": 200, "latency_ms": 10.0}
+            for index in range(1, unique_count + 1)
+        ],
+        *[
+            {"ok": False, "error_class": "timeout", "auth_status": "unknown",
+             "connect_tls_status": "failed", "http_status": None, "latency_ms": None}
+            for _ in range(50 - unique_count)
+        ],
+    ])
+
+    result = module.run_proxy_canary(
+        cfg, requested_actions=20, probe_slot=lambda **_kwargs: next(responses),
+    )
+
+    assert result["planned_slots"] == result["tested_slots"] == 50
+    assert result["available_slots"] == result["unique_egress_count"] == unique_count
+    assert result["capacity_gate_status"] == expected_status
+    assert result["capacity_gate_reason"] == expected_reason
+    assert "203.0.113" not in repr(result)
+
+
+def test_canary_accepts_sixty_four_planned_slots_but_rejects_sixty_five():
+    module = load_module()
+
+    assert len(module.capacity_resource_slot_ids(config(proxy_session_ports=list(range(10000, 10064))))) == 64
+    with pytest.raises(ValueError, match="1 to 64 approved ports"):
+        module.capacity_resource_slot_ids(config(proxy_session_ports=list(range(10000, 10065))))
+
+
 def test_partial_port_failure_denies_when_productive_capacity_lacks_reserved_replacement(monkeypatch):
     module = load_module()
     monkeypatch.setenv("PROXY_USER", "private-user")

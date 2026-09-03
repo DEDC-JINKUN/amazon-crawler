@@ -242,11 +242,18 @@ def test_rejects_unsafe_limits(name, value):
         module.ProxySessionPool(config(**{name: value}), lambda cfg: None, classifier)
 
 
-def test_rejects_more_than_forty_approved_ports():
+def test_accepts_sixty_four_planned_slots_but_rejects_sixty_five():
     module = load_pool()
-    with pytest.raises(ValueError, match="1 to 40 approved ports"):
+    pool = module.ProxySessionPool(
+        config(proxy_session_ports=list(range(10000, 10064))),
+        lambda cfg: None,
+        classifier,
+    )
+    assert len(pool._all_ports) == 64
+
+    with pytest.raises(ValueError, match="1 to 64 approved ports"):
         module.ProxySessionPool(
-            config(proxy_session_ports=list(range(10000, 10041))),
+            config(proxy_session_ports=list(range(10000, 10065))),
             lambda cfg: None,
             classifier,
         )
