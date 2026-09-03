@@ -178,6 +178,21 @@ def finish_interrupted_from_host(lifecycle: dict[str, Any], worker_exit_code: in
     if not dsn:
         raise RuntimeError(f"PostgreSQL DSN environment variable is required: {dsn_env}")
     now = datetime.now(timezone.utc).isoformat()
+    capacity_cleanup_status = "not_applicable"
+    capacity_cleanup_reason = None
+    capacity_authorization = lifecycle.get("capacity_authorization") or {}
+    reservation_id = capacity_authorization.get("reservation_id") if isinstance(capacity_authorization, dict) else None
+    worker_id = lifecycle.get("worker_id")
+    if reservation_id and worker_id:
+        try:
+            from postgres_worker_storage import PostgresWorkerStorage
+            released = PostgresWorkerStorage(dsn, tenant_id=str(lifecycle["tenant_id"])).release_proxy_capacity(
+                str(reservation_id), str(worker_id)
+            )
+            capacity_cleanup_status = "released" if released else "already_inactive"
+        except Exception:
+            capacity_cleanup_status = "ttl_fallback"
+            capacity_cleanup_reason = "capacity_release_failed"
     receipt = {
         "schema_version": "amazon-us-control-receipt-v3",
         "run_id": lifecycle["run_id"],
@@ -189,6 +204,8 @@ def finish_interrupted_from_host(lifecycle: dict[str, Any], worker_exit_code: in
         "worker_exit_code": worker_exit_code,
         "termination_reason": "controller_exited",
         "capacity_authorization": lifecycle.get("capacity_authorization"),
+        "capacity_cleanup_status": capacity_cleanup_status,
+        "capacity_cleanup_reason": capacity_cleanup_reason,
         "finished_at": now,
     }
     connect = lambda: _default_connect(dsn)
@@ -202,14 +219,6 @@ def finish_interrupted_from_host(lifecycle: dict[str, Any], worker_exit_code: in
         termination_reason="controller_exited",
         receipt=receipt,
     )
-    capacity_authorization = lifecycle.get("capacity_authorization") or {}
-    reservation_id = capacity_authorization.get("reservation_id") if isinstance(capacity_authorization, dict) else None
-    worker_id = lifecycle.get("worker_id")
-    if reservation_id and worker_id:
-        from postgres_worker_storage import PostgresWorkerStorage
-        PostgresWorkerStorage(dsn, tenant_id=str(lifecycle["tenant_id"])).release_proxy_capacity(
-            str(reservation_id), str(worker_id)
-        )
     operation_id = lifecycle.get("operation_id")
     if operation_id:
         from operation_ledger import finish_operation

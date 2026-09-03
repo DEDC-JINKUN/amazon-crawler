@@ -713,7 +713,8 @@ class PostgresConsoleRepository:
                     """
                     SELECT reservation_id,tenant_id,owner_id,canary_operation_id,requested_capacity,
                            required_slots,reserved_slots,status,reason,fact_finished_at,fact_expires_at,
-                           expires_at,capacity_snapshot_json,created_at,released_at,updated_at
+                           expires_at,capacity_snapshot_json,created_at,released_at,updated_at,
+                           CURRENT_TIMESTAMP AS observed_at
                     FROM amazon_us.proxy_capacity_reservation
                     WHERE tenant_id=%s ORDER BY created_at DESC LIMIT %s
                     """,
@@ -722,14 +723,23 @@ class PostgresConsoleRepository:
                 for value in cursor.fetchall():
                     reservation = dict(value)
                     snapshot = dict(reservation.get("capacity_snapshot_json") or {})
+                    stored_status = str(reservation.get("status") or "")
+                    expired_active = bool(
+                        stored_status == "active"
+                        and reservation.get("expires_at") is not None
+                        and reservation.get("observed_at") is not None
+                        and reservation["expires_at"] <= reservation["observed_at"]
+                    )
+                    effective_status = "expired" if expired_active else stored_status
+                    effective_reason = "reservation_expired" if expired_active else reservation.get("reason")
                     rows.append({
                         "operation_id": reservation.get("reservation_id"),
                         "tenant_id": reservation.get("tenant_id"),
                         "operation_type": "capacity_reservation",
-                        "status": reservation.get("status"),
+                        "status": effective_status,
                         "preflight_status": "not_applicable",
-                        "failure_stage": "capacity_gate" if reservation.get("status") == "denied" else None,
-                        "error_class": reservation.get("reason"),
+                        "failure_stage": "capacity_gate" if effective_status in {"denied", "expired"} else None,
+                        "error_class": effective_reason,
                         "egress_id": None,
                         "collection_run_id": None,
                         "http_status": None,
@@ -749,8 +759,8 @@ class PostgresConsoleRepository:
                         "required_slots": reservation.get("required_slots"),
                         "slot_budget": snapshot.get("slot_budget"),
                         "slot_capacity": snapshot.get("slot_capacity"),
-                        "capacity_gate_status": "allowed" if reservation.get("status") in {"active", "released"} else "denied",
-                        "capacity_gate_reason": reservation.get("reason"),
+                        "capacity_gate_status": "allowed" if effective_status in {"active", "released"} else "denied",
+                        "capacity_gate_reason": effective_reason,
                         "canary_p95_latency_ms": snapshot.get("canary_p95_latency_ms"),
                         "authorizing_canary_operation_id": reservation.get("canary_operation_id"),
                         "capacity_reservation_id": reservation.get("reservation_id"),

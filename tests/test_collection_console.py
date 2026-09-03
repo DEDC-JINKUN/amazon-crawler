@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import importlib.util
 import json
 import re
@@ -467,7 +468,14 @@ def test_console_operations_include_bound_run_capacity_and_agent_reservation_den
         "reserved_slots": 0, "status": "denied", "reason": "capacity_reserved_elsewhere",
         "fact_finished_at": None, "fact_expires_at": None, "expires_at": None,
         "capacity_snapshot_json": {"unique_egress_count": 1, "slot_capacity": 3},
-        "created_at": None, "released_at": None, "updated_at": None,
+        "created_at": None, "released_at": None, "updated_at": None, "observed_at": None,
+    }
+    expired_reservation = {
+        **denied_reservation,
+        "reservation_id": "reservation-expired", "status": "active", "reason": "capacity_reserved",
+        "reserved_slots": 1,
+        "expires_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+        "observed_at": datetime(2026, 1, 2, tzinfo=timezone.utc),
     }
 
     class Cursor:
@@ -481,7 +489,7 @@ def test_console_operations_include_bound_run_capacity_and_agent_reservation_den
             elif "to_regclass('amazon_us.proxy_capacity_reservation')" in sql:
                 self.rows = [{"relation": "amazon_us.proxy_capacity_reservation"}]
             elif "FROM amazon_us.proxy_capacity_reservation" in sql:
-                self.rows = [denied_reservation]
+                self.rows = [denied_reservation, expired_reservation]
             else:
                 raise AssertionError(sql)
         def fetchone(self): return self.rows[0]
@@ -499,11 +507,15 @@ def test_console_operations_include_bound_run_capacity_and_agent_reservation_den
     assert {item["operation_type"] for item in items} == {"run", "capacity_reservation"}
     run = next(item for item in items if item["operation_type"] == "run")
     denial = next(item for item in items if item["operation_type"] == "capacity_reservation")
+    expired = next(item for item in items if item.get("operation_id") == "reservation-expired")
     assert run["authorizing_canary_operation_id"] == "op-canary-1"
     assert run["capacity_reservation_id"] == "reservation-1"
     assert denial["status"] == "denied"
     assert denial["capacity_gate_reason"] == "capacity_reserved_elsewhere"
     assert denial["available_slots"] is None
+    assert expired["status"] == "expired"
+    assert expired["capacity_gate_status"] == "denied"
+    assert expired["capacity_gate_reason"] == "reservation_expired"
 
 
 def test_console_tooltips_explain_all_operational_terms_accessibly():

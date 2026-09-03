@@ -62,12 +62,15 @@ Windows本机推荐使用统一控制入口：
 ```powershell
 $env:AMAZON_US_POSTGRES_DSN = 'host=127.0.0.1 port=5432 dbname=postgres user=postgres'
 $env:PGPASSWORD = '仅在当前 PowerShell 会话填写'
+$env:AMAZON_PROXY_CREDENTIAL_GENERATION = 'manual-proxy-generation-v1' # 非秘密；代理凭据轮换时必须同时更换
 try {
   .\run_once_windows.bat
 } finally {
   Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
 }
 ```
+
+直接使用`crawler.ps1`、`run_once_windows.bat`或`run_scheduled_windows.bat`时必须显式提供上述非秘密generation。推荐的正式入口仍是`run_owned_full_secure.ps1`，它会从DPAPI vault自动注入并在轮换时更新。
 
 定时入口 `run_scheduled_windows.bat` 会先将超过 24 小时的 PostgreSQL 商品快照加入刷新队列，再运行一个受限批次。
 
@@ -118,7 +121,9 @@ Agent 调用使用 DPAPI 派生的 scoped key，子进程不会得到 PostgreSQL
 
 服务身份同时指纹化 Agent 服务、Worker、代理池、API、存储模块和实际 TOML。业务调用发现已验证的旧版本进程时会受控替换；无法证明归属的监听器不会被终止或接管。
 
-带 `-Wait` 的刷新会等待 PostgreSQL job 进入 `completed`、`failed` 或 `cancelled`，并返回最新商品快照、evidence、请求到终态的耗时及可用流量字段。同一次 Agent 批量的最多5条由一个runner run处理。Agent与普通Worker共享原子容量reservation：每次claim和创建新槽前复核TTL，只使用分配给自己的slot；拒绝事实持久化并通过`/readyz`与Console解释。单ASIN最多换会话一次，不做无限轮换、验证码处理、登录或个人Cookie读取。
+带 `-Wait` 的刷新会等待 PostgreSQL job 进入 `completed`、`failed` 或 `cancelled`，并返回最新商品快照、evidence、请求到终态的耗时及可用流量字段。等待客户端每次只轮询一个job、请求间隔至少1.1秒，并遵守本机API的`Retry-After`；CLI自行以UTF-8输出JSON，不依赖Windows当前代码页。
+
+同一次 Agent 批量的最多5条由一个runner run处理，但容量按当时实际可领取的1至5条计算。`agent-health`分别报告`processed_actions`、`succeeded_actions`、`failed_actions`与`blocked_actions`；兼容字段`completed_actions`只等于成功数，不再表示已处理数。Agent与普通Worker共享原子容量reservation：每次claim和创建新槽前复核TTL，只使用分配给自己的生产槽和最多两个有界替换槽；耗尽内部HTTP重试的transport-bad槽会隔离，下一ASIN不得复用。拒绝事实持久化并通过`/readyz`与Console解释。单ASIN因访问控制最多换会话一次，不做无限轮换、验证码处理、登录或个人Cookie读取。
 
 本机只读运营控制台：
 

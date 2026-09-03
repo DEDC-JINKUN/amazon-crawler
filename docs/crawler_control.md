@@ -48,9 +48,10 @@ console      http://127.0.0.1:8770
 
 1. 获取按项目和tenant命名的Windows named mutex，原子保证单控制器；
 2. 隐藏输入PostgreSQL密码；
+   非DPAPI入口还必须显式提供非秘密`AMAZON_PROXY_CREDENTIAL_GENERATION`，并在代理凭据轮换时更新；
 3. 复用或启动loopback-only只读Console；
 4. 使用非Amazon端点执行live preflight；
-5. 读取PostgreSQL最新canary operation，验证credential generation、配置指纹、事实状态/计数、新鲜度和计划规模；在全局配置哈希advisory lock内原子预约具体可用槽；
+5. 读取PostgreSQL最新canary operation，验证credential generation、配置指纹、事实状态/计数、新鲜度和计划规模；按实际action数计算最低生产槽，并额外预约最多两个有界隔离替换槽；所有物理槽身份在PostgreSQL advisory lock内跨tenant/进程原子互斥；
 6. 把canary operation、reservation ID、事实/过期时间及安全容量快照绑定到控制operation和collection run；拒绝时不创建collection run、不领取任务、不访问Amazon；
 7. 启动Windows Job Object宿主；宿主先等待gate，控制器登记真实宿主PID后才允许启动Worker；
 8. 当前控制台每5秒显示run进度；

@@ -51,10 +51,10 @@ except ModuleNotFoundError:
     from proxy_tunnel_auth import ProxyTunnelAuthHTTPSHandler
 
 try:
-    from proxy_capacity_gate import ProxyCapacityGateDenied, acquire_capacity_reservation, capacity_config_hash
+    from proxy_capacity_gate import ProxyCapacityGateDenied, acquire_capacity_reservation, capacity_config_hash, reservation_slots_for
 except ModuleNotFoundError:
     sys.path.insert(0, str(ROOT / "scripts"))
-    from proxy_capacity_gate import ProxyCapacityGateDenied, acquire_capacity_reservation, capacity_config_hash
+    from proxy_capacity_gate import ProxyCapacityGateDenied, acquire_capacity_reservation, capacity_config_hash, reservation_slots_for
 
 DEFAULT_CONFIG = ROOT / "config" / "amazon_us.example.toml"
 DEFAULT_MANIFEST = ROOT / "amazon_us_asin_manifest.csv"
@@ -2965,9 +2965,14 @@ def _run_postgres_actions_impl(
                     browser_result = None
             if browser_result is None:
                 _record_proxy_outcome(adapter, "failed")
+                failure_transfer_bytes = (
+                    None
+                    if bool(getattr(adapter, "browser_attempted", False))
+                    else getattr(adapter, "last_transfer_bytes", None)
+                )
                 evidence = _postgres_evidence(
                     run_id, task, None, None, getattr(adapter, "source_type", "http_html"),
-                    raw_html_dir, _evidence_context(config.get("context"), adapter), getattr(adapter, "last_transfer_bytes", None),
+                    raw_html_dir, _evidence_context(config.get("context"), adapter), failure_transfer_bytes,
                     error_code="fetch_error",
                 )
                 storage.save_failure(task=task, reason="fetch_error", error=str(exc), evidence=evidence)
@@ -3233,16 +3238,22 @@ def run_postgres_actions(
     reservation_id = str(reservation["reservation_id"])
     expected_hash = capacity_config_hash(config)
     expected_generation = str(config.get("proxy_credential_generation") or "")
+    expected_reserved_slots = reservation_slots_for(config, max_actions)
     if (
         reservation.get("capacity_config_hash") != expected_hash
         or reservation.get("credential_generation") != expected_generation
         or int(reservation.get("requested_capacity") or 0) < max_actions
-        or int(reservation.get("reserved_slots") or 0) < 1
+        or int(reservation.get("reserved_slots") or 0) < expected_reserved_slots
     ):
         release(reservation_id, worker_id)
         raise ProxyCapacityGateDenied("capacity_reservation_scope_mismatch")
 
     def validate_reservation() -> dict[str, Any]:
+        def release_claimed_leases(reason: str) -> None:
+            cleanup = getattr(storage, "release_claimed_capacity_leases", None)
+            if callable(cleanup):
+                cleanup(worker_id, reason)
+
         try:
             current = validate(
                 reservation_id,
@@ -3251,9 +3262,24 @@ def run_postgres_actions(
                 lease_seconds=lease_seconds,
             )
         except Exception:
+            try:
+                release_claimed_leases("capacity_reservation_unavailable")
+            except Exception:
+                raise ProxyCapacityGateDenied(
+                    "capacity_task_release_failed",
+                    {
+                        "status": "denied",
+                        "reason": "capacity_task_release_failed",
+                        "lease_cleanup_status": "ttl_fallback",
+                    },
+                ) from None
             raise ProxyCapacityGateDenied("capacity_reservation_unavailable") from None
         if not isinstance(current, dict) or current.get("status") != "active":
             reason = str(current.get("reason") if isinstance(current, dict) else "capacity_reservation_denied")
+            try:
+                release_claimed_leases(reason)
+            except Exception:
+                raise ProxyCapacityGateDenied("capacity_task_release_failed") from None
             raise ProxyCapacityGateDenied(reason, current if isinstance(current, dict) else None)
         return current
 

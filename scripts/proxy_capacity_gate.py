@@ -14,10 +14,10 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from proxy_canary import capacity_config_hash
+    from proxy_canary import capacity_config_hash, capacity_resource_slot_ids
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from proxy_canary import capacity_config_hash
+    from proxy_canary import capacity_config_hash, capacity_resource_slot_ids
 
 
 class ProxyCapacityGateDenied(RuntimeError):
@@ -27,6 +27,22 @@ class ProxyCapacityGateDenied(RuntimeError):
         self.reason = str(reason)
         self.decision = dict(decision or {"status": "denied", "reason": self.reason})
         super().__init__(f"proxy_capacity_gate_denied:{self.reason}")
+
+
+def reservation_slots_for(config: dict[str, Any], requested_actions: int) -> int:
+    """Reserve the productive minimum plus a bounded two-slot quarantine buffer."""
+    if requested_actions < 1:
+        raise ValueError("requested_actions must be positive")
+    planned_slots = len(list(config.get("proxy_session_ports") or []))
+    slot_budget = int(config.get("proxy_session_max_asins") or 3)
+    if planned_slots < 1 or slot_budget < 1:
+        raise ValueError("proxy session capacity is invalid")
+    required_slots = math.ceil(requested_actions / slot_budget)
+    replacement_buffer = min(
+        max(0, requested_actions - 1),
+        max(0, min(int(config.get("proxy_session_consecutive_block_limit") or 2), 5)),
+    )
+    return min(planned_slots, required_slots + replacement_buffer)
 
 
 def _decision(
@@ -171,6 +187,7 @@ def acquire_capacity_reservation(
     if slot_budget < 1 or slot_budget > 5:
         raise ProxyCapacityGateDenied("capacity_configuration_invalid")
     required_slots = math.ceil(requested_actions / slot_budget) if slot_budget > 0 else requested_actions
+    reservation_slots = reservation_slots_for(config, requested_actions)
     max_age_seconds = int(config.get("proxy_canary_max_age_seconds") or 3600)
     if max_age_seconds < 1 or max_age_seconds > 86400:
         raise ProxyCapacityGateDenied("capacity_configuration_invalid")
@@ -194,8 +211,10 @@ def acquire_capacity_reservation(
             owner_id=owner_id,
             capacity_config_hash=config_hash,
             credential_generation=credential_generation,
+            resource_slot_ids=capacity_resource_slot_ids(config),
             requested_capacity=requested_actions,
             required_slots=required_slots,
+            reservation_slots=reservation_slots,
             slot_budget=slot_budget,
             max_age_seconds=max_age_seconds,
             lease_seconds=lease_seconds,
@@ -207,6 +226,11 @@ def acquire_capacity_reservation(
         if not re.fullmatch(r"[a-z0-9_]{1,100}", reason):
             reason = "capacity_reservation_denied"
         raise ProxyCapacityGateDenied(reason, decision if isinstance(decision, dict) else None)
+    if (
+        int(decision.get("reserved_slots") or 0) < reservation_slots
+        or len(list(decision.get("slot_ids") or [])) != int(decision.get("reserved_slots") or 0)
+    ):
+        raise ProxyCapacityGateDenied("capacity_reservation_scope_mismatch")
     return dict(decision)
 
 
@@ -300,6 +324,7 @@ __all__ = [
     "capacity_config_hash",
     "evaluate_capacity_fact",
     "evaluate_capacity_snapshot",
+    "reservation_slots_for",
     "reserve_capacity",
 ]
 

@@ -10,6 +10,10 @@ if "%AMAZON_US_POSTGRES_DSN%"=="" (
   echo Set AMAZON_US_POSTGRES_DSN before running the production worker.
   exit /b 1
 )
+if "%AMAZON_PROXY_CREDENTIAL_GENERATION%"=="" (
+  echo Set non-secret AMAZON_PROXY_CREDENTIAL_GENERATION or use the DPAPI launcher.
+  exit /b 1
+)
 python scripts\schedule_postgres_refresh.py --dsn-env AMAZON_US_POSTGRES_DSN --tenant-id amazon_us_local --subject-type own --min-age-hours 24 --limit 1000 || exit /b 1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File crawler.ps1 run -Limit 10 -TenantId amazon_us_local -ManifestPath amazon_us_asin_manifest.csv -ConfigPath config\amazon_us.windows.toml -OutputDir data\amazon_us
 set WORKER_EXIT=%ERRORLEVEL%

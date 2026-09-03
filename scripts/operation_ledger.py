@@ -104,18 +104,26 @@ BEGIN
             )
         ) NOT VALID;
     END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='operation_canary_state_v2_check' AND conrelid='amazon_us.operation_run'::regclass) THEN
-        ALTER TABLE amazon_us.operation_run ADD CONSTRAINT operation_canary_state_v2_check CHECK (
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname='operation_canary_state_v2_check' AND conrelid='amazon_us.operation_run'::regclass) THEN
+        ALTER TABLE amazon_us.operation_run DROP CONSTRAINT operation_canary_state_v2_check;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='operation_canary_state_v3_check' AND conrelid='amazon_us.operation_run'::regclass) THEN
+        ALTER TABLE amazon_us.operation_run ADD CONSTRAINT operation_canary_state_v3_check CHECK (
             canary_status IS NULL OR
             (canary_status='unknown' AND capacity_gate_status='denied' AND tested_slots=0
              AND available_slots IS NULL AND unique_egress_count IS NULL
              AND duplicate_egress_count IS NULL AND slot_capacity IS NULL) OR
-            (canary_status='succeeded' AND capacity_gate_status='allowed'
+            (canary_status='succeeded'
              AND tested_slots=planned_slots AND available_slots=planned_slots
-             AND unique_egress_count=planned_slots AND duplicate_egress_count=0) OR
+             AND unique_egress_count=planned_slots AND duplicate_egress_count=0
+             AND requested_capacity IS NOT NULL AND required_slots IS NOT NULL AND slot_capacity IS NOT NULL
+             AND capacity_gate_status IN ('allowed','denied')
+             AND ((capacity_gate_status='allowed')=(slot_capacity>=requested_capacity AND unique_egress_count>=required_slots))) OR
             (canary_status='partial' AND unique_egress_count>0
              AND NOT (tested_slots=planned_slots AND available_slots=planned_slots
-                      AND unique_egress_count=planned_slots AND duplicate_egress_count=0)
+                       AND unique_egress_count=planned_slots AND duplicate_egress_count=0)
+             AND requested_capacity IS NOT NULL AND required_slots IS NOT NULL AND slot_capacity IS NOT NULL
+             AND capacity_gate_status IN ('allowed','denied')
              AND ((capacity_gate_status='allowed')=(slot_capacity>=requested_capacity AND unique_egress_count>=required_slots))) OR
             (canary_status='failed' AND capacity_gate_status='denied' AND unique_egress_count=0)
         ) NOT VALID;
@@ -149,6 +157,7 @@ CREATE TABLE IF NOT EXISTS amazon_us.proxy_capacity_reservation (
     required_slots integer NOT NULL CHECK (required_slots > 0),
     reserved_slots integer NOT NULL CHECK (reserved_slots >= 0),
     slot_ids_json jsonb NOT NULL DEFAULT '[]'::jsonb,
+    resource_slot_ids_json jsonb NOT NULL DEFAULT '[]'::jsonb,
     status text NOT NULL CHECK (status IN ('active','released','expired','denied')),
     reason text NOT NULL,
     fact_finished_at timestamptz,
@@ -158,16 +167,50 @@ CREATE TABLE IF NOT EXISTS amazon_us.proxy_capacity_reservation (
     created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
     released_at timestamptz,
     updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT proxy_capacity_reservation_state_check CHECK (
-        (status='denied' AND reserved_slots=0 AND jsonb_array_length(slot_ids_json)=0) OR
+    CONSTRAINT proxy_capacity_reservation_state_v2_check CHECK (
+        (status='denied' AND reserved_slots=0 AND jsonb_array_length(slot_ids_json)=0
+         AND jsonb_array_length(resource_slot_ids_json)=0) OR
         (status IN ('active','released','expired') AND canary_operation_id IS NOT NULL
-         AND reserved_slots=required_slots AND reserved_slots=jsonb_array_length(slot_ids_json)
+         AND reserved_slots>=required_slots AND reserved_slots=jsonb_array_length(slot_ids_json)
+         AND reserved_slots=jsonb_array_length(resource_slot_ids_json)
          AND fact_finished_at IS NOT NULL AND fact_expires_at IS NOT NULL AND expires_at IS NOT NULL)
     )
 );
+ALTER TABLE amazon_us.proxy_capacity_reservation
+    ADD COLUMN IF NOT EXISTS resource_slot_ids_json jsonb NOT NULL DEFAULT '[]'::jsonb;
+UPDATE amazon_us.proxy_capacity_reservation
+SET status='expired',reason='reservation_schema_upgraded',updated_at=CURRENT_TIMESTAMP
+WHERE status='active' AND jsonb_array_length(resource_slot_ids_json)=0;
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname='proxy_capacity_reservation_state_check' AND conrelid='amazon_us.proxy_capacity_reservation'::regclass) THEN
+        ALTER TABLE amazon_us.proxy_capacity_reservation DROP CONSTRAINT proxy_capacity_reservation_state_check;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='proxy_capacity_reservation_state_v2_check' AND conrelid='amazon_us.proxy_capacity_reservation'::regclass) THEN
+        ALTER TABLE amazon_us.proxy_capacity_reservation ADD CONSTRAINT proxy_capacity_reservation_state_v2_check CHECK (
+            (status='denied' AND reserved_slots=0 AND jsonb_array_length(slot_ids_json)=0
+             AND jsonb_array_length(resource_slot_ids_json)=0) OR
+            (status IN ('active','released','expired') AND canary_operation_id IS NOT NULL
+             AND reserved_slots>=required_slots AND reserved_slots=jsonb_array_length(slot_ids_json)
+             AND reserved_slots=jsonb_array_length(resource_slot_ids_json)
+             AND fact_finished_at IS NOT NULL AND fact_expires_at IS NOT NULL AND expires_at IS NOT NULL)
+        ) NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='proxy_capacity_reservation_resources_v2_check' AND conrelid='amazon_us.proxy_capacity_reservation'::regclass) THEN
+        ALTER TABLE amazon_us.proxy_capacity_reservation ADD CONSTRAINT proxy_capacity_reservation_resources_v2_check CHECK (
+            (status='denied' AND jsonb_array_length(resource_slot_ids_json)=0) OR
+            (status IN ('active','released','expired') AND reserved_slots=jsonb_array_length(resource_slot_ids_json))
+        ) NOT VALID;
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_proxy_capacity_active_config
     ON amazon_us.proxy_capacity_reservation (capacity_config_hash, expires_at)
     WHERE status='active';
+CREATE INDEX IF NOT EXISTS idx_proxy_capacity_active_resources
+    ON amazon_us.proxy_capacity_reservation USING gin (resource_slot_ids_json)
+    WHERE status='active';
+CREATE INDEX IF NOT EXISTS idx_proxy_capacity_tenant_created
+    ON amazon_us.proxy_capacity_reservation (tenant_id, created_at DESC);
 """
 
 ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
@@ -279,6 +322,9 @@ def _validated_capacity_fact(value: dict[str, Any] | None) -> dict[str, Any] | N
             counts["planned_slots"], counts["tested_slots"], counts["available_slots"],
             counts["unique_egress_count"], counts["duplicate_egress_count"],
         )
+        expected_session_ids = [f"session-{index:02d}" for index in range(1, planned + 1)]
+        if session_ids != expected_session_ids:
+            raise ValueError("capacity session ids must match planned slot order")
         requested, required, budget, slot_capacity = (
             counts["requested_capacity"], counts["required_slots"], counts["slot_budget"], counts["slot_capacity"],
         )
@@ -322,7 +368,7 @@ def _validated_capacity_authorization(value: dict[str, Any]) -> dict[str, Any]:
     required = int(value.get("required_slots") or 0)
     reserved = int(value.get("reserved_slots") or 0)
     slot_ids = list(value.get("slot_ids") or [])
-    if requested < 1 or required < 1 or reserved != required or len(slot_ids) != reserved:
+    if requested < 1 or required < 1 or reserved < required or len(slot_ids) != reserved:
         raise ValueError("invalid capacity authorization counts")
     if len(set(slot_ids)) != len(slot_ids) or any(not re.fullmatch(r"session-\d{2}", str(item)) for item in slot_ids):
         raise ValueError("invalid reserved slot ids")

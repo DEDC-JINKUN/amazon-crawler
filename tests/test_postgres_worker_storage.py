@@ -189,23 +189,25 @@ def test_atomic_reservation_kernel_prevents_two_tenants_from_overbooking_one_slo
             elif "WHERE reservation_id=%s FOR UPDATE" in sql:
                 self.rows = []
             elif "FROM amazon_us.operation_run" in sql:
+                tenant_index = int(self.tenant_id.rsplit("-", 1)[1])
                 self.rows = [{
                     "operation_id": f"op-{self.tenant_id}",
                     "canary_status": "succeeded", "planned_slots": 1, "tested_slots": 1,
                     "available_slots": 1, "unique_egress_count": 1, "duplicate_egress_count": 0,
                     "requested_capacity": 1, "required_slots": 1, "slot_budget": 1, "slot_capacity": 1,
                     "capacity_gate_status": "allowed", "capacity_gate_reason": "capacity_sufficient",
-                    "capacity_config_hash": "a" * 64, "credential_generation": "test-generation-1",
+                    "capacity_config_hash": ("a" if tenant_index == 0 else "b") * 64,
+                    "credential_generation": f"test-generation-{tenant_index + 1}",
                     "canary_p95_latency_ms": 10.0,
                     "capacity_detail_json": {"sessions": [{"session_id": "session-01", "status": "available", "usable": True}]},
                     "finished_at": now, "fact_expires_at": now + timedelta(hours=1),
                     "observed_at": now, "is_fresh": True,
                 }]
-            elif "SELECT slot_ids_json FROM amazon_us.proxy_capacity_reservation" in sql:
+            elif "FROM amazon_us.proxy_capacity_reservation" in sql and "resource_slot_ids_json" in sql:
                 self.rows = list(shared.active_slot_rows)
             elif "INSERT INTO amazon_us.proxy_capacity_reservation" in sql:
-                if params[10] == "active":
-                    shared.active_slot_rows.append({"slot_ids_json": json.loads(params[9])})
+                if params[11] == "active":
+                    shared.active_slot_rows.append({"resource_slot_ids_json": json.loads(params[10])})
                 self.rows = []
             else:
                 self.rows = []
@@ -236,8 +238,10 @@ def test_atomic_reservation_kernel_prevents_two_tenants_from_overbooking_one_slo
         barrier.wait()
         return repositories[index].reserve_proxy_capacity(
             reservation_id=f"reservation-{index}", owner_id=f"worker-{index}",
-            capacity_config_hash="a" * 64, credential_generation="test-generation-1",
-            requested_capacity=1, required_slots=1, slot_budget=1,
+            capacity_config_hash=("a" if index == 0 else "b") * 64,
+            credential_generation=f"test-generation-{index + 1}",
+            resource_slot_ids=["resource-" + "1" * 64],
+            requested_capacity=1, required_slots=1, reservation_slots=1, slot_budget=1,
             max_age_seconds=3600, lease_seconds=600,
         )
 
@@ -247,8 +251,27 @@ def test_atomic_reservation_kernel_prevents_two_tenants_from_overbooking_one_slo
     assert sorted(item["status"] for item in results) == ["active", "denied"]
     assert next(item for item in results if item["status"] == "denied")["reason"] == "capacity_reserved_elsewhere"
     lock_index = next(index for index, sql in enumerate(shared.events) if "pg_advisory_xact_lock" in sql)
-    active_index = next(index for index, sql in enumerate(shared.events) if "SELECT slot_ids_json" in sql)
+    active_index = next(index for index, sql in enumerate(shared.events) if "resource_slot_ids_json" in sql and "SELECT" in sql)
     assert lock_index < active_index
+
+
+def test_capacity_denial_releases_owned_task_and_requeues_refresh_request():
+    storage = load_storage()
+    connection = ScriptedConnection([[
+        {"asin": "B00RCPDCQU", "from_status": "running", "to_status": "pending"}
+    ], [], []])
+    repository = storage.PostgresWorkerStorage(
+        "postgresql://example", tenant_id="tenant-a", subject_type="own", connect=lambda: connection
+    )
+
+    released = repository.release_claimed_capacity_leases("worker-a", "capacity_evidence_stale")
+
+    assert released == 1
+    statements = "\n".join(sql for sql, _params in connection.cursor_instance.executed)
+    assert "lease_token=NULL" in statements
+    assert "status='queued'" in statements
+    assert "state_history" in statements
+    assert any("worker-a" in params for _sql, params in connection.cursor_instance.executed)
 
 
 def test_claim_task_can_filter_to_product_stage():
@@ -340,6 +363,21 @@ def test_claim_refresh_request_is_tenant_and_subject_scoped():
     assert "refresh_request" in sql
     assert "tenant-a" in connection.cursor_instance.executed[0][1]
     assert "competitor" in connection.cursor_instance.executed[0][1]
+
+
+def test_count_pending_refresh_tasks_is_claimable_scoped_and_bounded():
+    storage = load_storage()
+    connection = Connection([{"pending_count": 3}])
+    repository = storage.PostgresWorkerStorage(
+        "postgresql://example", tenant_id="tenant-a", subject_type="own", connect=lambda: connection
+    )
+
+    assert repository.count_pending_refresh_tasks(5) == 3
+    sql, params = connection.cursor_instance.executed[0]
+    assert "status='queued'" in sql
+    assert "lease_expires_at <= CURRENT_TIMESTAMP" in sql
+    assert "LIMIT %s" in sql
+    assert params == ("tenant-a", "own", 5)
 
 
 def test_claim_refresh_task_leases_requested_asin_in_same_transaction():

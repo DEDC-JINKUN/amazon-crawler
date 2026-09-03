@@ -176,6 +176,28 @@ def test_credential_generation_changes_hash_without_hashing_secret_values(monkey
         module.capacity_config_hash(config(proxy_credential_generation=""))
 
 
+def test_physical_resource_slots_are_stable_across_capacity_policy_and_credential_rotation():
+    module = load_module()
+    first = module.capacity_resource_slot_ids(config(
+        proxy_session_ports=[10000, 10001],
+        proxy_session_max_asins=1,
+        proxy_canary_timeout_seconds=5,
+        proxy_credential_generation="vault-generation-1",
+    ))
+    second = module.capacity_resource_slot_ids(config(
+        proxy_session_ports=[10000, 10001],
+        proxy_session_max_asins=5,
+        proxy_canary_timeout_seconds=30,
+        proxy_credential_generation="vault-generation-2",
+    ))
+
+    assert first == second
+    assert len(first) == 2
+    assert len(set(first)) == 2
+    assert all(value.startswith("resource-") and len(value) == 73 for value in first)
+    assert "proxy.example" not in repr(first)
+
+
 def test_all_sessions_failed_including_timeout_reports_known_zero_without_success(monkeypatch):
     module = load_module()
     monkeypatch.setenv("PROXY_USER", "private-user")

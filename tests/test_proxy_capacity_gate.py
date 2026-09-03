@@ -221,8 +221,8 @@ def test_capacity_acquisition_delegates_one_atomic_reservation_with_safe_identit
                 "credential_generation": kwargs["credential_generation"],
                 "requested_capacity": kwargs["requested_capacity"],
                 "required_slots": kwargs["required_slots"],
-                "reserved_slots": 2,
-                "slot_ids": ["session-01", "session-03"],
+                "reserved_slots": 3,
+                "slot_ids": ["session-01", "session-02", "session-03"],
                 "fact_finished_at": "2026-09-03T01:00:00+00:00",
                 "fact_expires_at": "2026-09-03T02:00:00+00:00",
                 "reservation_expires_at": "2026-09-03T01:10:00+00:00",
@@ -241,19 +241,51 @@ def test_capacity_acquisition_delegates_one_atomic_reservation_with_safe_identit
 
     assert reservation["reservation_id"] == "reservation-1"
     assert reservation["canary_operation_id"] == "op-canary-1"
-    assert reservation["slot_ids"] == ["session-01", "session-03"]
+    assert reservation["slot_ids"] == ["session-01", "session-02", "session-03"]
     assert storage.calls == [{
         "reservation_id": "reservation-1",
         "owner_id": "worker-a",
-        "capacity_config_hash": module.capacity_config_hash(cfg),
-        "credential_generation": "test-generation-1",
+            "capacity_config_hash": module.capacity_config_hash(cfg),
+            "credential_generation": "test-generation-1",
+            "resource_slot_ids": load("proxy_canary").capacity_resource_slot_ids(cfg),
         "requested_capacity": 6,
         "required_slots": 2,
+        "reservation_slots": 3,
         "slot_budget": 3,
         "max_age_seconds": 3600,
         "lease_seconds": 600,
     }]
     assert "proxy.example" not in repr(reservation)
+
+
+def test_fixed_three_reserves_bounded_replacement_slots_for_runtime_quarantine():
+    module = load("proxy_capacity_gate")
+    cfg = config(
+        proxy_session_ports=[10000, 10001, 10002, 10003],
+        proxy_session_max_asins=3,
+        proxy_session_consecutive_block_limit=2,
+    )
+    calls = []
+
+    class Storage:
+        def reserve_proxy_capacity(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "status": "active", "reason": "capacity_reserved", "reservation_id": kwargs["reservation_id"],
+                "owner_id": kwargs["owner_id"], "canary_operation_id": "op-canary-1",
+                "capacity_config_hash": kwargs["capacity_config_hash"],
+                "credential_generation": kwargs["credential_generation"],
+                "requested_capacity": 3, "required_slots": 1, "reserved_slots": 3,
+                "slot_ids": ["session-01", "session-02", "session-03"],
+            }
+
+    reservation = module.acquire_capacity_reservation(
+        Storage(), cfg, requested_actions=3, owner_id="worker-a", lease_seconds=600,
+    )
+
+    assert calls[0]["required_slots"] == 1
+    assert calls[0]["reservation_slots"] == 3
+    assert reservation["reserved_slots"] == 3
 
 
 def test_atomic_reservation_denial_raises_only_the_stable_reason():
@@ -284,7 +316,8 @@ def test_production_runner_reserves_validates_before_claim_and_releases_capacity
         "owner_id": "worker-a", "canary_operation_id": "op-canary-1",
         "capacity_config_hash": load("proxy_canary").capacity_config_hash(cfg),
         "credential_generation": "test-generation-1", "requested_capacity": 3,
-        "required_slots": 1, "reserved_slots": 1, "slot_ids": ["session-02"],
+        "required_slots": 1, "reserved_slots": 3,
+        "slot_ids": ["session-01", "session-02", "session-03"],
         "fact_finished_at": "2026-09-03T01:00:00+00:00",
         "fact_expires_at": "2026-09-03T02:00:00+00:00",
         "reservation_expires_at": "2026-09-03T01:10:00+00:00",
@@ -310,7 +343,10 @@ def test_production_runner_reserves_validates_before_claim_and_releases_capacity
     assert worker.run_postgres_actions(
         Storage(), Adapter(), cfg, limit=3, run_id="run-1", worker_id="worker-a",
     ) == 0
-    assert events == ["reserve", ("configure", ("session-02",)), "begin", "validate", "claim", "release"]
+    assert events == [
+        "reserve", ("configure", ("session-01", "session-02", "session-03")),
+        "begin", "validate", "claim", "release",
+    ]
 
 
 def test_expired_reservation_stops_before_claim_and_fetch():
@@ -326,8 +362,9 @@ def test_expired_reservation_stops_before_claim_and_fetch():
                 "status": "active", "reason": "capacity_reserved", "reservation_id": kwargs["reservation_id"],
                 "owner_id": kwargs["owner_id"], "canary_operation_id": "op-canary-1",
                 "capacity_config_hash": kwargs["capacity_config_hash"], "credential_generation": kwargs["credential_generation"],
-                "requested_capacity": 3, "required_slots": 1, "reserved_slots": 1,
-                "slot_ids": ["session-01"], "fact_finished_at": "2026-09-03T01:00:00+00:00",
+                "requested_capacity": 3, "required_slots": 1, "reserved_slots": 3,
+                "slot_ids": ["session-01", "session-02", "session-03"],
+                "fact_finished_at": "2026-09-03T01:00:00+00:00",
                 "fact_expires_at": "2026-09-03T02:00:00+00:00", "reservation_expires_at": "2026-09-03T01:10:00+00:00",
                 "capacity_snapshot": {"unique_egress_count": 3, "slot_capacity": 9},
             }
@@ -352,3 +389,105 @@ def test_expired_reservation_stops_before_claim_and_fetch():
         )
     assert storage.claims == 0
     assert adapter.fetches == 0
+
+
+def test_new_slot_revalidation_denial_after_claim_releases_claimed_task_lease():
+    worker = load("amazon_us_worker")
+    pool_module = load("proxy_session_pool")
+    cfg = {
+        **worker.DEFAULTS,
+        **config(proxy_session_ports=[10000], proxy_session_max_asins=1),
+        "max_actions_per_run": 1,
+        "raw_html_dir": None,
+        "context": {},
+    }
+
+    class Storage:
+        tenant_id = "tenant-a"
+
+        def __init__(self):
+            self.validation_calls = 0
+            self.claims = 0
+            self.claim_releases = []
+
+        def reserve_proxy_capacity(self, **kwargs):
+            return {
+                "status": "active", "reason": "capacity_reserved", "reservation_id": kwargs["reservation_id"],
+                "owner_id": kwargs["owner_id"], "canary_operation_id": "op-canary-1",
+                "capacity_config_hash": kwargs["capacity_config_hash"], "credential_generation": kwargs["credential_generation"],
+                "requested_capacity": 1, "required_slots": 1, "reserved_slots": 1,
+                "slot_ids": ["session-01"], "fact_finished_at": "2026-09-03T01:00:00+00:00",
+                "fact_expires_at": "2026-09-03T02:00:00+00:00", "reservation_expires_at": "2026-09-03T01:10:00+00:00",
+                "capacity_snapshot": {"unique_egress_count": 1, "slot_capacity": 1},
+            }
+
+        def validate_proxy_capacity_reservation(self, reservation_id, owner_id, **_kwargs):
+            self.validation_calls += 1
+            if self.validation_calls == 1:
+                return {
+                    "status": "active", "reason": "capacity_reserved", "reservation_id": reservation_id,
+                    "owner_id": owner_id, "canary_operation_id": "op-canary-1",
+                    "capacity_config_hash": load("proxy_canary").capacity_config_hash(cfg),
+                    "credential_generation": "test-generation-1", "requested_capacity": 1,
+                    "required_slots": 1, "reserved_slots": 1, "slot_ids": ["session-01"],
+                    "fact_finished_at": "2026-09-03T01:00:00+00:00", "fact_expires_at": "2026-09-03T02:00:00+00:00",
+                    "reservation_expires_at": "2026-09-03T01:10:00+00:00",
+                    "capacity_snapshot": {"unique_egress_count": 1, "slot_capacity": 1},
+                }
+            return {"status": "denied", "reason": "capacity_evidence_stale", "reservation_id": reservation_id}
+
+        def claim_task(self, *_args, **_kwargs):
+            self.claims += 1
+            return {"asin": "B000000001", "url": "https://www.amazon.com/dp/B000000001", "task_stage": "product"}
+
+        def release_claimed_capacity_leases(self, owner_id, reason):
+            self.claim_releases.append((owner_id, reason))
+            return 1
+
+        def release_proxy_capacity(self, *_args):
+            return True
+
+    class LeafAdapter:
+        def begin_run(self, *_args): return None
+        def begin_action(self): return None
+        def fetch(self, _url): raise AssertionError("network leaf must not be reached")
+        def close(self): return None
+
+    storage = Storage()
+    pool = pool_module.ProxySessionPool(cfg, lambda _slot_config: LeafAdapter(), lambda *_args: None)
+
+    with pytest.raises(worker.ProxyCapacityGateDenied, match="capacity_evidence_stale"):
+        worker.run_postgres_actions(storage, pool, cfg, limit=1, run_id="run-1", worker_id="worker-a")
+
+    assert storage.claims == 1
+    assert storage.claim_releases == [("worker-a", "capacity_evidence_stale")]
+
+
+def test_claimed_lease_cleanup_failure_is_explicitly_audited_as_ttl_fallback():
+    worker = load("amazon_us_worker")
+    cfg = {**worker.DEFAULTS, **config(proxy_session_ports=[10000], proxy_session_max_asins=1), "max_actions_per_run": 1}
+
+    class Storage:
+        tenant_id = "tenant-a"
+        def reserve_proxy_capacity(self, **kwargs):
+            return {
+                "status": "active", "reason": "capacity_reserved", "reservation_id": kwargs["reservation_id"],
+                "owner_id": kwargs["owner_id"], "canary_operation_id": "op-canary-1",
+                "capacity_config_hash": kwargs["capacity_config_hash"], "credential_generation": kwargs["credential_generation"],
+                "requested_capacity": 1, "required_slots": 1, "reserved_slots": 1, "slot_ids": ["session-01"],
+                "fact_finished_at": "2026-09-03T01:00:00+00:00", "fact_expires_at": "2026-09-03T02:00:00+00:00",
+                "reservation_expires_at": "2026-09-03T01:10:00+00:00", "capacity_snapshot": {},
+            }
+        def validate_proxy_capacity_reservation(self, *_args, **_kwargs): raise RuntimeError("database unavailable")
+        def release_claimed_capacity_leases(self, *_args): raise RuntimeError("database unavailable")
+        def release_proxy_capacity(self, *_args): return True
+
+    class Adapter:
+        def configure_capacity_reservation(self, _slots, _validator): return None
+        def begin_run(self, *_args): return None
+
+    with pytest.raises(worker.ProxyCapacityGateDenied) as caught:
+        worker.run_postgres_actions(Storage(), Adapter(), cfg, limit=1, run_id="run-1", worker_id="worker-a")
+
+    assert caught.value.reason == "capacity_task_release_failed"
+    assert caught.value.decision["lease_cleanup_status"] == "ttl_fallback"

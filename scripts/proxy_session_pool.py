@@ -100,7 +100,7 @@ class ProxySessionPool:
         self.circuit_open_reason: str | None = None
         self.unrequested_count = 0
         self._action_http_bytes = 0
-        self._last_transfer_bytes = 0
+        self._last_transfer_bytes: int | None = None
 
     @staticmethod
     def _bounded(config: dict[str, Any], name: str, default: int, minimum: int, maximum: int) -> int:
@@ -129,7 +129,7 @@ class ProxySessionPool:
         self.circuit_open_reason = None
         self.unrequested_count = 0
         self._action_http_bytes = 0
-        self._last_transfer_bytes = 0
+        self._last_transfer_bytes = None
 
     def configure_capacity_reservation(
         self,
@@ -167,7 +167,7 @@ class ProxySessionPool:
         self._action_generation += 1
         self._persisted_attempts = []
         self._action_http_bytes = 0
-        self._last_transfer_bytes = 0
+        self._last_transfer_bytes = None
         for name in ("last_fallback_reason", "action_fallback_reasons", "browser_attempted"):
             self.__dict__.pop(name, None)
         if self._current is not None:
@@ -203,8 +203,9 @@ class ProxySessionPool:
     def _select(self, asin: str, *, force_new: bool = False) -> _Slot:
         slot = self._current
         if force_new or slot is None or slot.health != "healthy" or (asin not in slot.asins and len(slot.asins) >= self.max_asins):
-            if slot is not None and slot.health == "healthy" and not force_new:
-                slot.health = "exhausted"
+            if slot is not None:
+                if slot.health == "healthy" and not force_new:
+                    slot.health = "exhausted"
                 slot.adapter.close()
             slot = self._new_slot()
         slot.asins.add(asin)
@@ -233,13 +234,18 @@ class ProxySessionPool:
             try:
                 body, status = slot.adapter.fetch(url)
             except Exception:
-                byte_count = max(0, int(getattr(slot.adapter, "last_transfer_bytes", 0) or 0))
+                raw_byte_count = getattr(slot.adapter, "last_transfer_bytes", None)
+                byte_count = None if raw_byte_count is None else max(0, int(raw_byte_count))
                 self._last_transfer_bytes = byte_count
-                self._action_http_bytes += byte_count
+                if byte_count is not None:
+                    self._action_http_bytes += byte_count
                 slot.request_count += 1
                 slot.network_error += 1
-                slot.bytes += byte_count
+                if byte_count is not None:
+                    slot.bytes += byte_count
                 slot.latency_ms += max(0, round((self._clock() - started) * 1000))
+                slot.health = "quarantined"
+                slot.quarantine_reason = "transport_error"
                 raise
             latency = max(0, round((self._clock() - started) * 1000))
             byte_count = max(0, int(getattr(slot.adapter, "last_transfer_bytes", 0) or 0))

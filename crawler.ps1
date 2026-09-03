@@ -149,6 +149,12 @@ function Ensure-Credentials {
     }
 }
 
+function Ensure-CredentialGeneration {
+    if ([string]::IsNullOrWhiteSpace([string]$env:AMAZON_PROXY_CREDENTIAL_GENERATION)) {
+        throw 'AMAZON_PROXY_CREDENTIAL_GENERATION is required; use run_owned_full_secure.ps1 or set a non-secret version and rotate it with proxy credentials.'
+    }
+}
+
 function Clear-Credentials {
     if ($script:promptedForPassword) { Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue }
     if ($script:setDefaultDsn) { Remove-Item Env:AMAZON_US_POSTGRES_DSN -ErrorAction SilentlyContinue }
@@ -527,6 +533,7 @@ function Start-EgressOperation([string]$ConfigValue) {
 function Start-ProxyCanary([string]$ConfigValue, [int]$RequestedActions) {
     if ($RequestedActions -lt 1 -or $RequestedActions -gt 500) { throw 'canary limit must be between 1 and 500' }
     Ensure-Credentials
+    Ensure-CredentialGeneration
     $resolvedConfig = Resolve-ProjectPath $ConfigValue
     $stamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
     $entropy = [Guid]::NewGuid().ToString('N').Substring(0, 10)
@@ -583,6 +590,7 @@ function Initialize-CrawlOperation([string]$Mode) {
     $script:PendingOperationFinished = $false
     $script:PendingOperationStage = 'configuration'
     Ensure-Credentials
+    Ensure-CredentialGeneration
     Ensure-OperationLedgerSchema
     Start-Operation $script:PendingOperationId $Mode $script:PendingRunId
     $script:PendingOperationStarted = $true

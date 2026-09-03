@@ -133,12 +133,14 @@ def _terminal_job_result(repository: CollectionRepository, job: dict[str, Any]) 
 class CollectionHandler(BaseHTTPRequestHandler):
     server: "CollectionServer"
 
-    def _send_json(self, status: int, payload: dict[str, Any]) -> None:
+    def _send_json(self, status: int, payload: dict[str, Any], headers: dict[str, str] | None = None) -> None:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=_json_default).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        for name, value in dict(headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -165,7 +167,10 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 principal = AgentPrincipal(agent_id, self.server.agent_scopes[agent_id])
                 if required_scope in principal.scopes:
                     if not self.server.allow_request(principal.agent_id):
-                        self._send_json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "rate_limited"})
+                        self._send_json(
+                            HTTPStatus.TOO_MANY_REQUESTS, {"error": "rate_limited"},
+                            {"Retry-After": str(self.server.retry_after_seconds(principal.agent_id))},
+                        )
                         self._audit(principal, action, resource, "rate_limited")
                         return None
                     return principal
@@ -179,7 +184,10 @@ class CollectionHandler(BaseHTTPRequestHandler):
             principal = AgentPrincipal("local-operator", frozenset({"read", "refresh"}))
             if self.server.allow_request(principal.agent_id):
                 return principal
-            self._send_json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "rate_limited"})
+            self._send_json(
+                HTTPStatus.TOO_MANY_REQUESTS, {"error": "rate_limited"},
+                {"Retry-After": str(self.server.retry_after_seconds(principal.agent_id))},
+            )
             self._audit(principal, action, resource, "rate_limited")
             return None
         self.send_response(HTTPStatus.UNAUTHORIZED)
@@ -465,6 +473,13 @@ class CollectionServer(ThreadingHTTPServer):
                 return False
             self._agent_windows[agent_id] = (start, count + 1)
             return True
+
+    def retry_after_seconds(self, agent_id: str) -> int:
+        import math
+        import time
+        with self._agent_window_lock:
+            start, _count = self._agent_windows.get(agent_id, (time.monotonic(), 0))
+        return max(1, min(60, math.ceil(60.0 - max(0.0, time.monotonic() - start))))
 
 
 def serve(db_path: Path | None = None, host: str = "127.0.0.1", port: int = 8765, repository: CollectionRepository | None = None, api_key: str | None = None, agent_rate_limit: int = 60) -> None:

@@ -345,6 +345,60 @@ def test_blocked_attempt_is_preserved_when_retry_session_has_network_error():
     assert context["attempts"][0]["content_hash"]
 
 
+def test_captcha_then_inner_retry_transport_failure_retires_slot_before_next_asin():
+    worker = load_worker()
+    pool_module = load_pool()
+    scripts = [
+        [("captcha", 200, 25)],
+        [worker.AdapterFetchError("TLS retries exhausted")],
+        [(product_html("B000000001"), 200, 100)],
+    ]
+    adapters = []
+
+    def factory(slot_config):
+        adapter = FakeAdapter(slot_config, scripts[len(adapters)])
+        adapters.append(adapter)
+        return adapter
+
+    pool = pool_module.ProxySessionPool(
+        config(proxy_session_ports=[10000, 10001, 10002], proxy_session_max_asins=3),
+        factory,
+        worker.classify_block,
+    )
+    pool.begin_run("run-transport-sequence", "tenant-a", "worker-a")
+
+    with pytest.raises(worker.AdapterFetchError, match="TLS retries exhausted"):
+        pool.fetch("https://www.amazon.com/dp/B000000002")
+    body, status = pool.fetch("https://www.amazon.com/dp/B000000001")
+
+    assert (body, status) == (product_html("B000000001"), 200)
+    assert len(adapters) == 3
+    sessions = pool.evidence_context()["sessions"]
+    assert [item["session_id"] for item in sessions] == ["session-01", "session-02", "session-03"]
+    assert sessions[0]["quarantine_reason"] == "captcha"
+    assert sessions[1]["quarantine_reason"] == "transport_error"
+    assert sessions[1]["network_error"] == 1
+    assert sessions[2]["health"] == "healthy"
+
+
+def test_transport_failure_with_unknown_bytes_does_not_become_zero():
+    worker = load_worker()
+    pool_module = load_pool()
+
+    class UnknownByteAdapter(FakeAdapter):
+        def __init__(self, slot_config):
+            super().__init__(slot_config, [worker.AdapterFetchError("transport failed")])
+            self.last_transfer_bytes = None
+
+    pool = pool_module.ProxySessionPool(config(proxy_session_ports=[10000]), UnknownByteAdapter, worker.classify_block)
+    pool.begin_run("run-unknown-bytes", "tenant-a", "worker-a")
+
+    with pytest.raises(worker.AdapterFetchError):
+        pool.fetch("https://www.amazon.com/dp/B000000001")
+
+    assert pool.last_transfer_bytes is None
+
+
 def test_console_projects_latest_sanitized_pool_context_for_run_and_receipt():
     spec = importlib.util.spec_from_file_location("collection_console_pool_test", ROOT / "scripts" / "collection_console.py")
     console = importlib.util.module_from_spec(spec)

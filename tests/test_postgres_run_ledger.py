@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -182,3 +183,33 @@ def test_interrupted_collection_run_also_finalizes_linked_operation(monkeypatch)
         assert releases == [("tenant-a", "reservation-1", "worker-1")]
         assert receipt.exists()
         assert "op-canary-1" in receipt.read_text(encoding="utf-8")
+
+
+def test_capacity_release_failure_does_not_block_interrupted_terminalization(monkeypatch, tmp_path):
+    module = load_module()
+    connection = Connection()
+    operations = []
+    monkeypatch.setitem(sys.modules, "operation_ledger", types.SimpleNamespace(
+        finish_operation=lambda operation_id, tenant_id, status, stage, error, **_kwargs:
+            operations.append((operation_id, tenant_id, status, stage, error))
+    ))
+    monkeypatch.setitem(sys.modules, "postgres_worker_storage", types.SimpleNamespace(
+        PostgresWorkerStorage=lambda _dsn, tenant_id: types.SimpleNamespace(
+            release_proxy_capacity=lambda *_args: (_ for _ in ()).throw(RuntimeError("database detail"))
+        )
+    ))
+    monkeypatch.setenv("AMAZON_TEST_DSN", "postgresql://example")
+    monkeypatch.setattr(module, "_default_connect", lambda _dsn: connection)
+    receipt = tmp_path / "receipt.json"
+
+    module.finish_interrupted_from_host({
+        "dsn_env": "AMAZON_TEST_DSN", "tenant_id": "tenant-a", "run_id": "run-1",
+        "operation_id": "op-1", "worker_id": "worker-1", "command": "run",
+        "requested_actions": 10, "receipt_path": str(receipt),
+        "capacity_authorization": {"canary_operation_id": "op-canary-1", "reservation_id": "reservation-1"},
+    }, -15)
+
+    assert operations == [("op-1", "tenant-a", "interrupted", "worker", "controller_exited")]
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    assert payload["capacity_cleanup_status"] == "ttl_fallback"
+    assert payload["capacity_cleanup_reason"] == "capacity_release_failed"

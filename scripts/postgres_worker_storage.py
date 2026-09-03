@@ -253,8 +253,10 @@ class PostgresWorkerStorage:
         owner_id: str,
         capacity_config_hash: str,
         credential_generation: str,
+        resource_slot_ids: list[str],
         requested_capacity: int,
         required_slots: int,
+        reservation_slots: int,
         slot_budget: int,
         max_age_seconds: int,
         lease_seconds: int,
@@ -267,13 +269,22 @@ class PostgresWorkerStorage:
             raise ValueError("invalid capacity_config_hash")
         if not re.fullmatch(r"[A-Za-z0-9_.:-]{8,100}", str(credential_generation or "")):
             raise ValueError("invalid credential_generation")
-        if min(int(requested_capacity), int(required_slots), int(slot_budget), int(max_age_seconds), int(lease_seconds)) < 1:
+        resource_slot_ids = [str(value) for value in resource_slot_ids]
+        if (
+            not resource_slot_ids
+            or len(set(resource_slot_ids)) != len(resource_slot_ids)
+            or any(not re.fullmatch(r"resource-[0-9a-f]{64}", value) for value in resource_slot_ids)
+        ):
+            raise ValueError("invalid resource_slot_ids")
+        if min(int(requested_capacity), int(required_slots), int(reservation_slots), int(slot_budget), int(max_age_seconds), int(lease_seconds)) < 1:
             raise ValueError("capacity reservation values must be positive")
         if int(slot_budget) > 5 or int(max_age_seconds) > 86400 or int(lease_seconds) > 3600:
             raise ValueError("capacity reservation limits are out of range")
         expected_required = (int(requested_capacity) + int(slot_budget) - 1) // int(slot_budget)
         if int(required_slots) != expected_required:
             raise ValueError("required_slots does not match requested capacity")
+        if int(reservation_slots) < int(required_slots) or int(reservation_slots) > len(resource_slot_ids):
+            raise ValueError("reservation_slots is outside available capacity")
         try:
             from proxy_capacity_gate import evaluate_capacity_snapshot
         except ModuleNotFoundError:
@@ -283,20 +294,22 @@ class PostgresWorkerStorage:
         with self._connect_factory() as conn:
             try:
                 with conn.cursor() as cursor:
-                    cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (capacity_config_hash,))
+                    for resource_slot_id in sorted(resource_slot_ids):
+                        cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (resource_slot_id,))
                     cursor.execute(
                         """
                         UPDATE amazon_us.proxy_capacity_reservation
                         SET status='expired',reason='reservation_expired',updated_at=CURRENT_TIMESTAMP
-                        WHERE capacity_config_hash=%s AND status='active' AND expires_at <= CURRENT_TIMESTAMP
+                        WHERE status='active' AND expires_at <= CURRENT_TIMESTAMP
+                          AND resource_slot_ids_json ?| %s
                         """,
-                        (capacity_config_hash,),
+                        (resource_slot_ids,),
                     )
                     cursor.execute(
                         """
                         SELECT reservation_id,owner_id,canary_operation_id,capacity_config_hash,
                                credential_generation,requested_capacity,required_slots,reserved_slots,
-                               slot_ids_json,status,reason,fact_finished_at,fact_expires_at,expires_at,
+                                slot_ids_json,resource_slot_ids_json,status,reason,fact_finished_at,fact_expires_at,expires_at,
                                capacity_snapshot_json
                         FROM amazon_us.proxy_capacity_reservation
                         WHERE reservation_id=%s FOR UPDATE
@@ -355,6 +368,7 @@ class PostgresWorkerStorage:
                     if fact is not None and str(fact.get("credential_generation") or "") != credential_generation:
                         decision = {**decision, "status": "denied", "reason": "credential_generation_mismatch"}
                     slot_ids: list[str] = []
+                    selected_resource_slot_ids: list[str] = []
                     if decision["status"] == "allowed" and fact is not None:
                         sessions = list((fact.get("capacity_detail_json") or {}).get("sessions") or [])
                         usable = [
@@ -362,6 +376,8 @@ class PostgresWorkerStorage:
                             if isinstance(item, Mapping) and item.get("status") == "available" and item.get("usable") is True
                         ]
                         if (
+                            len(resource_slot_ids) != int(fact.get("planned_slots") or -1)
+                            or
                             len(usable) != int(fact.get("unique_egress_count") or -1)
                             or len(set(usable)) != len(usable)
                             or any(not re.fullmatch(r"session-\d{2}", value) for value in usable)
@@ -370,26 +386,34 @@ class PostgresWorkerStorage:
                         else:
                             cursor.execute(
                                 """
-                                SELECT slot_ids_json FROM amazon_us.proxy_capacity_reservation
-                                WHERE capacity_config_hash=%s AND status='active' AND expires_at>CURRENT_TIMESTAMP
+                                SELECT resource_slot_ids_json FROM amazon_us.proxy_capacity_reservation
+                                WHERE status='active' AND expires_at>CURRENT_TIMESTAMP
+                                  AND resource_slot_ids_json ?| %s
                                 FOR UPDATE
                                 """,
-                                (capacity_config_hash,),
+                                (resource_slot_ids,),
                             )
                             occupied = {
                                 str(slot_id)
                                 for row in cursor.fetchall()
-                                for slot_id in list((dict(row) if isinstance(row, Mapping) else {"slot_ids_json": row[0]}).get("slot_ids_json") or [])
+                                for slot_id in list((dict(row) if isinstance(row, Mapping) else {"resource_slot_ids_json": row[0]}).get("resource_slot_ids_json") or [])
                             }
-                            slot_ids = [slot_id for slot_id in usable if slot_id not in occupied][:required_slots]
-                            if len(slot_ids) < required_slots:
+                            usable_pairs = [
+                                (slot_id, resource_slot_ids[int(slot_id.rsplit("-", 1)[1]) - 1])
+                                for slot_id in usable
+                            ]
+                            selected_pairs = [pair for pair in usable_pairs if pair[1] not in occupied][:reservation_slots]
+                            slot_ids = [pair[0] for pair in selected_pairs]
+                            selected_resource_slot_ids = [pair[1] for pair in selected_pairs]
+                            if len(slot_ids) < reservation_slots:
                                 decision = {**decision, "status": "denied", "reason": "capacity_reserved_elsewhere"}
                                 slot_ids = []
+                                selected_resource_slot_ids = []
                     now = (fact or {}).get("observed_at") or datetime.now(timezone.utc)
                     fact_finished = (fact or {}).get("finished_at")
                     fact_expires = (fact or {}).get("fact_expires_at")
                     reservation_expires = min(fact_expires, now + timedelta(seconds=lease_seconds)) if fact_expires else None
-                    status = "active" if decision["status"] == "allowed" and len(slot_ids) == required_slots else "denied"
+                    status = "active" if decision["status"] == "allowed" and len(slot_ids) == reservation_slots else "denied"
                     reason = "capacity_reserved" if status == "active" else str(decision.get("reason") or "capacity_reservation_denied")
                     snapshot = self._capacity_snapshot(fact)
                     result = {
@@ -408,14 +432,14 @@ class PostgresWorkerStorage:
                         """
                         INSERT INTO amazon_us.proxy_capacity_reservation
                           (reservation_id,tenant_id,owner_id,canary_operation_id,capacity_config_hash,
-                           credential_generation,requested_capacity,required_slots,reserved_slots,slot_ids_json,
+                           credential_generation,requested_capacity,required_slots,reserved_slots,slot_ids_json,resource_slot_ids_json,
                            status,reason,fact_finished_at,fact_expires_at,expires_at,capacity_snapshot_json)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s::jsonb)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s,%s::jsonb)
                         """,
                         (
                             reservation_id, self.tenant_id, owner_id, result["canary_operation_id"], capacity_config_hash,
                             credential_generation, requested_capacity, required_slots, len(slot_ids), json.dumps(slot_ids),
-                            status, reason, fact_finished, fact_expires, reservation_expires,
+                            json.dumps(selected_resource_slot_ids), status, reason, fact_finished, fact_expires, reservation_expires,
                             json.dumps(snapshot, ensure_ascii=False),
                         ),
                     )
@@ -522,6 +546,69 @@ class PostgresWorkerStorage:
                 changed = cursor.rowcount == 1
             conn.commit()
         return changed
+
+    def release_claimed_capacity_leases(self, owner_id: str, reason: str) -> int:
+        """Restore tasks owned by a worker when capacity becomes invalid after a claim."""
+        owner_id = str(owner_id or "").strip()
+        reason = str(reason or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", owner_id):
+            raise ValueError("invalid capacity lease owner")
+        if not re.fullmatch(r"[a-z0-9_]{1,100}", reason):
+            raise ValueError("invalid capacity lease release reason")
+        with self._connect_factory() as conn:
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        WITH owned AS (
+                          SELECT tenant_id,marketplace,asin,subject_type,status AS from_status,
+                                 COALESCE(NULLIF(resume_status,''),'pending') AS to_status
+                          FROM amazon_us.item_state
+                          WHERE tenant_id=%s AND marketplace='US' AND subject_type=%s
+                            AND status='running' AND lease_owner=%s
+                          FOR UPDATE
+                        ), changed AS (
+                          UPDATE amazon_us.item_state s
+                          SET status=o.to_status,lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL,
+                              updated_at=CURRENT_TIMESTAMP
+                          FROM owned o
+                          WHERE s.tenant_id=o.tenant_id AND s.marketplace=o.marketplace
+                            AND s.asin=o.asin AND s.subject_type=o.subject_type
+                          RETURNING s.asin,o.from_status,s.status AS to_status
+                        )
+                        SELECT * FROM changed
+                        """,
+                        (self.tenant_id, self.subject_type, owner_id),
+                    )
+                    rows = [self._as_dict(row) for row in cursor.fetchall()]
+                    asins = [row["asin"] for row in rows]
+                    if asins:
+                        cursor.execute(
+                            """
+                            UPDATE amazon_us.refresh_request
+                            SET status='queued',claimed_at=NULL,completed_at=NULL
+                            WHERE tenant_id=%s AND marketplace='US' AND subject_type=%s
+                              AND status='claimed' AND asin=ANY(%s)
+                            """,
+                            (self.tenant_id, self.subject_type, asins),
+                        )
+                    for row in rows:
+                        cursor.execute(
+                            """
+                            INSERT INTO amazon_us.state_history
+                              (tenant_id,marketplace,asin,subject_type,from_status,to_status,reason)
+                            VALUES (%s,'US',%s,%s,%s,%s,%s)
+                            """,
+                            (
+                                self.tenant_id, row["asin"], self.subject_type,
+                                row["from_status"], row["to_status"], reason,
+                            ),
+                        )
+                conn.commit()
+                return len(rows)
+            except Exception:
+                conn.rollback()
+                raise
 
     def update_task(
         self,
@@ -704,6 +791,36 @@ class PostgresWorkerStorage:
         if isinstance(row, Mapping):
             return bool(row.get("has_pending"))
         return bool(row[0]) if row else False
+
+    def count_pending_refresh_tasks(self, limit: int = 5) -> int:
+        """Count claimable refresh work up to the Agent's bounded batch size."""
+        limit = int(limit)
+        if limit < 1 or limit > 5:
+            raise ValueError("refresh task count limit must be between 1 and 5")
+        with self._connect_factory() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT COUNT(*) AS pending_count
+                    FROM (
+                      SELECT 1
+                      FROM amazon_us.refresh_request r
+                      JOIN amazon_us.item_state s
+                        ON s.tenant_id=r.tenant_id AND s.marketplace=r.marketplace
+                       AND s.asin=r.asin AND s.subject_type=r.subject_type
+                      WHERE r.tenant_id=%s AND r.marketplace='US' AND r.subject_type=%s
+                        AND r.status='queued'
+                        AND (s.status<>'running' OR s.lease_expires_at <= CURRENT_TIMESTAMP)
+                      ORDER BY r.requested_at,r.job_id
+                      LIMIT %s
+                    ) claimable
+                    """,
+                    (self.tenant_id, self.subject_type, limit),
+                )
+                row = cursor.fetchone()
+        if isinstance(row, Mapping):
+            return int(row.get("pending_count") or 0)
+        return int(row[0]) if row else 0
 
     def claim_refresh_task(self, worker_id: str, *, lease_seconds: int | None = None) -> dict[str, Any] | None:
         """Atomically claim a queued refresh request and lease its requested ASIN."""

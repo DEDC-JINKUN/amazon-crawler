@@ -697,6 +697,7 @@ def test_postgres_http_and_browser_transport_failures_persist_action_evidence():
     assert payload["reason"] == "fetch_error"
     assert payload["evidence"]["run_id"] == "run-window-loss"
     assert payload["evidence"]["error_code"] == "fetch_error"
+    assert payload["evidence"]["transfer_bytes"] is None
     assert payload["evidence"]["source_type"] == "http_html"
     assert payload["evidence"]["context_json"]["fallback_reason"] == "http_transport_error"
     assert payload["evidence"]["context_json"]["traffic"]["firefox_main_document_bytes"] is None

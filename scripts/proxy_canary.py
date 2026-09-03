@@ -103,6 +103,21 @@ def capacity_config_hash(config: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def capacity_resource_slot_ids(config: dict[str, Any]) -> list[str]:
+    """Return opaque physical host/port identities independent of policy and credential versions."""
+    shape = _validated_shape(config)
+    host = str(shape["base"].hostname or "").lower().rstrip(".")
+    values = []
+    for port in shape["ports"]:
+        payload = json.dumps(
+            {"proxy_host": host, "proxy_port": int(port)},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        values.append("resource-" + hashlib.sha256(payload).hexdigest())
+    return values
+
+
 def _proxy_url(base: Any, port: int) -> str:
     host = base.hostname or ""
     netloc = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
@@ -399,6 +414,7 @@ def main(argv: list[str] | None = None) -> int:
 
 __all__ = [
     "capacity_config_hash",
+    "capacity_resource_slot_ids",
     "execute_canary",
     "probe_proxy_slot",
     "run_proxy_canary",

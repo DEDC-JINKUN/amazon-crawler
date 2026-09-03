@@ -168,6 +168,10 @@ def test_background_service_executes_only_refresh_jobs_and_reports_health():
     assert storage.saved[0]["product"]["title"] == "Agent refreshed product"
     status = background.status()
     assert status["state"] == "stopped"
+    assert status["processed_actions"] == 1
+    assert status["succeeded_actions"] == 1
+    assert status["failed_actions"] == 0
+    assert status["blocked_actions"] == 0
     assert status["completed_actions"] == 1
     assert status["last_error"] is None
 
@@ -198,6 +202,102 @@ def test_background_service_gives_one_agent_batch_to_one_bounded_pool_run():
     assert calls
     assert calls[0]["limit"] == 5
     assert "enforce_capacity_gate" not in calls[0]
+
+
+def test_background_service_scopes_capacity_to_actual_pending_refresh_count():
+    service = load("agent_collection_service")
+    worker_module = load("amazon_us_worker")
+    calls = []
+
+    class ThreePendingStorage(RefreshStorage):
+        def count_pending_refresh_tasks(self, limit):
+            assert limit == service.MAX_AGENT_REFRESH_BATCH
+            return 3
+
+    def fake_run(*args, **kwargs):
+        calls.append(kwargs)
+        return 0
+
+    background = service.AgentRefreshWorker(
+        storage=ThreePendingStorage(), adapter_factory=Adapter,
+        config=dict(worker_module.DEFAULTS), poll_seconds=0.01, lease_seconds=120,
+    )
+    with patch.object(service, "run_postgres_actions", side_effect=fake_run):
+        background.start()
+        deadline = time.monotonic() + 2
+        while not calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+        background.stop()
+
+    assert calls
+    assert calls[0]["limit"] == 3
+
+
+def test_agent_health_separates_processed_success_failed_and_blocked_actions():
+    service = load("agent_collection_service")
+    worker_module = load("amazon_us_worker")
+
+    class OnePendingStorage(RefreshStorage):
+        def count_pending_refresh_tasks(self, limit):
+            return 0 if self.finished else 1
+
+    def fake_run(storage, *_args, **_kwargs):
+        storage.save_failure(task={"asin": "B000000001"}, reason="fetch_error", next_status="failed")
+        storage.finish_refresh_request("job-1", "failed")
+        return 1
+
+    background = service.AgentRefreshWorker(
+        storage=OnePendingStorage(), adapter_factory=Adapter,
+        config=dict(worker_module.DEFAULTS), poll_seconds=0.01, lease_seconds=120,
+    )
+    with patch.object(service, "run_postgres_actions", side_effect=fake_run):
+        background.start()
+        deadline = time.monotonic() + 2
+        while background.status().get("processed_actions", 0) < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        status = background.status()
+        background.stop()
+
+    assert status["processed_actions"] == 1
+    assert status["succeeded_actions"] == 0
+    assert status["failed_actions"] == 1
+    assert status["blocked_actions"] == 0
+    assert status["completed_actions"] == 0
+
+
+def test_agent_health_counts_access_control_as_blocked_not_successful():
+    service = load("agent_collection_service")
+    worker_module = load("amazon_us_worker")
+
+    class OnePendingStorage(RefreshStorage):
+        def count_pending_refresh_tasks(self, limit):
+            return 0 if self.finished else 1
+
+    def fake_run(storage, *_args, **_kwargs):
+        storage.save_failure(
+            task={"asin": "B000000001"}, reason="captcha", next_status="blocked",
+            state_fields={"block_reason": "captcha"},
+        )
+        storage.finish_refresh_request("job-1", "failed")
+        return -1
+
+    background = service.AgentRefreshWorker(
+        storage=OnePendingStorage(), adapter_factory=Adapter,
+        config=dict(worker_module.DEFAULTS), poll_seconds=0.01, lease_seconds=120,
+    )
+    with patch.object(service, "run_postgres_actions", side_effect=fake_run):
+        background.start()
+        deadline = time.monotonic() + 2
+        while background.status()["state"] != "blocked" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        status = background.status()
+        background.stop()
+
+    assert status["processed_actions"] == 1
+    assert status["succeeded_actions"] == 0
+    assert status["failed_actions"] == 0
+    assert status["blocked_actions"] == 1
+    assert status["completed_actions"] == 0
 
 
 def test_agent_capacity_denial_claims_nothing_and_recovers_after_fresh_canary():

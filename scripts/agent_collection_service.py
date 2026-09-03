@@ -34,12 +34,49 @@ class RefreshOnlyStorageView:
 
     def __init__(self, storage: Any):
         self._storage = storage
+        self._batch_counts = {"processed": 0, "succeeded": 0, "failed": 0, "blocked": 0}
+        self._pending_outcome: str | None = None
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._storage, name)
 
     def claim_task(self, *args, **kwargs) -> None:
         return None
+
+    def begin_batch_metrics(self) -> None:
+        self._batch_counts = {"processed": 0, "succeeded": 0, "failed": 0, "blocked": 0}
+        self._pending_outcome = None
+
+    def batch_metrics(self) -> dict[str, int]:
+        return dict(self._batch_counts)
+
+    def save_product_result(self, **payload: Any) -> Any:
+        result = self._storage.save_product_result(**payload)
+        if result:
+            self._pending_outcome = "succeeded"
+        return result
+
+    def save_failure(self, **payload: Any) -> Any:
+        result = self._storage.save_failure(**payload)
+        if result:
+            state_fields = dict(payload.get("state_fields") or {})
+            self._pending_outcome = (
+                "blocked"
+                if payload.get("next_status") == "blocked" or state_fields.get("block_reason")
+                else "failed"
+            )
+        return result
+
+    def finish_refresh_request(self, job_id: str, status: str) -> None:
+        self._storage.finish_refresh_request(job_id, status)
+        if status not in {"completed", "failed", "queued", "cancelled"}:
+            return
+        outcome = self._pending_outcome
+        if outcome not in {"succeeded", "failed", "blocked"}:
+            outcome = "succeeded" if status == "completed" else "blocked" if status == "queued" else "failed"
+        self._batch_counts["processed"] += 1
+        self._batch_counts[outcome] += 1
+        self._pending_outcome = None
 
 
 class AgentRefreshWorker:
@@ -65,7 +102,10 @@ class AgentRefreshWorker:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._state = "created"
-        self._completed_actions = 0
+        self._processed_actions = 0
+        self._succeeded_actions = 0
+        self._failed_actions = 0
+        self._blocked_actions = 0
         self._last_error: str | None = None
         self._last_capacity_decision: dict[str, Any] | None = None
         self._last_action_at: str | None = None
@@ -93,7 +133,12 @@ class AgentRefreshWorker:
         with self._lock:
             return {
                 "state": self._state,
-                "completed_actions": self._completed_actions,
+                "processed_actions": self._processed_actions,
+                "succeeded_actions": self._succeeded_actions,
+                "failed_actions": self._failed_actions,
+                "blocked_actions": self._blocked_actions,
+                # Backward-compatible field: completed now means successful, never merely attempted.
+                "completed_actions": self._succeeded_actions,
                 "last_action_at": self._last_action_at,
                 "last_error": self._last_error,
                 "capacity_decision": dict(self._last_capacity_decision) if self._last_capacity_decision else None,
@@ -108,18 +153,34 @@ class AgentRefreshWorker:
             with self._lock:
                 self._state = "running"
             while not self._stop.is_set():
-                has_pending = getattr(self.storage, "has_pending_refresh_task", None)
-                if callable(has_pending) and not has_pending():
+                with self._lock:
+                    capacity_blocked = self._state == "blocked" and self._last_error != "access_blocked"
+                if capacity_blocked:
+                    self._event.wait(max(self.poll_seconds, 30.0))
+                    self._event.clear()
+                    try:
+                        self.storage.reclaim_expired_leases()
+                    except Exception:
+                        continue
+                counter = getattr(self.storage, "count_pending_refresh_tasks", None)
+                if callable(counter):
+                    pending_count = int(counter(MAX_AGENT_REFRESH_BATCH))
+                else:
+                    has_pending = getattr(self.storage, "has_pending_refresh_task", None)
+                    pending_count = MAX_AGENT_REFRESH_BATCH if not callable(has_pending) or has_pending() else 0
+                if pending_count <= 0:
                     self._event.wait(self.poll_seconds)
                     self._event.clear()
                     continue
+                batch_limit = max(1, min(MAX_AGENT_REFRESH_BATCH, pending_count))
                 run_id = f"agent-refresh-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}-{uuid.uuid4().hex[:8]}"
+                self._refresh_storage.begin_batch_metrics()
                 try:
                     result = run_postgres_actions(
                         self._refresh_storage,
                         adapter,
                         self.config,
-                        limit=MAX_AGENT_REFRESH_BATCH,
+                        limit=batch_limit,
                         run_id=run_id,
                         worker_id=worker_id,
                         lease_seconds=self.lease_seconds,
@@ -129,8 +190,6 @@ class AgentRefreshWorker:
                         self._state = "blocked"
                         self._last_error = exc.reason
                         self._last_capacity_decision = dict(exc.decision)
-                    self._event.wait(max(self.poll_seconds, 30.0))
-                    self._event.clear()
                     continue
                 with self._lock:
                     if self._state == "blocked":
@@ -138,13 +197,23 @@ class AgentRefreshWorker:
                         self._last_error = None
                         self._last_capacity_decision = None
                 if result == -1:
+                    metrics = self._refresh_storage.batch_metrics()
+                    with self._lock:
+                        self._processed_actions += metrics["processed"]
+                        self._succeeded_actions += metrics["succeeded"]
+                        self._failed_actions += metrics["failed"]
+                        self._blocked_actions += metrics["blocked"]
                     with self._lock:
                         self._state = "blocked"
                         self._last_error = "access_blocked"
                     return
                 if result > 0:
+                    metrics = self._refresh_storage.batch_metrics()
                     with self._lock:
-                        self._completed_actions += result
+                        self._processed_actions += metrics["processed"]
+                        self._succeeded_actions += metrics["succeeded"]
+                        self._failed_actions += metrics["failed"]
+                        self._blocked_actions += metrics["blocked"]
                         self._last_action_at = datetime.now(timezone.utc).isoformat()
                     continue
                 self._event.wait(self.poll_seconds)

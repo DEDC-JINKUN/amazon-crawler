@@ -30,7 +30,12 @@ def test_windows_entrypoints_reference_existing_python_scripts():
         if name == "run_once_windows.bat":
             assert ".venv\\Scripts\\python.exe scripts\\verify_postgres.py" in text
         assert "AMAZON_US_POSTGRES_DSN" in text
+        assert "AMAZON_PROXY_CREDENTIAL_GENERATION" in text
         assert "state\\amazon_us.sqlite3" not in text
+
+    controller = (ROOT / "crawler.ps1").read_text(encoding="utf-8")
+    assert "function Ensure-CredentialGeneration" in controller
+    assert "AMAZON_PROXY_CREDENTIAL_GENERATION" in controller
 
 
 def test_windows_entrypoints_keep_distinct_error_stages():

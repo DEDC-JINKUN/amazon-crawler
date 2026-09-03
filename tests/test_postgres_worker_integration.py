@@ -210,19 +210,44 @@ def test_two_workers_claim_distinct_tasks_from_real_postgres():
         assert {item["asin"] for item in run_detail["items"]} == {"B00RCPDCQU", "B00RCPDI50"}
 
         ledger = load_script("postgres_run_ledger")
+        operation = load_script("operation_ledger")
         connect = lambda: psycopg.connect(DSN)
+        operation.ensure_schema(connect)
+        ledger.ensure_schema(connect)
+
+        def start_bound_operation(operation_id, run_id):
+            operation.start_operation(operation_id, tenant_id, "run", "dataimpulse-us", run_id, connect=connect)
+            operation.bind_capacity_authorization(
+                operation_id,
+                tenant_id,
+                {
+                    "status": "active", "reason": "capacity_reserved",
+                    "reservation_id": f"reservation-{run_id}", "owner_id": "integration-worker",
+                    "canary_operation_id": "op-canary-integration", "capacity_config_hash": "a" * 64,
+                    "credential_generation": "integration-generation-1", "requested_capacity": 2,
+                    "required_slots": 1, "reserved_slots": 1, "slot_ids": ["session-01"],
+                    "fact_finished_at": "2026-09-03T01:00:00+00:00",
+                    "fact_expires_at": "2026-09-03T02:00:00+00:00",
+                    "reservation_expires_at": "2026-09-03T01:10:00+00:00",
+                    "capacity_snapshot": {"unique_egress_count": 1, "slot_capacity": 3},
+                },
+                connect=connect,
+            )
+
+        start_bound_operation("op-ledger-run", "ledger-run")
         ledger.start_run(
             connect, tenant_id=tenant_id, run_id="ledger-run", command="run", requested_actions=2,
-            worker_id="integration-worker", controller_pid=123,
+            worker_id="integration-worker", controller_pid=123, operation_id="op-ledger-run",
         )
         ledger.finish_run(
             connect, tenant_id=tenant_id, run_id="ledger-run", status="interrupted",
             controller_exit_code=130, worker_exit_code=-15, termination_reason="controller_exited",
             receipt={"status": "interrupted"},
         )
+        start_bound_operation("op-ledger-run-2", "ledger-run-2")
         ledger.start_run(
             connect, tenant_id=tenant_id, run_id="ledger-run-2", command="run", requested_actions=2,
-            worker_id="integration-worker", controller_pid=123,
+            worker_id="integration-worker", controller_pid=123, operation_id="op-ledger-run-2",
         )
         ledger.finish_run(
             connect, tenant_id=tenant_id, run_id="ledger-run-2", status="completed",
@@ -246,8 +271,6 @@ def test_two_workers_claim_distinct_tasks_from_real_postgres():
         assert ledger_detail["recorded_actions"] == 0
         assert ledger_detail["terminal_status"] == "interrupted"
 
-        operation = load_script("operation_ledger")
-        operation.ensure_schema(connect)
         before_operation = next(
             item for item in load_console().PostgresConsoleRepository(DSN).list_tenants()
             if item["tenant_id"] == tenant_id
@@ -267,16 +290,16 @@ def test_two_workers_claim_distinct_tasks_from_real_postgres():
         assert (after_operation["requested"], after_operation["recorded"]) == (
             before_operation["requested"], before_operation["recorded"]
         )
-        operation.start_operation("op-terminal", tenant_id, "run", "dataimpulse-us", "run-terminal", connect=connect)
+        start_bound_operation("op-terminal", "run-terminal")
+        ledger.start_run(
+            connect, tenant_id=tenant_id, run_id="run-terminal", command="run", requested_actions=1,
+            worker_id="integration-worker", controller_pid=123, operation_id="op-terminal",
+        )
         operation.finish_operation(
             "op-terminal", tenant_id, "interrupted", "worker", "controller_exited", connect=connect
         )
         operation.finish_operation(
             "op-terminal", tenant_id, "failed", "worker", "worker_failed", connect=connect
-        )
-        ledger.start_run(
-            connect, tenant_id=tenant_id, run_id="run-terminal", command="run", requested_actions=1,
-            worker_id="integration-worker", controller_pid=123,
         )
         ledger.finish_run(
             connect, tenant_id=tenant_id, run_id="run-terminal", status="interrupted",
@@ -506,8 +529,7 @@ def test_proxy_capacity_reservations_are_atomic_across_tenants_and_recheck_canar
     operation = load_script("operation_ledger")
     canary = load_script("proxy_canary")
     storage_module = load_storage()
-    generation = "integration-generation-1"
-    config = {
+    base_config = {
         "proxy_url": "http://proxy.example:10000",
         "proxy_username_env": "PROXY_USER",
         "proxy_password_env": "PROXY_PASS",
@@ -516,9 +538,13 @@ def test_proxy_capacity_reservations_are_atomic_across_tenants_and_recheck_canar
         "proxy_canary_url": "https://api.ipify.org?format=json",
         "proxy_canary_timeout_seconds": 5,
         "proxy_canary_max_age_seconds": 3600,
-        "proxy_credential_generation": generation,
     }
-    config_hash = canary.capacity_config_hash(config)
+    configs = [
+        {**base_config, "proxy_credential_generation": "integration-generation-1", "proxy_canary_timeout_seconds": 5},
+        {**base_config, "proxy_credential_generation": "integration-generation-2", "proxy_canary_timeout_seconds": 10},
+    ]
+    config_hashes = [canary.capacity_config_hash(value) for value in configs]
+    resource_slot_ids = canary.capacity_resource_slot_ids(configs[0])
     tenants = [f"capacity-a-{uuid.uuid4().hex}", f"capacity-b-{uuid.uuid4().hex}"]
     operation_ids = [f"op-canary-{uuid.uuid4().hex}" for _ in tenants]
     fact = {
@@ -535,9 +561,9 @@ def test_proxy_capacity_reservations_are_atomic_across_tenants_and_recheck_canar
         "slot_capacity": 1,
         "capacity_gate_status": "allowed",
         "capacity_gate_reason": "capacity_sufficient",
-        "credential_generation": generation,
+        "credential_generation": None,
         "p95_latency_ms": 10.0,
-        "config_hash": config_hash,
+        "config_hash": None,
         "sessions": [{
             "session_id": "session-01", "status": "available", "usable": True,
             "auth_status": "succeeded", "connect_tls_status": "succeeded",
@@ -546,9 +572,10 @@ def test_proxy_capacity_reservations_are_atomic_across_tenants_and_recheck_canar
     }
     connect = lambda: psycopg.connect(DSN)
     operation.ensure_schema(connect)
-    for tenant_id, operation_id in zip(tenants, operation_ids):
+    for index, (tenant_id, operation_id) in enumerate(zip(tenants, operation_ids)):
+        tenant_fact = {**fact, "credential_generation": configs[index]["proxy_credential_generation"], "config_hash": config_hashes[index]}
         operation.start_operation(operation_id, tenant_id, "canary", "dataimpulse-us", None, connect=connect)
-        operation.finish_operation(operation_id, tenant_id, "succeeded", None, None, capacity_fact=fact, connect=connect)
+        operation.finish_operation(operation_id, tenant_id, "succeeded", None, None, capacity_fact=tenant_fact, connect=connect)
     storages = [storage_module.PostgresWorkerStorage(DSN, tenant_id=tenant_id) for tenant_id in tenants]
     barrier = threading.Barrier(2)
 
@@ -557,10 +584,12 @@ def test_proxy_capacity_reservations_are_atomic_across_tenants_and_recheck_canar
         return storages[index].reserve_proxy_capacity(
             reservation_id=f"reservation-{index}-{uuid.uuid4().hex}",
             owner_id=f"worker-{index}",
-            capacity_config_hash=config_hash,
-            credential_generation=generation,
+            capacity_config_hash=config_hashes[index],
+            credential_generation=configs[index]["proxy_credential_generation"],
+            resource_slot_ids=resource_slot_ids,
             requested_capacity=1,
             required_slots=1,
+            reservation_slots=1,
             slot_budget=1,
             max_age_seconds=3600,
             lease_seconds=600,
@@ -592,4 +621,48 @@ def test_proxy_capacity_reservations_are_atomic_across_tenants_and_recheck_canar
         with psycopg.connect(DSN) as connection:
             connection.execute("DELETE FROM amazon_us.proxy_capacity_reservation WHERE tenant_id=ANY(%s)", (tenants,))
             connection.execute("DELETE FROM amazon_us.operation_run WHERE tenant_id=ANY(%s)", (tenants,))
+            connection.commit()
+
+
+@pytest.mark.skipif(not DSN, reason="AMAZON_TEST_POSTGRES_DSN is not configured")
+def test_all_healthy_but_insufficient_canary_fact_is_persisted_as_denied():
+    import psycopg
+
+    operation = load_script("operation_ledger")
+    canary = load_script("proxy_canary")
+    tenant_id = f"capacity-denied-{uuid.uuid4().hex}"
+    operation_id = f"op-canary-{uuid.uuid4().hex}"
+    config = {
+        "proxy_url": "http://proxy.example:10000", "proxy_username_env": "PROXY_USER",
+        "proxy_password_env": "PROXY_PASS", "proxy_session_ports": [10000],
+        "proxy_session_max_asins": 1, "proxy_canary_url": "https://api.ipify.org?format=json",
+        "proxy_canary_timeout_seconds": 5, "proxy_credential_generation": "integration-generation-denied",
+    }
+    fact = {
+        "schema_version": "amazon-us-proxy-canary-v1", "canary_status": "succeeded",
+        "planned_slots": 1, "tested_slots": 1, "available_slots": 1, "unique_egress_count": 1,
+        "duplicate_egress_count": 0, "requested_capacity": 2, "required_slots": 2,
+        "slot_budget": 1, "slot_capacity": 1, "capacity_gate_status": "denied",
+        "capacity_gate_reason": "unique_capacity_insufficient", "credential_generation": "integration-generation-denied",
+        "p95_latency_ms": 10.0, "config_hash": canary.capacity_config_hash(config),
+        "sessions": [{"session_id": "session-01", "status": "available", "usable": True,
+                      "auth_status": "succeeded", "connect_tls_status": "succeeded",
+                      "error_class": None, "http_status": 200, "latency_ms": 10.0}],
+    }
+    connect = lambda: psycopg.connect(DSN)
+    try:
+        operation.ensure_schema(connect)
+        operation.start_operation(operation_id, tenant_id, "canary", "dataimpulse-us", None, connect=connect)
+        operation.finish_operation(
+            operation_id, tenant_id, "failed", "capacity_gate", "unique_capacity_insufficient",
+            capacity_fact=fact, connect=connect,
+        )
+        with psycopg.connect(DSN) as connection:
+            assert connection.execute(
+                "SELECT canary_status,capacity_gate_status,slot_capacity FROM amazon_us.operation_run WHERE operation_id=%s",
+                (operation_id,),
+            ).fetchone() == ("succeeded", "denied", 1)
+    finally:
+        with psycopg.connect(DSN) as connection:
+            connection.execute("DELETE FROM amazon_us.operation_run WHERE tenant_id=%s", (tenant_id,))
             connection.commit()
