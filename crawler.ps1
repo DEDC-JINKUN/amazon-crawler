@@ -143,13 +143,12 @@ function Get-ControlledRawHtmlDir {
 }
 
 function Get-RawRootFingerprint([string]$RawHtmlDir) {
-    $sha = [Security.Cryptography.SHA256]::Create()
-    try {
-        $normalizedRaw = [IO.Path]::GetFullPath($RawHtmlDir).TrimEnd([char[]]'\/').ToLowerInvariant()
-        $bytes = [Text.Encoding]::UTF8.GetBytes("${TenantId}|${normalizedRaw}")
-        return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+    $scriptsDir = Join-Path $projectRoot 'scripts'
+    $fingerprint = (& $python -c "import sys; sys.path.insert(0,sys.argv[1]); from collection_console import raw_root_fingerprint; print(raw_root_fingerprint(sys.argv[2],sys.argv[3]))" $scriptsDir $TenantId $RawHtmlDir).Trim()
+    if ($LASTEXITCODE -ne 0 -or $fingerprint -notmatch '^[0-9a-f]{64}$') {
+        throw 'Console raw-root fingerprint calculation failed.'
     }
-    finally { $sha.Dispose() }
+    return $fingerprint
 }
 
 function Get-ConsoleFingerprint {

@@ -63,6 +63,8 @@ $ast=[System.Management.Automation.Language.Parser]::ParseFile('{script_path}',[
 $fn=$ast.FindAll({{param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-RawRootFingerprint'}},$true) | Select-Object -First 1
 Invoke-Expression $fn.Extent.Text
 $TenantId='{tenant}'
+$projectRoot='{str(ROOT).replace("'", "''")}'
+$python='{str(ROOT / ".venv" / "Scripts" / "python.exe").replace("'", "''")}'
 Get-RawRootFingerprint '{raw_value}'
 """
     result = subprocess.run(
