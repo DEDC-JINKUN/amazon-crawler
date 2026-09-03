@@ -577,9 +577,15 @@ def test_one_blocked_asin_after_firefox_failure_isolated_then_next_asin_succeeds
     assert "product" in storage.saved[1]
     first_traffic = storage.saved[0]["evidence"]["context_json"]["traffic"]
     second_traffic = storage.saved[1]["evidence"]["context_json"]["traffic"]
+    first_attempts = storage.saved[0]["evidence"]["context_json"]["proxy_session_pool"]["attempts"]
     assert storage.saved[0]["evidence"]["transfer_bytes"] == 25
     assert first_traffic["http_compressed_response_bytes"] == 25
     assert first_traffic["firefox_main_document_bytes"] is None
+    assert [attempt["mode"] for attempt in first_attempts] == ["http", "firefox", "firefox"]
+    assert [attempt.get("error_code") for attempt in first_attempts[1:]] == [
+        "browser_fetch_error", "browser_fetch_error",
+    ]
+    assert all(attempt["http_status"] is None and attempt["content_hash"] is None for attempt in first_attempts[1:])
     assert second_traffic["http_compressed_response_bytes"] == 100
     final = storage.saved[1]["evidence"]["context_json"]["proxy_session_pool"]
     assert final["circuit_open_reason"] is None
@@ -742,7 +748,7 @@ def test_two_browser_challenges_use_two_slots_but_record_one_blocked_action():
     assert all(adapter.closed for adapter in adapters)
     assert [item["firefox_verification"] for item in sessions] == ["failed", "failed"]
     assert pool.circuit_open_reason is None
-    assert [attempt["mode"] for attempt in context["proxy_session_pool"]["attempts"]] == ["http", "firefox"]
+    assert [attempt["mode"] for attempt in context["proxy_session_pool"]["attempts"]] == ["http", "firefox", "firefox"]
     assert all(attempt["content_hash"] and "body" not in attempt for attempt in context["proxy_session_pool"]["attempts"])
     assert context["traffic"]["firefox_main_document_bytes"] is None
     assert context["traffic"]["firefox_main_document_unknown_count"] == 2

@@ -315,7 +315,15 @@ class ProxySessionPool:
         self._select(asin, force_new=True)
         return True
 
-    def preserve_browser_attempt(self, url: str, body: str, status: int | None, block_reason: str) -> None:
+    def preserve_browser_attempt(
+        self,
+        url: str,
+        body: str,
+        status: int | None,
+        block_reason: str | None,
+        *,
+        error_code: str | None = None,
+    ) -> None:
         if self._current is None:
             return
         self._intermediate.append({
@@ -326,6 +334,7 @@ class ProxySessionPool:
             "transfer_bytes": getattr(self._current.adapter, "last_transfer_bytes", None),
             "latency_ms": None,
             "block_reason": block_reason,
+            "error_code": error_code,
             "body": body,
         })
 

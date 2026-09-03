@@ -2384,7 +2384,7 @@ def _capture_proxy_attempt_evidence(
         value = dict(attempt)
         body = str(value.pop("body", ""))
         value.pop("url", None)
-        value["content_hash"] = hashlib.sha256(body.encode()).hexdigest()
+        value["content_hash"] = hashlib.sha256(body.encode()).hexdigest() if body else None
         value["raw_html_path"] = _persist_raw_html(raw_html_dir, run_id, asin, body) if body else None
         persisted.append(value)
     accept(persisted)
@@ -3099,10 +3099,17 @@ def _run_postgres_actions_impl(
                     run_id=run_id, asin=task["asin"], ledger=fallback_ledger,
                 )
             except AdapterFetchError:
+                preserve = getattr(adapter, "preserve_browser_attempt", None)
+                if callable(preserve):
+                    preserve(
+                        task["url"], "", None, None,
+                        error_code="browser_fetch_error",
+                    )
                 browser_verification = getattr(adapter, "record_browser_verification", None)
                 if callable(browser_verification):
                     browser_verification(False)
                 first_browser_failed = True
+                _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, task["asin"])
                 browser_result = None
             if browser_result is not None:
                 browser_body, browser_status = browser_result
@@ -3126,17 +3133,30 @@ def _run_postgres_actions_impl(
                         run_id=run_id, asin=task["asin"], ledger=fallback_ledger, max_attempts=2,
                     )
                 except AdapterFetchError:
+                    preserve = getattr(adapter, "preserve_browser_attempt", None)
+                    if callable(preserve):
+                        preserve(
+                            task["url"], "", None, None,
+                            error_code="browser_fetch_error",
+                        )
                     browser_verification = getattr(adapter, "record_browser_verification", None)
                     if callable(browser_verification):
                         browser_verification(False)
                     browser_result = None
+                    _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, task["asin"])
                 if browser_result is not None:
                     browser_body, browser_status = browser_result
                     browser_reason = classify_block(browser_status, browser_body)
+                    if browser_reason:
+                        preserve = getattr(adapter, "preserve_browser_attempt", None)
+                        if callable(preserve):
+                            preserve(task["url"], browser_body, browser_status, browser_reason)
                     browser_verification = getattr(adapter, "record_browser_verification", None)
                     if callable(browser_verification):
                         browser_verification(browser_reason is None)
                     body, response_status, reason = browser_body, browser_status, browser_reason
+                    if browser_reason:
+                        _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, task["asin"])
         data = parse_product_html(body, task["url"]) if not reason else {"asin": "", "canonical_url": ""}
         core_reason = _core_fallback_reason(data, task["asin"]) if not reason else None
         if core_reason is not None:
