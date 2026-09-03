@@ -343,6 +343,61 @@ def test_legacy_variant_projection_requires_hash_verified_raw_canonical(
     assert "canonical_valid_amazon" not in row["context_json"]["identity"]
 
 
+def test_current_tenant_raw_root_never_proves_another_tenant_legacy_variant(tmp_path):
+    module = load_module()
+    assert module.raw_root_for_tenant(tmp_path, "tenant-a", "tenant-a") == tmp_path
+    assert module.raw_root_for_tenant(tmp_path, "tenant-a", "tenant-b") is None
+    legacy = {
+        "asin": "B0B9ZFDZNJ", "error_code": "asin_mismatch",
+        "raw_html_path": "US/B0B9ZFDZNJ/evidence.html.gz", "content_hash": "a" * 64,
+        "context_json": {"identity": {
+            "requested_asin": "B0B9ZFDZNJ", "observed_asin": "B0B9ZFZZZZ",
+            "canonical_asin": "B0B9ZFZZZZ", "parent_asin": "B0PARENT01",
+            "child_asins": ["B0B9ZFDZNJ", "B0B9ZFZZZZ"],
+        }},
+    }
+    explicit = json.loads(json.dumps(legacy))
+    explicit["context_json"]["identity"]["canonical_valid_amazon"] = True
+
+    assert module.classify_evidence_outcome(
+        module.reconcile_legacy_variant_canonical(legacy, None)
+    ) == "failed"
+    assert module.classify_evidence_outcome(explicit) == "variant_redirect"
+
+
+def test_run7_shape_projects_four_products_three_legacy_variants_as_quality_complete(tmp_path):
+    module = load_module()
+    items = [{"outcome": "completed"} for _ in range(4)]
+    requested_asins = ["B0B9ZFDZNJ", "B0B9ZFDZNK", "B0B9ZFDZNL"]
+    observed_asins = ["B0B9ZFZZZ1", "B0B9ZFZZZ2", "B0B9ZFZZZ3"]
+    for index, (requested, observed) in enumerate(zip(requested_asins, observed_asins)):
+        body = f"<html><head><link rel='canonical' href='https://www.amazon.com/dp/{observed}'></head></html>"
+        raw_bytes = body.encode("utf-8")
+        relative = Path("US") / requested / f"{index}.html.gz"
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True)
+        with gzip.open(path, "wb") as handle:
+            handle.write(raw_bytes)
+        row = {
+            "asin": requested, "error_code": "asin_mismatch",
+            "raw_html_path": relative.as_posix(), "content_hash": hashlib.sha256(raw_bytes).hexdigest(),
+            "context_json": {"identity": {
+                "requested_asin": requested, "observed_asin": observed,
+                "canonical_asin": observed, "parent_asin": "B0PARENT01",
+                "child_asins": [requested, observed],
+            }},
+        }
+        reconciled = module.reconcile_legacy_variant_canonical(row, tmp_path)
+        items.append({"outcome": module.classify_evidence_outcome(reconciled)})
+
+    business = module.project_amazon_business(
+        items, requested_actions=7, recorded_actions=7, unrequested_actions=0,
+    )
+    assert business["quality_gate_ok"] is True
+    assert business["completed_actions"] == 4
+    assert business["variant_redirect_actions"] == 3
+
+
 def test_price_status_distinguishes_unavailable_without_buy_box_from_missing():
     module = load_module()
 

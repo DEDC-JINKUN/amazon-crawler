@@ -158,9 +158,12 @@ def test_console_reuse_requires_verified_lock_and_matching_runtime_fingerprint()
     report = text[text.index("function Report-UnmanagedConsoleListener"):text.index("function Show-Help")]
     assert "Get-NetTCPConnection" in report
     assert "Stop-Process" not in report
-    assert "raw_html_dir" not in ready
-    assert "ready.tenant_id" not in ready
-    assert "arguments = @($consoleScript,'--host','127.0.0.1'" in ensure
+    assert "raw_root_fingerprint" in ready
+    assert "lock.tenant_id" in ready
+    assert "ready.raw_tenant_id" in ready
+    assert "Get-ControlledRawHtmlDir" in ensure
+    assert "Update-LegacyIdentityEvidence $rawHtmlDir" in ensure
+    assert "'--tenant-id',$TenantId,'--raw-html-dir',$rawHtmlDir" in ensure
     assert "data\\console_control" in text
 
 

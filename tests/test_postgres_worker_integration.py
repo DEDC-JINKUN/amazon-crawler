@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import importlib.util
 import os
 from pathlib import Path
@@ -328,24 +329,27 @@ def test_two_workers_claim_distinct_tasks_from_real_postgres():
 
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             raw_path = Path(temporary) / "mismatch.html"
-            raw_path.write_text("""
+            raw_body = """
               <html><head><link rel='canonical' href='https://www.amazon.com/dp/B0B9ZFZZZZ'></head>
               <body><input id='ASIN' value='B0B9ZFZZZZ'><span id='productTitle'>Sibling</span>
               <script>var x={parentAsin:'B0PARENT01',landingAsin:'B0B9ZFZZZZ',
               dimensionValuesDisplayData:{'B0B9ZFDZNJ':['A'],'B0B9ZFZZZZ':['B']}};</script></body></html>
-            """, encoding="utf-8")
+            """
+            raw_path.write_bytes(raw_body.encode("utf-8"))
             with psycopg.connect(DSN) as connection:
                 connection.execute(
                     "INSERT INTO amazon_us.collection_evidence"
-                    "(tenant_id,marketplace,asin,subject_type,run_id,url,error_code,raw_html_path,context_json) "
+                    "(tenant_id,marketplace,asin,subject_type,run_id,url,error_code,raw_html_path,content_hash,context_json) "
                     "VALUES (%s,'US','B0B9ZFDZNJ','own','identity-backfill','https://www.amazon.com/dp/B0B9ZFDZNJ',"
-                    "'asin_mismatch',%s,'{}'::jsonb)",
-                    (tenant_id, str(raw_path)),
+                    "'asin_mismatch',%s,%s,'{}'::jsonb)",
+                    (tenant_id, str(raw_path), hashlib.sha256(raw_body.encode("utf-8")).hexdigest()),
                 )
                 connection.commit()
             backfill = load_script("backfill_identity_evidence")
             result = backfill.backfill_identity_evidence(
-                lambda: psycopg.connect(DSN, row_factory=dict_row)
+                lambda: psycopg.connect(DSN, row_factory=dict_row),
+                tenant_id=tenant_id,
+                raw_html_dir=Path(temporary),
             )
             assert result["updated"] >= 1
             with psycopg.connect(DSN) as connection:
@@ -356,6 +360,7 @@ def test_two_workers_claim_distinct_tasks_from_real_postgres():
                 ).fetchone()[0]
             assert identity["requested_asin"] == "B0B9ZFDZNJ"
             assert identity["observed_asin"] == "B0B9ZFZZZZ"
+            assert identity["canonical_valid_amazon"] is True
 
         batches = load_console().PostgresConsoleRepository(DSN).list_tenants()
         batch = next(item for item in batches if item["tenant_id"] == tenant_id)

@@ -127,6 +127,29 @@ function Remove-StaleLock([string]$Path) {
     return $null
 }
 
+function Get-ControlledRawHtmlDir {
+    $resolvedConfig = Resolve-ProjectPath $ConfigPath
+    $resolvedOutput = Resolve-ProjectPath $OutputDir
+    $rawValue = (& $python -c "import sys,tomllib; d=tomllib.load(open(sys.argv[1],'rb')); print((d.get('paths') or {}).get('raw_html_dir') or '')" $resolvedConfig).Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'Could not read raw_html_dir from the configured TOML.' }
+    if ([string]::IsNullOrWhiteSpace($rawValue)) { $rawValue = Join-Path $resolvedOutput 'raw_html' }
+    $resolvedRaw = Resolve-ProjectPath $rawValue
+    $outputBoundary = $resolvedOutput.TrimEnd('\') + '\'
+    if ($resolvedRaw -ne $resolvedOutput -and -not $resolvedRaw.StartsWith($outputBoundary, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Configured raw_html_dir must stay inside the controlled OutputDir.'
+    }
+    return $resolvedRaw
+}
+
+function Get-RawRootFingerprint([string]$RawHtmlDir) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes("${TenantId}|${RawHtmlDir}")
+        return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
+}
+
 function Get-ConsoleFingerprint {
     return (Get-FileHash -LiteralPath $consoleScript -Algorithm SHA256).Hash.ToLowerInvariant()
 }
@@ -184,12 +207,16 @@ function Start-ManagedHost([string]$RequestPath, [string]$Stdout, [string]$Stder
 function Get-ConsoleReady([string]$ConsoleLock) {
     $lock = Read-Lock $ConsoleLock
     if ($null -eq $lock -or $null -eq (Get-VerifiedProcess $lock)) { return $null }
+    $rawHtmlDir = Get-ControlledRawHtmlDir
+    $rawFingerprint = Get-RawRootFingerprint $rawHtmlDir
     $fingerprint = Get-ConsoleFingerprint
     if ([string]$lock.runtime_fingerprint -ne $fingerprint) { return $null }
+    if ([string]$lock.tenant_id -ne $TenantId -or [string]$lock.raw_root_fingerprint -ne $rawFingerprint) { return $null }
     try {
         $ready = Invoke-RestMethod -Uri "${consoleUrl}/readyz" -TimeoutSec 2
         if (-not $ready.ok) { return $null }
         if ([string]$ready.runtime_fingerprint -ne $fingerprint) { return $null }
+        if ([string]$ready.raw_tenant_id -ne $TenantId -or [string]$ready.raw_root_fingerprint -ne $rawFingerprint) { return $null }
         return $ready
     }
     catch { return $null }
@@ -304,8 +331,9 @@ function Get-PreflightErrorClass([object]$Preflight) {
     return "$($failed[0].name)_failed"
 }
 
-function Update-LegacyIdentityEvidence {
-    & $python $identityBackfillScript --dsn-env AMAZON_US_POSTGRES_DSN
+function Update-LegacyIdentityEvidence([string]$RawHtmlDir) {
+    & $python $identityBackfillScript --dsn-env AMAZON_US_POSTGRES_DSN `
+        --tenant-id $TenantId --raw-html-dir $RawHtmlDir
     if ($LASTEXITCODE -ne 0) { throw "Legacy identity evidence backfill failed with exit code $LASTEXITCODE" }
 }
 
@@ -338,6 +366,9 @@ function Finish-RunLedger([string]$RunId, [string]$Status, [int]$ControllerExitC
 }
 
 function Ensure-Console([string]$ConsoleLock) {
+    $rawHtmlDir = Get-ControlledRawHtmlDir
+    $rawFingerprint = Get-RawRootFingerprint $rawHtmlDir
+    $consoleFingerprint = Get-ConsoleFingerprint
     $liveLock = Remove-StaleLock $ConsoleLock
     if ($null -ne $liveLock) {
         if ($null -ne (Get-ConsoleReady $ConsoleLock)) {
@@ -364,7 +395,7 @@ function Ensure-Console([string]$ConsoleLock) {
     }
     Ensure-Credentials
     Ensure-RunLedgerSchema
-    Update-LegacyIdentityEvidence
+    Update-LegacyIdentityEvidence $rawHtmlDir
     $controlDir = Split-Path -Parent $ConsoleLock
     $stdout = Join-Path $controlDir 'console.stdout.log'
     $stderr = Join-Path $controlDir 'console.stderr.log'
@@ -375,7 +406,10 @@ function Ensure-Console([string]$ConsoleLock) {
     Write-JsonAtomic ([ordered]@{
         python = $python
         working_directory = $projectRoot
-        arguments = @($consoleScript,'--host','127.0.0.1','--port',[string]$Port)
+        arguments = @(
+            $consoleScript,'--host','127.0.0.1','--port',[string]$Port,
+            '--tenant-id',$TenantId,'--raw-html-dir',$rawHtmlDir
+        )
         gate_path = $gatePath
         cancel_path = $cancelPath
     }) $requestPath
@@ -384,7 +418,9 @@ function Ensure-Console([string]$ConsoleLock) {
         Write-JsonAtomic ([ordered]@{
             pid = $process.Id
             start_time = $process.StartTime.ToUniversalTime().ToString('o')
-            runtime_fingerprint = Get-ConsoleFingerprint
+            runtime_fingerprint = $consoleFingerprint
+            tenant_id = $TenantId
+            raw_root_fingerprint = $rawFingerprint
             url = $consoleUrl
             stdout = $stdout
             stderr = $stderr

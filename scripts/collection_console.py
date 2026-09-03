@@ -216,6 +216,12 @@ def reconcile_legacy_variant_canonical(
     return updated
 
 
+def raw_root_for_tenant(
+    raw_html_dir: Path | None, raw_tenant_id: str | None, selected_tenant_id: str | None,
+) -> Path | None:
+    return raw_html_dir if raw_html_dir is not None and raw_tenant_id == selected_tenant_id else None
+
+
 def classify_evidence_outcome(row: dict[str, Any]) -> str:
     if row.get("block_reason"):
         return "blocked"
@@ -1199,6 +1205,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                         "ok": True,
                         "schema_version": "amazon-us-console-v2",
                         "runtime_fingerprint": RUNTIME_FINGERPRINT,
+                        "raw_tenant_id": self.server.raw_tenant_id,
+                        "raw_root_fingerprint": self.server.raw_root_fingerprint,
                         **identity,
                     },
                 )
@@ -1223,8 +1231,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 )
                 return
             repository = self._scoped_repository(parsed)
+            selected_raw_root = raw_root_for_tenant(
+                self.server.raw_html_dir,
+                self.server.raw_tenant_id,
+                getattr(repository, "tenant_id", None),
+            )
             if path == "/api/overview":
-                self._send_json(HTTPStatus.OK, repository.load_overview(self.server.raw_html_dir))
+                self._send_json(HTTPStatus.OK, repository.load_overview(selected_raw_root))
                 return
             if path == "/api/runs":
                 query = parse_qs(parsed.query)
@@ -1246,7 +1259,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             if run_match:
                 run_id = run_match.group(1)
                 payload = (
-                    repository.load_run(run_id, self.server.raw_html_dir)
+                    repository.load_run(run_id, selected_raw_root)
                     if isinstance(repository, PostgresConsoleRepository)
                     else repository.load_run(run_id)
                 )
@@ -1309,6 +1322,7 @@ class ConsoleServer(ThreadingHTTPServer):
         repository: Any,
         *,
         raw_html_dir: Path | None = None,
+        raw_tenant_id: str | None = None,
         api_key: str = "",
         access_log: bool = False,
     ):
@@ -1317,6 +1331,13 @@ class ConsoleServer(ThreadingHTTPServer):
         super().__init__(address, ConsoleHandler)
         self.repository = repository
         self.raw_html_dir = raw_html_dir
+        self.raw_tenant_id = str(raw_tenant_id or "").strip() or None
+        if self.raw_tenant_id and not TENANT_RE.fullmatch(self.raw_tenant_id):
+            raise ValueError("invalid raw_tenant_id")
+        raw_identity = (
+            f"{self.raw_tenant_id}|{raw_html_dir.resolve()}" if self.raw_tenant_id and raw_html_dir else ""
+        )
+        self.raw_root_fingerprint = hashlib.sha256(raw_identity.encode("utf-8")).hexdigest() if raw_identity else None
         self.api_key = api_key
         self.access_log = access_log
 
@@ -1344,6 +1365,7 @@ def main(argv: list[str] | None = None) -> int:
             (args.host, args.port),
             repository,
             raw_html_dir=args.raw_html_dir,
+            raw_tenant_id=args.tenant_id,
             api_key=api_key,
             access_log=args.access_log,
         )
