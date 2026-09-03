@@ -81,7 +81,7 @@ def test_rotates_after_two_asins_and_keeps_cookie_jars_isolated_until_close():
     for asin in ("B000000001", "B000000002", "B000000003", "B000000004"):
         pool.begin_action()
         pool.fetch(f"https://www.amazon.com/dp/{asin}")
-        pool.record_outcome("completed")
+        pool.record_outcome("completed", asin)
 
     assert len(adapters) == 2
     assert adapters[0].config["proxy_url"].endswith(":10000")
@@ -107,7 +107,7 @@ def test_captcha_quarantines_session_and_retries_same_asin_once_on_new_session()
     pool = module.ProxySessionPool(config(), factory, classifier)
     pool.begin_run("run-1", "tenant-a", "worker-a")
     body, status = pool.fetch("https://www.amazon.com/dp/B000000001")
-    pool.record_outcome("completed")
+    pool.record_outcome("completed", "B000000001")
 
     assert (body, status) == ("product", 200)
     assert len(adapters) == 2
@@ -129,7 +129,7 @@ def test_consecutive_and_window_breakers_stop_without_unbounded_rotation():
     for asin in ("B000000001", "B000000002"):
         body, _ = pool.fetch(f"https://www.amazon.com/dp/{asin}")
         assert body == "captcha"
-        pool.record_outcome("blocked")
+        pool.record_outcome("blocked", asin)
     assert pool.circuit_open_reason == "consecutive_blocked_asins"
     with pytest.raises(module.ProxyCircuitOpen, match="consecutive"):
         pool.fetch("https://www.amazon.com/dp/B000000003")
@@ -152,8 +152,33 @@ def test_consecutive_and_window_breakers_stop_without_unbounded_rotation():
     window.begin_run("run-2", "tenant-a", "worker-a")
     for index in range(5):
         body, _ = window.fetch(f"https://www.amazon.com/dp/B0000001{index:02d}")
-        window.record_outcome("blocked" if body == "captcha" else "completed")
+        window.record_outcome("blocked" if body == "captcha" else "completed", f"B0000001{index:02d}")
     assert window.circuit_open_reason == "rolling_blocked_asin_limit"
+
+
+def test_duplicate_blocked_actions_for_one_asin_count_once_toward_breaker():
+    module = load_pool()
+
+    def factory(slot_config):
+        return FakeAdapter(slot_config, [("captcha", 200, 10)])
+
+    pool = module.ProxySessionPool(
+        config(proxy_session_retry_per_asin=0, proxy_session_consecutive_block_limit=2),
+        factory,
+        classifier,
+    )
+    pool.begin_run("run-duplicate-asin", "tenant-a", "worker-a")
+    for asin in ("B000000001", "B000000001"):
+        body, _ = pool.fetch(f"https://www.amazon.com/dp/{asin}")
+        assert body == "captcha"
+        pool.record_outcome("blocked", asin)
+
+    assert pool.circuit_open_reason is None
+
+    body, _ = pool.fetch("https://www.amazon.com/dp/B000000002")
+    assert body == "captcha"
+    pool.record_outcome("blocked", "B000000002")
+    assert pool.circuit_open_reason == "consecutive_blocked_asins"
 
 
 def test_network_errors_are_separate_and_sensitive_values_never_enter_context():

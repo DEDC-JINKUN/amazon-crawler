@@ -100,6 +100,7 @@ class ProxySessionPool:
         self._retries: dict[str, int] = {}
         self._block_window: deque[bool] = deque(maxlen=self.window_size)
         self._consecutive_blocks = 0
+        self._breaker_counted_asins: set[str] = set()
         self._intermediate: list[dict[str, Any]] = []
         self._persisted_attempts: list[dict[str, Any]] = []
         self._action_generation = 0
@@ -130,6 +131,7 @@ class ProxySessionPool:
         self._retries = {}
         self._block_window = deque(maxlen=self.window_size)
         self._consecutive_blocks = 0
+        self._breaker_counted_asins = set()
         self._intermediate = []
         self._persisted_attempts = []
         self._action_generation = 0
@@ -170,6 +172,7 @@ class ProxySessionPool:
         self._ports = list(self._all_ports)
         self._session_ids = [f"session-{index + 1:02d}" for index in range(len(self._all_ports))]
         self._capacity_validator = None
+        self._breaker_counted_asins = set()
 
     def begin_action(self) -> None:
         self._action_generation += 1
@@ -312,17 +315,20 @@ class ProxySessionPool:
         self._current.health = "healthy"
         self._current.quarantine_reason = None
 
-    def record_outcome(self, outcome: str) -> None:
-        if outcome == "blocked":
-            self._consecutive_blocks += 1
-            self._block_window.append(True)
-            if self._consecutive_blocks >= self.consecutive_limit:
-                self.circuit_open_reason = "consecutive_blocked_asins"
-            elif sum(self._block_window) >= self.window_block_limit:
-                self.circuit_open_reason = "rolling_blocked_asin_limit"
-            return
-        self._consecutive_blocks = 0
-        self._block_window.append(False)
+    def record_outcome(self, outcome: str, asin: str) -> None:
+        asin_key = str(asin or "").strip().upper() or f"unknown:{self._action_generation}"
+        if asin_key not in self._breaker_counted_asins:
+            self._breaker_counted_asins.add(asin_key)
+            if outcome == "blocked":
+                self._consecutive_blocks += 1
+                self._block_window.append(True)
+                if self._consecutive_blocks >= self.consecutive_limit:
+                    self.circuit_open_reason = "consecutive_blocked_asins"
+                elif sum(self._block_window) >= self.window_block_limit:
+                    self.circuit_open_reason = "rolling_blocked_asin_limit"
+            else:
+                self._consecutive_blocks = 0
+                self._block_window.append(False)
         if self._current is None or self._current.health == "quarantined":
             return
         if outcome == "completed":

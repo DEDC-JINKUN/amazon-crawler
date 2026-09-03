@@ -2396,10 +2396,10 @@ def _browser_fallback_available(adapter: Any) -> bool:
     return callable(getattr(adapter, "fetch_browser", None))
 
 
-def _record_proxy_outcome(adapter: Any, outcome: str) -> None:
+def _record_proxy_outcome(adapter: Any, outcome: str, asin: str) -> None:
     method = getattr(adapter, "record_outcome", None)
     if callable(method):
-        method(outcome)
+        method(outcome, asin)
 
 
 def _note_proxy_unrequested(adapter: Any, count: int) -> None:
@@ -3058,7 +3058,7 @@ def _run_postgres_actions_impl(
                 except AdapterFetchError:
                     browser_result = None
             if browser_result is None:
-                _record_proxy_outcome(adapter, "failed")
+                _record_proxy_outcome(adapter, "failed", task["asin"])
                 failure_transfer_bytes = (
                     None
                     if bool(getattr(adapter, "browser_attempted", False))
@@ -3117,7 +3117,9 @@ def _run_postgres_actions_impl(
                     data = parse_product_html(browser_body, task["url"]) if not browser_reason else {"asin": "", "canonical_url": ""}
         if not reason and _has_explicit_asin_mismatch(data, task["asin"]):
             _record_proxy_outcome(
-                adapter, "variant_redirect" if _is_sibling_variant_redirect(data, task["asin"]) else "failed"
+                adapter,
+                "variant_redirect" if _is_sibling_variant_redirect(data, task["asin"]) else "failed",
+                task["asin"],
             )
             source_type = getattr(adapter, "source_type", "http_html")
             transfer_bytes = getattr(adapter, "last_transfer_bytes", None)
@@ -3135,7 +3137,7 @@ def _run_postgres_actions_impl(
             continue
         missing_core = [key for key in ("asin", "canonical_url", "title") if not str(data.get(key) or "").strip()]
         if not reason and _is_terminal_missing_core_failure(response_status, missing_core):
-            _record_proxy_outcome(adapter, "failed")
+            _record_proxy_outcome(adapter, "failed", task["asin"])
             error = "missing_core_fields:" + ",".join(missing_core)
             source_type = getattr(adapter, "source_type", "http_html")
             evidence = _postgres_evidence(
@@ -3192,15 +3194,17 @@ def _run_postgres_actions_impl(
         error_code = "context_mismatch:" + ",".join(context_errors) if context_errors else None
         pending_missing = [key for key in ("asin", "canonical_url", "title") if not str(data.get(key) or "").strip()]
         if reason:
-            _record_proxy_outcome(adapter, "blocked")
+            _record_proxy_outcome(adapter, "blocked", task["asin"])
         elif context_errors or pending_missing:
-            _record_proxy_outcome(adapter, "failed")
+            _record_proxy_outcome(adapter, "failed", task["asin"])
         elif not _valid_asin_identity(data, task["asin"]):
             _record_proxy_outcome(
-                adapter, "variant_redirect" if _is_sibling_variant_redirect(data, task["asin"]) else "failed"
+                adapter,
+                "variant_redirect" if _is_sibling_variant_redirect(data, task["asin"]) else "failed",
+                task["asin"],
             )
         else:
-            _record_proxy_outcome(adapter, "completed")
+            _record_proxy_outcome(adapter, "completed", task["asin"])
         if reason and _proxy_circuit_reason(adapter):
             _note_proxy_unrequested(adapter, max_actions - actions - 1)
         evidence = _postgres_evidence(
