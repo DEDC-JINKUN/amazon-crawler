@@ -354,6 +354,7 @@ class ProxySessionPool:
         block_reason: str | None,
         *,
         error_code: str | None = None,
+        stage_code: str | None = None,
     ) -> None:
         if self._current is None:
             return
@@ -366,6 +367,7 @@ class ProxySessionPool:
             "latency_ms": None,
             "block_reason": block_reason,
             "error_code": error_code,
+            "stage_code": stage_code,
             "body": body,
         })
 

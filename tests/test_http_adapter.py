@@ -363,6 +363,128 @@ class HttpAdapterTests(unittest.TestCase):
         self.assertTrue(driver.refreshed)
         self.assertTrue(adapter._context_initialized)
 
+    def test_firefox_delivery_context_timeout_returns_initial_product_body_as_partial(self):
+        worker = load_worker()
+
+        class TimeoutException(Exception):
+            pass
+
+        class Driver:
+            current_window_handle = "top-context"
+            page_source = "<html><title>Product</title><span id='productTitle'>Example</span></html>"
+
+            def __init__(self): self.quit_called = False
+            def get(self, _url): pass
+            def quit(self): self.quit_called = True
+
+        driver = Driver()
+        adapter = object.__new__(worker.SeleniumFirefoxAdapter)
+        adapter.config = {**worker.DEFAULTS, "context": {"postal_code": "90001"}}
+        adapter.driver = driver
+        adapter._context_initialized = False
+        adapter._network_ledger = worker.BrowserNetworkLedger()
+        adapter._bidi_available = False
+        adapter._closed = False
+        adapter._ensure_delivery_context = lambda: (_ for _ in ()).throw(TimeoutException("private selector detail"))
+
+        with patch.object(worker, "extract_response_status", return_value=200):
+            body, status = adapter.fetch("https://www.amazon.com/dp/B00RCPDCQU")
+
+        self.assertEqual((body, status), (driver.page_source, 200))
+        self.assertFalse(adapter._context_initialized)
+        self.assertEqual(adapter.last_context_error_stage, "browser_delivery_context")
+        self.assertEqual(adapter.last_context_error_code, "delivery_context_timeout")
+        self.assertTrue(driver.quit_called)
+        self.assertNotIn("private", repr(adapter.last_traffic))
+
+    def test_firefox_initial_captcha_returns_without_attempting_delivery_context(self):
+        worker = load_worker()
+
+        class Driver:
+            current_window_handle = "top-context"
+            page_source = "<html><title>Robot Check</title>captcha</html>"
+            def get(self, _url): pass
+            def quit(self): pass
+
+        adapter = object.__new__(worker.SeleniumFirefoxAdapter)
+        adapter.config = {**worker.DEFAULTS, "context": {"postal_code": "90001"}}
+        adapter.driver = Driver()
+        adapter._context_initialized = False
+        adapter._network_ledger = worker.BrowserNetworkLedger()
+        adapter._bidi_available = False
+        adapter._closed = False
+        adapter._ensure_delivery_context = lambda: (_ for _ in ()).throw(AssertionError("must not run"))
+
+        with patch.object(worker, "extract_response_status", return_value=200):
+            body, status = adapter.fetch("https://www.amazon.com/dp/B00RCPDCQU")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(worker.classify_block(status, body), "robot")
+        self.assertIsNone(adapter.last_context_error_stage)
+
+    def test_firefox_page_source_failure_remains_browser_fetch_error_with_capture_stage(self):
+        worker = load_worker()
+
+        class NoSuchWindowException(Exception):
+            pass
+
+        class Driver:
+            current_window_handle = "top-context"
+            def get(self, _url): pass
+            def quit(self): pass
+            @property
+            def page_source(self): raise NoSuchWindowException("private window detail")
+
+        adapter = object.__new__(worker.SeleniumFirefoxAdapter)
+        adapter.config = {**worker.DEFAULTS, "context": {"postal_code": "90001"}}
+        adapter.driver = Driver()
+        adapter._context_initialized = False
+        adapter._network_ledger = worker.BrowserNetworkLedger()
+        adapter._bidi_available = False
+        adapter._closed = False
+
+        with self.assertRaises(worker.AdapterFetchError) as caught:
+            adapter.fetch("https://www.amazon.com/dp/B00RCPDCQU")
+
+        self.assertEqual(caught.exception.stage_code, "browser_capture")
+        self.assertNotIn("private", str(caught.exception))
+
+    def test_http_adapter_projects_partial_context_and_discards_closed_dirty_browser(self):
+        worker = load_worker()
+
+        class Browser:
+            _context_initialized = False
+            _closed = True
+            last_traffic = {"main_document_bytes": None, "main_document_unknown_count": 1}
+            last_context_error_stage = "browser_delivery_context"
+            last_context_error_code = "delivery_context_timeout"
+
+            def fetch(self, _url): return "<html>product</html>", 200
+
+        adapter = object.__new__(worker.HttpFirstAdapter)
+        adapter.config = dict(worker.DEFAULTS)
+        adapter._proxy_auth_configured = False
+        adapter.browser = Browser()
+        adapter.source_type = "http_html"
+        adapter.last_transfer_bytes = 123
+        adapter.last_browser_traffic = None
+        adapter.last_browser_context_confirmed = False
+        adapter.last_context_error_stage = None
+        adapter.last_context_error_code = None
+
+        body, status = adapter.fetch_browser(
+            "https://www.amazon.com/dp/B00RCPDCQU",
+            fallback_reason=worker.FallbackReason.CONTEXT_MISMATCH,
+            run_id="run-1", asin="B00RCPDCQU",
+        )
+
+        self.assertEqual((body, status), ("<html>product</html>", 200))
+        self.assertEqual(adapter.source_type, "selenium_dom")
+        self.assertFalse(adapter.last_browser_context_confirmed)
+        self.assertEqual(adapter.last_context_error_stage, "browser_delivery_context")
+        self.assertEqual(adapter.last_context_error_code, "delivery_context_timeout")
+        self.assertIsNone(adapter.browser)
+
     def test_failed_browser_fallback_does_not_relabel_http_body_as_selenium(self):
         worker = load_worker()
 

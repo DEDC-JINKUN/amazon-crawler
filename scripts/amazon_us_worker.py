@@ -256,6 +256,10 @@ def classify_block(status: int | None = None, text: str = "", title: str = "") -
 class AdapterFetchError(RuntimeError):
     """A browser fetch failure that can be checkpointed as failed."""
 
+    def __init__(self, message: str, *, stage_code: str | None = None) -> None:
+        super().__init__(message)
+        self.stage_code = stage_code
+
 
 class FallbackReason(str, Enum):
     HTTP_TRANSPORT_ERROR = "http_transport_error"
@@ -1767,6 +1771,8 @@ class SeleniumFirefoxAdapter:
         self._fetch_error_handler_id: Any | None = None
         self._bidi_available = False
         self._closed = False
+        self.last_context_error_stage: str | None = None
+        self.last_context_error_code: str | None = None
         # Selenium 4.47 exposes the stable high-level driver.network surface.
         # Initialization is fail-closed so Firefox never silently runs without
         # the requested interception and measurement controls.
@@ -1872,17 +1878,52 @@ class SeleniumFirefoxAdapter:
         if not hasattr(self, "_network_ledger"):
             self._network_ledger = BrowserNetworkLedger()
         self._network_ledger.reset(top_context_id=None)
+        self.last_context_error_stage = None
+        self.last_context_error_code = None
         try:
             top_context_id = self.driver.current_window_handle
             self._network_ledger.reset(top_context_id=top_context_id)
             self.driver.get(url)
+        except Exception:
+            self.last_traffic = self._network_ledger.snapshot()
+            self.close()
+            raise AdapterFetchError(
+                "Firefox browser session is unavailable", stage_code="browser_navigation"
+            ) from None
+        try:
+            initial_body = self.driver.page_source
+            initial_status = extract_response_status(self.driver)
+        except Exception:
+            self.last_traffic = self._network_ledger.snapshot()
+            self.close()
+            raise AdapterFetchError(
+                "Firefox browser session is unavailable", stage_code="browser_capture"
+            ) from None
+        if classify_block(initial_status, initial_body):
+            self.last_traffic = self._network_ledger.snapshot()
+            return initial_body, initial_status
+        try:
             self._ensure_delivery_context()
+        except Exception as exc:
+            self._context_initialized = False
+            self.last_context_error_stage = "browser_delivery_context"
+            self.last_context_error_code = (
+                "delivery_context_timeout"
+                if exc.__class__.__name__ in {"TimeoutException", "TimeoutError"}
+                else "delivery_context_failed"
+            )
+            self.last_traffic = self._network_ledger.snapshot()
+            self.close()
+            return initial_body, initial_status
+        try:
             body = self.driver.page_source
             status = extract_response_status(self.driver)
         except Exception:
             self.last_traffic = self._network_ledger.snapshot()
             self.close()
-            raise AdapterFetchError("Firefox browser session is unavailable") from None
+            raise AdapterFetchError(
+                "Firefox browser session is unavailable", stage_code="browser_capture"
+            ) from None
         self.last_traffic = self._network_ledger.snapshot()
         return body, status
 
@@ -1991,6 +2032,8 @@ class HttpFirstAdapter:
         self.browser_attempted = False
         self.last_cookie_bridge_status: str | None = None
         self.last_cookie_bridge_error_code: str | None = None
+        self.last_context_error_stage: str | None = None
+        self.last_context_error_code: str | None = None
 
     def _rebuild_opener(self) -> None:
         cookie_handler = urllib.request.HTTPCookieProcessor(self.cookie_session.jar)
@@ -2018,6 +2061,8 @@ class HttpFirstAdapter:
         self.browser_attempted = False
         self.last_cookie_bridge_status = None
         self.last_cookie_bridge_error_code = None
+        self.last_context_error_stage = None
+        self.last_context_error_code = None
 
     @staticmethod
     def _decode(response: Any, body: bytes) -> str:
@@ -2133,7 +2178,10 @@ class HttpFirstAdapter:
                     self._proxy_relay.start()
                 except (OSError, RuntimeError, ValueError):
                     self._proxy_relay = None
-                    raise AdapterFetchError("Firefox proxy authentication relay is unavailable") from None
+                    raise AdapterFetchError(
+                        "Firefox proxy authentication relay is unavailable",
+                        stage_code="browser_proxy_setup",
+                    ) from None
             relay_host, relay_port = self._proxy_relay.address
             browser_config = {
                 **self.config,
@@ -2144,8 +2192,10 @@ class HttpFirstAdapter:
         if self.browser is None:
             try:
                 self.browser = SeleniumFirefoxAdapter(browser_config)
-            except (RuntimeError, OSError) as exc:
-                raise AdapterFetchError(str(exc)) from exc
+            except (RuntimeError, OSError):
+                raise AdapterFetchError(
+                    "Firefox browser initialization failed", stage_code="browser_driver_init"
+                ) from None
         browser = self.browser
         try:
             body, status = browser.fetch(url)
@@ -2163,8 +2213,12 @@ class HttpFirstAdapter:
             raise
         self.source_type = "selenium_dom"
         self.last_transfer_bytes = None
-        self.last_browser_traffic = dict(self.browser.last_traffic)
-        self.last_browser_context_confirmed = bool(self.browser._context_initialized)
+        self.last_browser_traffic = dict(browser.last_traffic)
+        self.last_browser_context_confirmed = bool(browser._context_initialized)
+        self.last_context_error_stage = getattr(browser, "last_context_error_stage", None)
+        self.last_context_error_code = getattr(browser, "last_context_error_code", None)
+        if bool(getattr(browser, "_closed", False)):
+            self.browser = None
         return body, status
 
     def proxy_relay_summary(self) -> dict[str, Any] | None:
@@ -2287,6 +2341,7 @@ def _fetch_browser_once(
     asin: str,
     ledger: BrowserFallbackLedger,
     max_attempts: int = 1,
+    raw_html_dir: Path | None = None,
 ) -> tuple[str, int | None] | None:
     attempt_count = int(
         getattr(
@@ -2313,9 +2368,13 @@ def _fetch_browser_once(
     accepts_keywords = "fallback_reason" in parameters or any(
         value.kind == inspect.Parameter.VAR_KEYWORD for value in parameters.values()
     )
-    if accepts_keywords:
-        return method(url, fallback_reason=fallback_reason, run_id=run_id, asin=asin)
-    return method(url)
+    try:
+        if accepts_keywords:
+            return method(url, fallback_reason=fallback_reason, run_id=run_id, asin=asin)
+        return method(url)
+    except AdapterFetchError as exc:
+        _preserve_browser_failure_attempt(adapter, url, raw_html_dir, run_id, asin, exc)
+        raise
 
 
 def _evidence_context(base_context: dict[str, Any] | None, adapter: Any) -> dict[str, Any]:
@@ -2359,6 +2418,14 @@ def _evidence_context(base_context: dict[str, Any] | None, adapter: Any) -> dict
         if bridge_error:
             bridge["error_code"] = str(bridge_error)
         context["cookie_bridge"] = bridge
+    context_error_stage = getattr(adapter, "last_context_error_stage", None)
+    context_error_code = getattr(adapter, "last_context_error_code", None)
+    if context_error_stage or context_error_code:
+        context["browser_context"] = {
+            "status": "partial",
+            "error_stage": str(context_error_stage or "browser_delivery_context"),
+            "error_code": str(context_error_code or "delivery_context_failed"),
+        }
     pool_context = getattr(adapter, "evidence_context", None)
     if callable(pool_context):
         context["proxy_session_pool"] = pool_context()
@@ -2391,6 +2458,30 @@ def _capture_proxy_attempt_evidence(
         value["raw_html_path"] = _persist_raw_html(raw_html_dir, run_id, asin, body) if body else None
         persisted.append(value)
     accept(persisted)
+
+
+def _preserve_browser_failure_attempt(
+    adapter: Any,
+    url: str,
+    raw_html_dir: Path | None,
+    run_id: str,
+    asin: str,
+    error: AdapterFetchError,
+) -> None:
+    allowed_stages = {
+        "browser_proxy_setup", "browser_driver_init", "browser_navigation",
+        "browser_delivery_context", "browser_capture",
+    }
+    stage_code = str(getattr(error, "stage_code", "") or "")
+    if stage_code not in allowed_stages:
+        stage_code = "browser_capture"
+    preserve = getattr(adapter, "preserve_browser_attempt", None)
+    if callable(preserve):
+        preserve(
+            url, "", None, None,
+            error_code="browser_fetch_error", stage_code=stage_code,
+        )
+        _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, asin)
 
 
 def _proxy_circuit_reason(adapter: Any) -> str | None:
@@ -2633,9 +2724,9 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
             try:
                 body, response_status = adapter.fetch(url)
                 _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, row["asin"])
-            except AdapterFetchError as exc:
+            except AdapterFetchError:
                 _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, row["asin"])
-                _record_failure(conn, "US", row["asin"], "review_fetch_error", str(exc))
+                _record_failure(conn, "US", row["asin"], "review_fetch_error", "review_fetch_error")
                 if refresh_job_id and row["asin"] == refresh_asin:
                     _finish_refresh_request(conn, refresh_job_id, "failed")
                 actions += 1
@@ -2941,14 +3032,14 @@ def _run_postgres_actions_impl(
             try:
                 body, response_status = adapter.fetch(url)
                 _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, task["asin"])
-            except AdapterFetchError as exc:
+            except AdapterFetchError:
                 _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, task["asin"])
                 evidence = _postgres_evidence(
                     run_id, task, None, None, getattr(adapter, "source_type", "http_html"),
                     raw_html_dir, _evidence_context(config.get("context"), adapter), getattr(adapter, "last_transfer_bytes", None),
                     error_code="review_fetch_error",
                 )
-                storage.save_failure(task=task, reason="review_fetch_error", error=str(exc), evidence=evidence)
+                storage.save_failure(task=task, reason="review_fetch_error", error="review_fetch_error", evidence=evidence)
                 if refresh_job_id:
                     storage.finish_refresh_request(refresh_job_id, "failed")
                 actions += 1
@@ -3115,17 +3206,10 @@ def _run_postgres_actions_impl(
                     run_id=run_id, asin=task["asin"], ledger=fallback_ledger,
                 )
             except AdapterFetchError:
-                preserve = getattr(adapter, "preserve_browser_attempt", None)
-                if callable(preserve):
-                    preserve(
-                        task["url"], "", None, None,
-                        error_code="browser_fetch_error",
-                    )
                 browser_verification = getattr(adapter, "record_browser_verification", None)
                 if callable(browser_verification):
                     browser_verification(False)
                 first_browser_failed = True
-                _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, task["asin"])
                 browser_result = None
             if browser_result is not None:
                 browser_body, browser_status = browser_result
@@ -3133,7 +3217,10 @@ def _run_postgres_actions_impl(
                 if browser_reason:
                     preserve = getattr(adapter, "preserve_browser_attempt", None)
                     if callable(preserve):
-                        preserve(task["url"], browser_body, browser_status, browser_reason)
+                        preserve(
+                            task["url"], browser_body, browser_status, browser_reason,
+                            stage_code="browser_capture",
+                        )
                 browser_verification = getattr(adapter, "record_browser_verification", None)
                 if callable(browser_verification):
                     browser_verification(browser_reason is None)
@@ -3149,24 +3236,20 @@ def _run_postgres_actions_impl(
                         run_id=run_id, asin=task["asin"], ledger=fallback_ledger, max_attempts=2,
                     )
                 except AdapterFetchError:
-                    preserve = getattr(adapter, "preserve_browser_attempt", None)
-                    if callable(preserve):
-                        preserve(
-                            task["url"], "", None, None,
-                            error_code="browser_fetch_error",
-                        )
                     browser_verification = getattr(adapter, "record_browser_verification", None)
                     if callable(browser_verification):
                         browser_verification(False)
                     browser_result = None
-                    _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, task["asin"])
                 if browser_result is not None:
                     browser_body, browser_status = browser_result
                     browser_reason = classify_block(browser_status, browser_body)
                     if browser_reason:
                         preserve = getattr(adapter, "preserve_browser_attempt", None)
                         if callable(preserve):
-                            preserve(task["url"], browser_body, browser_status, browser_reason)
+                            preserve(
+                                task["url"], browser_body, browser_status, browser_reason,
+                                stage_code="browser_capture",
+                            )
                     browser_verification = getattr(adapter, "record_browser_verification", None)
                     if callable(browser_verification):
                         browser_verification(browser_reason is None)

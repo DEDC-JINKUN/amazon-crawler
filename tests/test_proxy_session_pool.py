@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import gzip
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -306,6 +308,26 @@ def product_html(asin):
       <input id='ASIN' value='{asin}'><span id='productTitle'>Product</span>
     </body></html>
     """
+
+
+class PartialContextBrowserAdapter(FakeAdapter):
+    def __init__(self, config, browser_body):
+        super().__init__(config, [("captcha", 200, 25)])
+        self.browser_body = browser_body
+        self.commit_calls = 0
+
+    def fetch_browser(self, _url, **_kwargs):
+        self.source_type = "selenium_dom"
+        self.last_transfer_bytes = None
+        self.last_browser_traffic = {"main_document_bytes": None, "subresource_bytes": None}
+        self.last_browser_context_confirmed = False
+        self.last_context_error_stage = "browser_delivery_context"
+        self.last_context_error_code = "delivery_context_timeout"
+        return self.browser_body, 200
+
+    def commit_browser_context(self, *_args, **_kwargs):
+        self.commit_calls += 1
+        raise AssertionError("partial browser context must not bridge cookies")
 
 
 def test_postgres_runner_records_retry_attribution_and_sanitized_session_metrics():
@@ -665,6 +687,87 @@ def test_first_http_captcha_uses_same_slot_firefox_before_rotation():
     assert [item["firefox_verification"] for item in sessions] == ["succeeded"]
     assert sessions[0]["health"] == "healthy"
     assert sessions[0]["request_count"] == 1
+
+
+def test_firefox_product_body_survives_delivery_timeout_as_partial_with_raw_hash(tmp_path):
+    worker = load_worker()
+    pool_module = load_pool()
+    browser_body = """
+    <html><head><link rel='canonical' href='https://www.amazon.com/dp/B000000001'></head><body>
+      <input id='ASIN' value='B000000001'><span id='productTitle'>Partial Context Product</span>
+      <span class='a-price'><span class='a-offscreen'>$24.99</span></span>
+      <div id='desktop_buybox'>Delivering to United States</div>
+    </body></html>
+    """
+    adapters = []
+
+    def factory(slot_config):
+        adapter = PartialContextBrowserAdapter(slot_config, browser_body)
+        adapters.append(adapter)
+        return adapter
+
+    pool = pool_module.ProxySessionPool(config(), factory, worker.classify_block)
+    storage = ProductStorage(count=1)
+    worker_config = {
+        **worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": tmp_path, "context": {
+            "expected_country": "US", "expected_currency": "USD", "postal_code": "90001",
+        },
+        "proxy_firefox_verify_on_access_block": True,
+    }
+
+    assert worker._run_postgres_actions_impl(
+        storage, pool, worker_config, limit=1, run_id="run-partial-firefox", worker_id="worker-a"
+    ) == 1
+    payload = storage.saved[0]
+    context = payload["evidence"]["context_json"]
+    assert "product" in payload
+    assert payload["product"]["title"] == "Partial Context Product"
+    assert context["context_quality"] == "partial"
+    assert context["postal_confirmed"] is False
+    assert context["location_sensitive_fields_unverified"] == ["price", "availability", "buy_box", "delivery"]
+    assert context["browser_context"] == {
+        "status": "partial", "error_stage": "browser_delivery_context",
+        "error_code": "delivery_context_timeout",
+    }
+    assert adapters[0].commit_calls == 0
+    raw_path = tmp_path / Path(payload["evidence"]["raw_html_path"])
+    raw_bytes = gzip.open(raw_path, "rb").read()
+    assert raw_bytes.decode("utf-8") == browser_body
+    assert hashlib.sha256(raw_bytes).hexdigest() == payload["evidence"]["content_hash"]
+
+
+@pytest.mark.parametrize(
+    "browser_body",
+    [
+        """<html><head><link rel='canonical' href='https://www.amazon.com/dp/B000000001'></head><body>
+        <input id='ASIN' value='B000000001'><span id='productTitle'>Foreign</span>
+        <span class='a-price'><span class='a-offscreen'>HKD117.52</span></span>
+        <div id='desktop_buybox'>Delivering to Hong Kong</div></body></html>""",
+        """<html><head><link rel='canonical' href='https://www.amazon.com/dp/B000000001'></head><body>
+        <input id='ASIN' value='B000000001'><span id='productTitle'>Unknown Context</span>
+        </body></html>""",
+    ],
+)
+def test_firefox_partial_body_without_trusted_usd_us_context_still_fails(browser_body):
+    worker = load_worker()
+    pool_module = load_pool()
+    pool = pool_module.ProxySessionPool(
+        config(), lambda slot_config: PartialContextBrowserAdapter(slot_config, browser_body), worker.classify_block,
+    )
+    storage = ProductStorage(count=1)
+    worker_config = {
+        **worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None, "context": {
+            "expected_country": "US", "expected_currency": "USD", "postal_code": "90001",
+        },
+        "proxy_firefox_verify_on_access_block": True,
+    }
+
+    assert worker._run_postgres_actions_impl(
+        storage, pool, worker_config, limit=1, run_id="run-invalid-firefox-context", worker_id="worker-a"
+    ) == 1
+    assert storage.saved[0]["reason"] == "context_mismatch"
+    assert storage.saved[0]["evidence"]["context_json"]["context_quality"] == "invalid"
+    assert storage.saved[0]["evidence"]["block_reason"] is None
 
 
 def test_failed_same_slot_firefox_rotates_then_second_slot_browser_recovers_without_http():

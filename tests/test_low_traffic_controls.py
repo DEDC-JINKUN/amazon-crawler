@@ -697,6 +697,60 @@ def test_access_control_recovery_allows_exactly_two_browser_navigations_not_thre
     assert len(calls) == 2
 
 
+@pytest.mark.parametrize(
+    "fallback_reason",
+    [
+        "HTTP_TRANSPORT_ERROR", "MISSING_TITLE", "CONTEXT_MISMATCH",
+        "REVIEW_EMPTY", "ACCESS_CONTROL_VERIFICATION",
+    ],
+)
+def test_all_browser_fallback_failures_use_one_sanitized_stage_attempt_seam(fallback_reason):
+    worker = load_worker()
+
+    class Adapter:
+        browser_attempted = False
+
+        def __init__(self):
+            self.pending = []
+            self.persisted = []
+
+        def fetch_browser(self, *_args, **_kwargs):
+            raise worker.AdapterFetchError(
+                "private selector and endpoint detail", stage_code="browser_capture"
+            )
+
+        def preserve_browser_attempt(
+            self, url, body, status, block_reason, *, error_code=None, stage_code=None,
+        ):
+            self.pending.append({
+                "url": url, "body": body, "http_status": status,
+                "block_reason": block_reason, "error_code": error_code,
+                "stage_code": stage_code, "transfer_bytes": None,
+            })
+
+        def drain_intermediate_attempts(self):
+            pending, self.pending = self.pending, []
+            return pending
+
+        def add_attempt_evidence(self, attempts):
+            self.persisted.extend(attempts)
+
+    adapter = Adapter()
+    with pytest.raises(worker.AdapterFetchError):
+        worker._fetch_browser_once(
+            adapter, "https://www.amazon.com/dp/B00RCPDCQU",
+            fallback_reason=getattr(worker.FallbackReason, fallback_reason),
+            run_id="run-1", asin="B00RCPDCQU", ledger=worker.BrowserFallbackLedger(),
+        )
+
+    assert adapter.persisted == [{
+        "http_status": None, "block_reason": None,
+        "error_code": "browser_fetch_error", "stage_code": "browser_capture",
+        "transfer_bytes": None, "content_hash": None, "raw_html_path": None,
+    }]
+    assert "private" not in repr(adapter.persisted)
+
+
 class OneProductStorage:
     tenant_id = "tenant-a"
 
@@ -879,6 +933,15 @@ class ReviewOnlyFallbackAdapter:
         return 1
 
 
+class FailingReviewFetchAdapter:
+    source_type = "http_html"
+    last_transfer_bytes = None
+    last_retry_after_seconds = None
+
+    def fetch(self, _url):
+        raise RuntimeError("placeholder")
+
+
 def test_postgres_review_only_browser_fallback_commits_confirmed_cookie_context():
     worker = load_worker()
     storage = ReviewOnlyStorage()
@@ -889,6 +952,60 @@ def test_postgres_review_only_browser_fallback_commits_confirmed_cookie_context(
 
     assert adapter.commits == [("run-review", True)]
     assert storage.saved[0]["next_status"] == "succeeded"
+
+
+def test_postgres_review_fetch_error_persists_only_stable_code():
+    worker = load_worker()
+
+    class Adapter(FailingReviewFetchAdapter):
+        def fetch(self, _url):
+            raise worker.AdapterFetchError("private endpoint and selector detail")
+
+    storage = ReviewOnlyStorage()
+    assert worker._run_postgres_actions_impl(
+        storage, Adapter(), {**worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None},
+        limit=1, run_id="run-review-error", worker_id="worker-a",
+    ) == 1
+
+    assert storage.saved[0]["reason"] == "review_fetch_error"
+    assert storage.saved[0]["error"] == "review_fetch_error"
+    assert "private" not in repr(storage.saved[0])
+
+
+def test_sqlite_review_fetch_error_persists_only_stable_code():
+    worker = load_worker()
+
+    class Adapter(FailingReviewFetchAdapter):
+        def fetch(self, _url):
+            raise worker.AdapterFetchError("private endpoint and selector detail")
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        manifest = root / "manifest.csv"
+        manifest.write_text(
+            "\ufeffasin,url,marketplace,source_site_label,source_workbook\n"
+            "B00RCPDCQU,https://www.amazon.com/dp/B00RCPDCQU,US,test,fixture.xlsx\n",
+            encoding="utf-8",
+        )
+        conn = worker.init_db(root / "state.sqlite3")
+        config = {
+            **worker.DEFAULTS, "max_actions_per_run": 1, "output_dir": root / "out",
+            "raw_html_dir": None, "context": {},
+        }
+        worker.initialize_manifest(conn, manifest, config)
+        worker._set_status(conn, "US", "B00RCPDCQU", "running", reason="test")
+        worker._set_status(
+            conn, "US", "B00RCPDCQU", "reviews_pending", reason="test-review",
+            task_stage="reviews", resume_status="reviews_pending",
+            next_review_url="https://www.amazon.com/product-reviews/B00RCPDCQU",
+            next_review_page=1, reported_review_count=1,
+        )
+
+        assert worker.run_actions(conn, Adapter(), config, limit=1, run_id="run-review-error") == 1
+        state = conn.execute("SELECT status,last_error FROM item_state WHERE asin='B00RCPDCQU'").fetchone()
+        conn.close()
+
+    assert tuple(state) == ("failed", "review_fetch_error")
 
 
 def test_sqlite_review_only_browser_fallback_commits_confirmed_cookie_context():
