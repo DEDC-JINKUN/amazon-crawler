@@ -991,6 +991,50 @@ def test_transport_retry_slot_captcha_and_firefox_challenge_record_one_blocked_a
     assert pool.circuit_open_reason is None
 
 
+def test_transport_retry_slot_firefox_exception_is_a_sanitized_attempt_without_third_slot():
+    worker = load_worker()
+    pool_module = load_pool()
+    adapters = []
+
+    class TransportThenBrowserErrorAdapter(FakeAdapter):
+        def fetch_browser(self, _url, **_kwargs):
+            self.source_type = "selenium_dom"
+            self.last_transfer_bytes = None
+            self.last_browser_traffic = {"main_document_bytes": None, "subresource_bytes": None}
+            raise worker.AdapterFetchError("private browser failure detail")
+
+    def factory(slot_config):
+        scripted = [worker.AdapterFetchError("private transport detail")] if not adapters else [("captcha", 200, 25)]
+        adapter = TransportThenBrowserErrorAdapter(slot_config, scripted)
+        if not adapters:
+            adapter.last_transfer_bytes = None
+        adapters.append(adapter)
+        return adapter
+
+    pool = pool_module.ProxySessionPool(
+        config(proxy_session_ports=[10000, 10001, 10002]), factory, worker.classify_block,
+    )
+    storage = ProductStorage(count=1)
+    worker_config = {
+        **worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None, "context": {},
+        "proxy_firefox_verify_on_access_block": True,
+    }
+
+    assert worker._run_postgres_actions_impl(
+        storage, pool, worker_config, limit=1, run_id="run-transport-browser-error", worker_id="worker-a"
+    ) == 1
+    assert storage.saved[0]["reason"] == "captcha"
+    attempts = storage.saved[0]["evidence"]["context_json"]["proxy_session_pool"]["attempts"]
+    assert [attempt["mode"] for attempt in attempts] == ["http", "http", "firefox"]
+    assert attempts[-1]["error_code"] == "browser_fetch_error"
+    assert attempts[-1]["http_status"] is None
+    assert attempts[-1]["transfer_bytes"] is None
+    assert attempts[-1]["content_hash"] is None
+    assert attempts[-1]["raw_html_path"] is None
+    assert "private" not in repr(storage.saved[0])
+    assert len(adapters) == 2
+
+
 def test_two_transport_failures_record_one_fetch_error_then_next_asin_uses_new_slot():
     worker = load_worker()
     pool_module = load_pool()
