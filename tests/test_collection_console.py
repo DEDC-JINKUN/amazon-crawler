@@ -365,6 +365,19 @@ def test_current_tenant_raw_root_never_proves_another_tenant_legacy_variant(tmp_
     assert module.classify_evidence_outcome(explicit) == "variant_redirect"
 
 
+def test_raw_root_fingerprint_uses_lexical_absolute_path_and_binds_tenant(tmp_path):
+    module = load_module()
+    lexical = tmp_path / "folder" / ".." / "raw"
+    normalized = tmp_path / "raw"
+
+    first = module.raw_root_fingerprint("tenant-a", lexical)
+    same = module.raw_root_fingerprint("tenant-a", normalized)
+
+    assert first == same
+    assert module.raw_root_fingerprint("tenant-b", normalized) != first
+    assert module.raw_root_fingerprint("tenant-a", tmp_path / "other") != first
+
+
 def test_console_routes_pass_raw_root_to_all_current_tenant_identity_projections_only(tmp_path):
     module = load_module()
     calls = []

@@ -38,6 +38,7 @@ $script:PendingOperationStarted = $false
 $script:PendingOperationFinished = $false
 $script:PendingOperationStage = $null
 $script:PendingCapacityGateReason = $null
+$script:ConsoleReadyFailure = $null
 
 function Get-WorkerMutexName {
     $sha = [Security.Cryptography.SHA256]::Create()
@@ -144,7 +145,8 @@ function Get-ControlledRawHtmlDir {
 function Get-RawRootFingerprint([string]$RawHtmlDir) {
     $sha = [Security.Cryptography.SHA256]::Create()
     try {
-        $bytes = [Text.Encoding]::UTF8.GetBytes("${TenantId}|${RawHtmlDir}")
+        $normalizedRaw = [IO.Path]::GetFullPath($RawHtmlDir).TrimEnd([char[]]'\/').ToLowerInvariant()
+        $bytes = [Text.Encoding]::UTF8.GetBytes("${TenantId}|${normalizedRaw}")
         return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
     }
     finally { $sha.Dispose() }
@@ -205,21 +207,43 @@ function Start-ManagedHost([string]$RequestPath, [string]$Stdout, [string]$Stder
 }
 
 function Get-ConsoleReady([string]$ConsoleLock) {
+    $script:ConsoleReadyFailure = 'console_lock_unavailable'
     $lock = Read-Lock $ConsoleLock
     if ($null -eq $lock -or $null -eq (Get-VerifiedProcess $lock)) { return $null }
     $rawHtmlDir = Get-ControlledRawHtmlDir
     $rawFingerprint = Get-RawRootFingerprint $rawHtmlDir
     $fingerprint = Get-ConsoleFingerprint
-    if ([string]$lock.runtime_fingerprint -ne $fingerprint) { return $null }
-    if ([string]$lock.tenant_id -ne $TenantId -or [string]$lock.raw_root_fingerprint -ne $rawFingerprint) { return $null }
+    if ([string]$lock.runtime_fingerprint -ne $fingerprint) {
+        $script:ConsoleReadyFailure = 'console_runtime_fingerprint_mismatch'
+        return $null
+    }
+    if ([string]$lock.tenant_id -ne $TenantId) {
+        $script:ConsoleReadyFailure = 'console_tenant_mismatch'
+        return $null
+    }
+    if ([string]$lock.raw_root_fingerprint -ne $rawFingerprint) {
+        $script:ConsoleReadyFailure = 'console_raw_root_fingerprint_mismatch'
+        return $null
+    }
     try {
         $ready = Invoke-RestMethod -Uri "${consoleUrl}/readyz" -TimeoutSec 2
-        if (-not $ready.ok) { return $null }
-        if ([string]$ready.runtime_fingerprint -ne $fingerprint) { return $null }
-        if ([string]$ready.raw_tenant_id -ne $TenantId -or [string]$ready.raw_root_fingerprint -ne $rawFingerprint) { return $null }
+        if (-not $ready.ok) { $script:ConsoleReadyFailure = 'console_ready_not_ok'; return $null }
+        if ([string]$ready.runtime_fingerprint -ne $fingerprint) {
+            $script:ConsoleReadyFailure = 'console_ready_runtime_mismatch'
+            return $null
+        }
+        if ([string]$ready.raw_tenant_id -ne $TenantId) {
+            $script:ConsoleReadyFailure = 'console_ready_tenant_mismatch'
+            return $null
+        }
+        if ([string]$ready.raw_root_fingerprint -ne $rawFingerprint) {
+            $script:ConsoleReadyFailure = 'console_ready_raw_root_mismatch'
+            return $null
+        }
+        $script:ConsoleReadyFailure = $null
         return $ready
     }
-    catch { return $null }
+    catch { $script:ConsoleReadyFailure = 'console_ready_unavailable'; return $null }
 }
 
 function Invoke-ConsoleApi([string]$Path, [int]$TimeoutSec = 5) {
@@ -434,11 +458,13 @@ function Ensure-Console([string]$ConsoleLock) {
             }
             if ($process.HasExited) {
                 $detail = if (Test-Path -LiteralPath $stderr) { Get-Content -LiteralPath $stderr -Raw } else { '' }
+                if ([string]::IsNullOrWhiteSpace([string]$detail)) { $detail = 'console_process_exited' }
                 throw "Console exited during startup. $detail"
             }
             Start-Sleep -Milliseconds 250
         }
-        throw 'Console did not become ready in time.'
+        $readyFailure = if ($script:ConsoleReadyFailure) { $script:ConsoleReadyFailure } else { 'console_start_timeout' }
+        throw "Console did not become ready: $readyFailure"
     }
     catch {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue

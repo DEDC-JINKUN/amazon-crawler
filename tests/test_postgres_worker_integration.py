@@ -3,10 +3,12 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import tempfile
 import threading
+import urllib.request
 import uuid
 
 import pytest
@@ -42,6 +44,36 @@ def load_script(name):
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.mark.skipif(not DSN, reason="AMAZON_TEST_POSTGRES_DSN is not configured")
+def test_console_ready_identity_uses_lexical_raw_root_with_real_read_only_postgres():
+    import psycopg
+
+    console = load_console()
+    tenant_id = f"console-ready-{uuid.uuid4().hex}"
+    with psycopg.connect(DSN) as connection:
+        connection.execute((ROOT / "schema" / "postgres_schema.sql").read_text(encoding="utf-8"))
+        connection.commit()
+    raw_root = ROOT / "data" / "owned_us_asin_20260902_full_01" / "raw_html"
+    repository = console.PostgresConsoleRepository(DSN, tenant_id)
+    server = console.ConsoleServer(
+        ("127.0.0.1", 0), repository,
+        raw_html_dir=raw_root, raw_tenant_id=tenant_id,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{server.server_port}/readyz", timeout=3,
+        ) as response:
+            ready = json.loads(response.read())
+        assert ready["ok"] is True
+        assert ready["raw_tenant_id"] == tenant_id
+        assert ready["raw_root_fingerprint"] == console.raw_root_fingerprint(tenant_id, raw_root)
+        assert ready["task_count"] == 0
+    finally:
+        server.shutdown(); server.server_close(); thread.join(timeout=2)
 
 
 @pytest.mark.skipif(not DSN, reason="AMAZON_TEST_POSTGRES_DSN is not configured")

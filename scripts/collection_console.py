@@ -222,6 +222,17 @@ def raw_root_for_tenant(
     return raw_html_dir if raw_html_dir is not None and raw_tenant_id == selected_tenant_id else None
 
 
+def lexical_raw_root(raw_html_dir: Path) -> str:
+    """Normalize the supplied path without resolving junctions or symlinks."""
+    value = os.path.normcase(os.path.abspath(os.path.normpath(os.fspath(raw_html_dir))))
+    return value.rstrip("\\/") or value
+
+
+def raw_root_fingerprint(tenant_id: str, raw_html_dir: Path) -> str:
+    identity = f"{str(tenant_id)}|{lexical_raw_root(raw_html_dir)}"
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
 def classify_evidence_outcome(row: dict[str, Any]) -> str:
     if row.get("block_reason"):
         return "blocked"
@@ -1361,10 +1372,10 @@ class ConsoleServer(ThreadingHTTPServer):
         self.raw_tenant_id = str(raw_tenant_id or "").strip() or None
         if self.raw_tenant_id and not TENANT_RE.fullmatch(self.raw_tenant_id):
             raise ValueError("invalid raw_tenant_id")
-        raw_identity = (
-            f"{self.raw_tenant_id}|{raw_html_dir.resolve()}" if self.raw_tenant_id and raw_html_dir else ""
+        self.raw_root_fingerprint = (
+            raw_root_fingerprint(self.raw_tenant_id, raw_html_dir)
+            if self.raw_tenant_id and raw_html_dir else None
         )
-        self.raw_root_fingerprint = hashlib.sha256(raw_identity.encode("utf-8")).hexdigest() if raw_identity else None
         self.api_key = api_key
         self.access_log = access_log
 

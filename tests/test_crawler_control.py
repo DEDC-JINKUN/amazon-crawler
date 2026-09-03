@@ -10,6 +10,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "crawler.ps1"
@@ -22,6 +24,55 @@ def load_host():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def load_console():
+    path = ROOT / "scripts" / "collection_console.py"
+    spec = importlib.util.spec_from_file_location("collection_console_fingerprint_test", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction fingerprint contract")
+def test_windows_junction_raw_fingerprint_matches_controller_lexical_path():
+    powershell = shutil.which("powershell") or shutil.which("powershell.exe")
+    assert powershell is not None
+    raw_link = ROOT / "data" / "owned_us_asin_20260902_full_01" / "raw_html"
+    assert raw_link.exists()
+    lexical = Path(os.path.abspath(raw_link))
+    physical = raw_link.resolve()
+    if os.path.normcase(str(lexical)) == os.path.normcase(str(physical)):
+        pytest.skip("workspace raw path is not junction-backed")
+    tenant = "owned_us_asin_20260902_full_01"
+    console = load_console()
+    expected = console.raw_root_fingerprint(tenant, lexical)
+    server = console.ConsoleServer(
+        ("127.0.0.1", 0), object(), raw_html_dir=lexical, raw_tenant_id=tenant,
+    )
+    try:
+        assert server.raw_root_fingerprint == expected
+    finally:
+        server.server_close()
+    script_path = str(SCRIPT).replace("'", "''")
+    raw_value = str(lexical).replace("'", "''")
+    command = rf"""
+$tokens=$null; $errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{script_path}',[ref]$tokens,[ref]$errors)
+$fn=$ast.FindAll({{param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-RawRootFingerprint'}},$true) | Select-Object -First 1
+Invoke-Expression $fn.Extent.Text
+$TenantId='{tenant}'
+Get-RawRootFingerprint '{raw_value}'
+"""
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        cwd=ROOT, capture_output=True, text=True, timeout=20,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert result.stdout.strip().splitlines()[-1] == expected
+    assert expected != console.raw_root_fingerprint(tenant, physical)
 
 
 def test_control_script_exposes_small_safe_command_surface():
@@ -161,6 +212,9 @@ def test_console_reuse_requires_verified_lock_and_matching_runtime_fingerprint()
     assert "raw_root_fingerprint" in ready
     assert "lock.tenant_id" in ready
     assert "ready.raw_tenant_id" in ready
+    assert "console_ready_raw_root_mismatch" in ready
+    assert "Console did not become ready: $readyFailure" in ensure
+    assert "console_process_exited" in ensure
     assert "Get-ControlledRawHtmlDir" in ensure
     assert "Update-LegacyIdentityEvidence $rawHtmlDir" in ensure
     assert "'--tenant-id',$TenantId,'--raw-html-dir',$rawHtmlDir" in ensure
