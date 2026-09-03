@@ -208,7 +208,7 @@ HTTP 请求继续由标准 CookieJar 根据 domain/path/secure/expiry 决定是�
 ```toml
 [worker]
 proxy_url = "http://gw.dataimpulse.com:10000" # 只提供已批准host；不得内嵌凭据
-proxy_session_ports = [10000, 10001, 10002, 10003] # 最多40个已批准槽；100条按3 ASIN/槽需34槽
+proxy_session_ports = [10000, 10001, 10002, 10003] # 代码硬上限64；当前正式配置50槽；per_asin retry1的20条最坏需40槽
 proxy_session_mode = "sticky"
 proxy_session_max_asins = 3                 # 1..5，默认3
 proxy_session_retry_per_asin = 1            # 0..1，默认1
@@ -730,7 +730,7 @@ DPAPI `CurrentUser` 密钥仓必须由将来启动爬虫的同一 Windows 账号
 
 终态 `GET /v1/jobs/{job_id}` 返回job、最新商品快照、最新evidence、证据是否处于请求时间窗、请求/领取/完成时间、总耗时和可用流量。同一次 Agent 批量的最多5条在同一 runner run 内领取，避免逐条重置会话预算。Agent Worker 与普通 Worker 经过同一 adapter factory；配置会话端口时均进入 `ProxySessionPool`。有界会话池达到连续/滑窗阈值后Worker进入blocked，`/readyz`返回503并拒绝新增refresh；未预期异常会把该Worker仍持有的job置为failed、释放lease并写脱敏状态历史。不做无限换会话、验证码处理、登录或个人Cookie。2026-09-02无Amazon网络验收已完成：隔离空tenant服务启动/status/health/stop通过，端口/锁/宿主完成清理；真实本机PostgreSQL临时tenant完成Agent scoped API→refresh入队→Worker lease领取→fixture采集→job completed→商品/evidence/789 bytes→审计回查，并验证强制Worker异常后job failed及lease清理，测试后删除临时tenant数据。
 
-2026-09-02重新基线后关闭三个整合缺口：Agent不再绕过会话池、业务命令不再要求人工预启动、blocked Worker不再阻断只读查询；运行时组合指纹和受控旧进程替换已接入。会话池允许最多40个批准端口，并通过34槽×3 ASIN的100商品离线模拟。权威 `tests/` 全量为347 passed、2 skipped，另通过Python compileall、Node语法、PowerShell AST与diff-check；隔离tenant在8775完成真实本机启动/status/stop且未领取任务、未访问Amazon。
+2026-09-02重新基线后关闭三个整合缺口：Agent不再绕过会话池、业务命令不再要求人工预启动、blocked Worker不再阻断只读查询；运行时组合指纹和受控旧进程替换已接入。当时候选会话池上限为40个批准端口，并通过34槽×3 ASIN的100商品离线模拟；当前硬上限与正式配置见4.5。权威 `tests/` 全量为347 passed、2 skipped，另通过Python compileall、Node语法、PowerShell AST与diff-check；隔离tenant在8775完成真实本机启动/status/stop且未领取任务、未访问Amazon。
 
 ### 11.11 非Amazon多会话canary与容量启动Gate
 
