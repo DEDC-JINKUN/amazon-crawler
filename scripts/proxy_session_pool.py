@@ -124,6 +124,7 @@ class ProxySessionPool:
         self.close()
         self._run_scope = (str(run_id), str(tenant_id), str(worker_id))
         self._slots = []
+        self._asin_slots = {}
         self._current = None
         self._next_port = 0
         self._retries = {}
@@ -359,6 +360,8 @@ class ProxySessionPool:
         self.unrequested_count = max(self.unrequested_count, max(0, int(count)))
 
     def can_claim_new_asin(self) -> bool:
+        if self.product_scope == "per_asin":
+            return bool(self.circuit_open_reason is None and self._next_port < len(self._ports))
         return bool(
             self.circuit_open_reason is None
             and (

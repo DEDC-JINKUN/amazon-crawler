@@ -436,6 +436,45 @@ def test_interleaved_review_returns_to_the_original_asin_sticky_session():
     assert pool.evidence_context()["current_session_id"] == "session-01"
 
 
+def test_begin_run_clears_asin_slot_bindings_and_never_reuses_closed_adapter():
+    module = load_pool()
+    adapters = []
+
+    def factory(slot_config):
+        adapter = FakeAdapter(slot_config, [("ok", 200, 10)])
+        adapters.append(adapter)
+        return adapter
+
+    pool = module.ProxySessionPool(
+        config(proxy_product_session_scope="per_asin", proxy_session_ports=[10000, 10001]),
+        factory, classifier,
+    )
+    pool.begin_run("run-1", "tenant-a", "worker-a")
+    pool.fetch("https://www.amazon.com/dp/B000000001")
+    first = adapters[0]
+
+    pool.begin_run("run-2", "tenant-a", "worker-a")
+    pool.fetch("https://www.amazon.com/dp/B000000001")
+
+    assert len(adapters) == 2
+    assert first.closed is True
+    assert adapters[1].run_scope == ("run-2", "tenant-a", "worker-a")
+    assert pool.evidence_context()["current_session_id"] == "session-01"
+
+
+def test_per_asin_pool_reports_no_preclaim_capacity_after_last_port_is_used():
+    module = load_pool()
+    pool = module.ProxySessionPool(
+        config(proxy_product_session_scope="per_asin", proxy_session_ports=[10000], proxy_session_max_asins=3),
+        lambda slot_config: FakeAdapter(slot_config, [("ok", 200, 10)]),
+        classifier,
+    )
+    pool.begin_run("run-1", "tenant-a", "worker-a")
+    pool.fetch("https://www.amazon.com/dp/B000000001")
+
+    assert pool.can_claim_new_asin() is False
+
+
 def test_firefox_exception_after_http_challenge_opens_circuit_before_next_claim():
     worker = load_worker()
     pool_module = load_pool()
