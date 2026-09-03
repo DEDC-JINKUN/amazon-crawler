@@ -1,4 +1,5 @@
 import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import os
 import shutil
@@ -120,9 +121,11 @@ def test_control_script_has_locks_logs_receipts_and_safe_stop():
         "quality_failed",
         "recorded_actions",
         "completed_actions",
+        "variant_redirect_actions",
         "failed_actions",
         "blocked_actions",
         "inferred_actions",
+        "unrequested_actions",
         "run_verification_reason",
         "Final: {0}/{1}",
         "unmanaged listener remains",
@@ -132,7 +135,7 @@ def test_control_script_has_locks_logs_receipts_and_safe_stop():
         "owner_pid",
         "owner_start_time",
         "amazon-us-control-receipt-v3",
-        "proxy_session_pool = if ($null -ne $finalRun)",
+        "proxy_session_pool = if ($null -ne $finalSnapshot.run)",
     ):
         assert expected in text
     assert "PGPASSWORD" in text
@@ -141,7 +144,7 @@ def test_control_script_has_locks_logs_receipts_and_safe_stop():
     normal_finish = text[text.index("$receipt = [ordered]@{"):text.index('Write-Host "Worker finished:')]
     assert normal_finish.index("Finish-RunLedger") < normal_finish.index("Write-JsonAtomic $receipt")
     progress_loop = text[text.index("while (-not $process.HasExited)"):text.index("$workerExitCode =")]
-    assert "?tenant=${tenantQuery}" in progress_loop
+    assert "Get-RunProjection $runId" in progress_loop
 
 
 def test_console_reuse_requires_verified_lock_and_matching_runtime_fingerprint():
@@ -159,6 +162,113 @@ def test_console_reuse_requires_verified_lock_and_matching_runtime_fingerprint()
     assert "ready.tenant_id" not in ready
     assert "arguments = @($consoleScript,'--host','127.0.0.1'" in ensure
     assert "data\\console_control" in text
+
+
+def test_controller_status_progress_and_final_projection_authenticate_to_loopback_console():
+    powershell = shutil.which("powershell") or shutil.which("powershell.exe")
+    assert powershell is not None
+    run = {
+        "run_id": "run-control-observability", "requested_actions": 20, "recorded_actions": 10,
+        "inferred_actions": 0, "terminal_status": "blocked",
+        "product_succeeded": 6, "variant_redirect": 3, "failed": 0, "blocked": 1,
+        "items": ([{"outcome": "completed", "attribution": "evidence"}] * 6
+                  + [{"outcome": "variant_redirect", "attribution": "evidence"}] * 3
+                  + [{"outcome": "blocked", "attribution": "evidence"}]),
+        "proxy_session_pool": {"unrequested_count": 10}, "traffic": {"known_bytes": 4049923},
+    }
+    authorized_paths = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            if self.headers.get("X-Collection-API-Key") != "fixture-console-key":
+                self.send_response(401); self.end_headers(); return
+            authorized_paths.append(self.path)
+            payload = (
+                {"tenant_id": "tenant-a", "progress": {"touched": 10, "total": 20, "percent": 50, "successful_products": 6}, "status_counts": {"blocked": 1}}
+                if self.path.startswith("/api/overview") else
+                {"items": [run]} if self.path.startswith("/api/runs?") else run
+            )
+            body = json.dumps(payload).encode()
+            self.send_response(200); self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+    try:
+        script_path = str(SCRIPT).replace("'", "''")
+        command = rf"""
+$tokens=$null; $errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{script_path}',[ref]$tokens,[ref]$errors)
+foreach($name in @('Invoke-ConsoleApi','Get-RunProjection','Show-Status','Get-FinalRunSnapshot')) {{
+  $fn=$ast.FindAll({{param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name}},$true) | Select-Object -First 1
+  if($null -ne $fn) {{ Invoke-Expression $fn.Extent.Text }}
+}}
+$consoleUrl='http://127.0.0.1:{server.server_port}'; $TenantId='tenant-a'
+$env:AMAZON_COLLECTION_API_KEY='fixture-console-key'
+function Read-Lock {{ return [pscustomobject]@{{pid=1;start_time='x'}} }}
+function Get-VerifiedProcess {{ return [pscustomobject]@{{Id=1}} }}
+function Get-ConsoleReady {{ return [pscustomobject]@{{ok=$true}} }}
+$statusError=$null; try {{ $status=Show-Status 'worker.lock' 'console.lock' }} catch {{ $statusError=$_.Exception.Message; $status=$null }}
+$progress=$null; if(Get-Command Get-RunProjection -ErrorAction SilentlyContinue) {{ try {{ $progress=Get-RunProjection 'run-control-observability' 2 }} catch {{}} }}
+$final=Get-FinalRunSnapshot 'run-control-observability' 20 1
+[ordered]@{{status=$status;status_error=$statusError;progress_recorded=$progress.recorded_actions;final_recorded=$final.run.recorded_actions;final_reason=$final.verification_reason}} | ConvertTo-Json -Compress
+"""
+        result = subprocess.run(
+            [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            cwd=ROOT, capture_output=True, timeout=20,
+        )
+        stdout = result.stdout.decode("utf-8", errors="replace")
+        stderr = result.stderr.decode("utf-8", errors="replace")
+        assert result.returncode == 0, stderr or stdout
+        payload = json.loads(stdout.strip().splitlines()[-1])
+        assert payload == {
+            "status": 0, "status_error": None, "progress_recorded": 10,
+            "final_recorded": 10, "final_reason": "recorded_actions_incomplete:10/20",
+        }
+        assert len(authorized_paths) == 4
+    finally:
+        server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+
+def test_controller_projection_preserves_real_partial_blocked_counts_and_unknown_is_not_zero():
+    powershell = shutil.which("powershell") or shutil.which("powershell.exe")
+    assert powershell is not None
+    script_path = str(SCRIPT).replace("'", "''")
+    command = rf"""
+$tokens=$null; $errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{script_path}',[ref]$tokens,[ref]$errors)
+foreach($name in @('Test-ProbeRunQuality','Test-RunCompleteness')) {{
+  $fn=$ast.FindAll({{param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name}},$true) | Select-Object -First 1
+  Invoke-Expression $fn.Extent.Text
+}}
+$items=@()
+1..6 | ForEach-Object {{ $items += [pscustomobject]@{{outcome='completed';attribution='evidence'}} }}
+1..3 | ForEach-Object {{ $items += [pscustomobject]@{{outcome='variant_redirect';attribution='evidence'}} }}
+$items += [pscustomobject]@{{outcome='blocked';attribution='evidence'}}
+$run=[pscustomobject]@{{requested_actions=20;recorded_actions=10;inferred_actions=0;items=$items;traffic=@{{known_bytes=4049923}};proxy_session_pool=[pscustomobject]@{{unrequested_count=10}}}}
+[ordered]@{{quality=(Test-ProbeRunQuality $run 20);complete=(Test-RunCompleteness $run 20);unknown=(Test-ProbeRunQuality $null 20)}} | ConvertTo-Json -Depth 8 -Compress
+"""
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        cwd=ROOT, capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["quality"]["recorded_actions"] == 10
+    assert payload["quality"]["completed_actions"] == 6
+    assert payload["quality"]["variant_redirect_actions"] == 3
+    assert payload["quality"]["failed_actions"] == 0
+    assert payload["quality"]["blocked_actions"] == 1
+    assert payload["quality"]["unrequested_actions"] == 10
+    assert payload["complete"]["completion_gate_ok"] is False
+    assert "recorded_actions:10/20" in payload["complete"]["completion_gate_reason"]
+    for field in ("recorded_actions", "completed_actions", "variant_redirect_actions", "failed_actions", "blocked_actions", "inferred_actions", "unrequested_actions"):
+        assert payload["unknown"][field] is None
+    assert payload["unknown"]["quality_gate_ok"] is False
+    assert payload["unknown"]["quality_gate_reason"] == "run_projection_unavailable"
 
 
 def test_probe_quality_function_requires_complete_successful_evidence():

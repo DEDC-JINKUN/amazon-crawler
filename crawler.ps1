@@ -195,6 +195,36 @@ function Get-ConsoleReady([string]$ConsoleLock) {
     catch { return $null }
 }
 
+function Invoke-ConsoleApi([string]$Path, [int]$TimeoutSec = 5) {
+    if (-not $Path.StartsWith('/api/', [StringComparison]::Ordinal)) {
+        throw 'Console API path must stay under /api/.'
+    }
+    $base = [Uri]$consoleUrl
+    $target = [Uri]::new($base, $Path)
+    if ($base.Scheme -ne 'http' -or -not $base.IsLoopback -or
+        $target.Scheme -ne $base.Scheme -or $target.Authority -ne $base.Authority -or
+        -not $target.AbsolutePath.StartsWith('/api/', [StringComparison]::Ordinal)) {
+        throw 'Console API is restricted to the configured loopback endpoint.'
+    }
+    $headers = @{}
+    $key = [string]$env:AMAZON_COLLECTION_API_KEY
+    if (-not [string]::IsNullOrWhiteSpace($key)) {
+        $headers['X-Collection-API-Key'] = $key
+    }
+    try {
+        return Invoke-RestMethod -Uri $target.AbsoluteUri -Headers $headers -TimeoutSec $TimeoutSec
+    }
+    finally {
+        $headers.Clear()
+        $key = $null
+    }
+}
+
+function Get-RunProjection([string]$RunId, [int]$TimeoutSec = 2) {
+    $tenantQuery = [Uri]::EscapeDataString($TenantId)
+    return Invoke-ConsoleApi "/api/runs/${RunId}?tenant=${tenantQuery}" $TimeoutSec
+}
+
 function Invoke-RunLedger([string[]]$Arguments) {
     & $python $runLedgerScript @Arguments
     if ($LASTEXITCODE -ne 0) { throw "PostgreSQL run ledger failed with exit code $LASTEXITCODE" }
@@ -394,12 +424,12 @@ function Show-Status([string]$WorkerLock, [string]$ConsoleLock) {
     Write-Host ("Console: " + ($(if ($null -ne $ready) { "ready $consoleUrl" } elseif ($null -ne $consoleProcess) { 'process alive but not ready' } else { 'stopped' })))
     if ($null -eq $ready) { return 1 }
     $tenantQuery = [Uri]::EscapeDataString($TenantId)
-    $overview = Invoke-RestMethod -Uri "${consoleUrl}/api/overview?tenant=${tenantQuery}" -TimeoutSec 5
+    $overview = Invoke-ConsoleApi "/api/overview?tenant=${tenantQuery}" 5
     Write-Host "Tenant: $($overview.tenant_id)"
     Write-Host "Progress: $($overview.progress.touched)/$($overview.progress.total) ($($overview.progress.percent)%)"
     Write-Host "Products: $($overview.progress.successful_products)"
     Write-Host ('Status: ' + (($overview.status_counts.psobject.Properties | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ', '))
-    $runs = Invoke-RestMethod -Uri "${consoleUrl}/api/runs?limit=3&tenant=${tenantQuery}" -TimeoutSec 5
+    $runs = Invoke-ConsoleApi "/api/runs?limit=3&tenant=${tenantQuery}" 5
     if ($runs.items.Count -gt 0) {
         Write-Host 'Recent runs:'
         foreach ($run in $runs.items) {
@@ -431,8 +461,7 @@ function Get-FinalRunSnapshot([string]$RunId, [int]$ExpectedActions, [int]$MaxAt
     $latest = $null
     for ($index = 0; $index -lt $MaxAttempts; $index++) {
         try {
-            $tenantQuery = [Uri]::EscapeDataString($TenantId)
-            $latest = Invoke-RestMethod -Uri "${consoleUrl}/api/runs/${RunId}?tenant=${tenantQuery}" -TimeoutSec 2
+            $latest = Get-RunProjection $RunId 2
             if ([int]$latest.recorded_actions -ge $ExpectedActions) {
                 return [pscustomobject][ordered]@{ run = $latest; verification_reason = $null }
             }
@@ -450,12 +479,30 @@ function Get-FinalRunSnapshot([string]$RunId, [int]$ExpectedActions, [int]$MaxAt
 }
 
 function Test-ProbeRunQuality([object]$Run, [int]$ExpectedActions) {
+    if ($null -eq $Run) {
+        return [pscustomobject][ordered]@{
+            quality_gate_ok = $false
+            quality_gate_reason = 'run_projection_unavailable'
+            recorded_actions = $null
+            completed_actions = $null
+            variant_redirect_actions = $null
+            failed_actions = $null
+            blocked_actions = $null
+            inferred_actions = $null
+            unrequested_actions = $null
+            traffic = $null
+        }
+    }
     $items = if ($null -eq $Run) { @() } else { @($Run.items) }
-    $recorded = if ($null -eq $Run -or $null -eq $Run.recorded_actions) { 0 } else { [int]$Run.recorded_actions }
-    $inferred = if ($null -eq $Run -or $null -eq $Run.inferred_actions) { 0 } else { [int]$Run.inferred_actions }
+    $recorded = if ($null -eq $Run.recorded_actions) { $null } else { [int]$Run.recorded_actions }
+    $inferred = if ($null -eq $Run.inferred_actions) { $null } else { [int]$Run.inferred_actions }
     $completed = @($items | Where-Object { $_.outcome -eq 'completed' }).Count
+    $variant = @($items | Where-Object { $_.outcome -eq 'variant_redirect' }).Count
     $failed = @($items | Where-Object { $_.outcome -eq 'failed' }).Count
     $blocked = @($items | Where-Object { $_.outcome -eq 'blocked' }).Count
+    $unrequested = if ($null -eq $Run.proxy_session_pool -or $null -eq $Run.proxy_session_pool.unrequested_count) {
+        $null
+    } else { [int]$Run.proxy_session_pool.unrequested_count }
     $nonEvidence = @($items | Where-Object { $_.attribution -ne 'evidence' }).Count
     $reasons = [Collections.Generic.List[string]]::new()
     if ($recorded -ne $ExpectedActions) { $reasons.Add("recorded_actions:$recorded/$ExpectedActions") }
@@ -470,14 +517,22 @@ function Test-ProbeRunQuality([object]$Run, [int]$ExpectedActions) {
         quality_gate_reason = ($reasons -join ';')
         recorded_actions = $recorded
         completed_actions = $completed
+        variant_redirect_actions = $variant
         failed_actions = $failed
         blocked_actions = $blocked
         inferred_actions = $inferred
+        unrequested_actions = $unrequested
         traffic = if ($null -eq $Run) { $null } else { $Run.traffic }
     }
 }
 
 function Test-RunCompleteness([object]$Run, [int]$ExpectedActions) {
+    if ($null -eq $Run) {
+        return [pscustomobject][ordered]@{
+            completion_gate_ok = $false
+            completion_gate_reason = 'run_projection_unavailable'
+        }
+    }
     $items = if ($null -eq $Run) { @() } else { @($Run.items) }
     $recorded = if ($null -eq $Run -or $null -eq $Run.recorded_actions) { 0 } else { [int]$Run.recorded_actions }
     $inferred = if ($null -eq $Run -or $null -eq $Run.inferred_actions) { 0 } else { [int]$Run.inferred_actions }
@@ -729,14 +784,13 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
         while (-not $process.HasExited) {
             [IO.File]::WriteAllText($heartbeatPath, [DateTime]::UtcNow.ToString('o'))
             try {
-                $tenantQuery = [Uri]::EscapeDataString($TenantId)
-                $run = Invoke-RestMethod -Uri "${consoleUrl}/api/runs/${runId}?tenant=${tenantQuery}" -TimeoutSec 2
+                $run = Get-RunProjection $runId 2
                 $completed = $run.items.Count
                 $failed = @($run.items | Where-Object { $_.outcome -eq 'failed' }).Count
                 $blocked = @($run.items | Where-Object { $_.outcome -eq 'blocked' }).Count
                 Write-Host ("Progress: {0}/{1} failed={2} blocked={3}" -f $completed,$ActionLimit,$failed,$blocked)
             }
-            catch { Write-Host "Progress: waiting for first action evidence (target=$ActionLimit)" }
+            catch { Write-Host "Progress: unavailable (counts=unknown target=$ActionLimit)" }
             Start-Sleep -Seconds 5
             $process.Refresh()
         }
@@ -769,7 +823,7 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             $controllerExitCode = 4
         }
         $finishedAt = [DateTime]::UtcNow
-        Write-Host ("Final: {0}/{1} completed={2} failed={3} blocked={4} inferred={5} quality_gate_ok={6}" -f $quality.recorded_actions,$ActionLimit,$quality.completed_actions,$quality.failed_actions,$quality.blocked_actions,$quality.inferred_actions,$qualityGateOk)
+        Write-Host ("Final: {0}/{1} completed={2} variant={3} failed={4} blocked={5} unrequested={6} inferred={7} quality_gate_ok={8}" -f $quality.recorded_actions,$ActionLimit,$quality.completed_actions,$quality.variant_redirect_actions,$quality.failed_actions,$quality.blocked_actions,$quality.unrequested_actions,$quality.inferred_actions,$qualityGateOk)
         if ($runVerificationReason) { Write-Host "Final verification: $runVerificationReason" }
         $receipt = [ordered]@{
             schema_version = 'amazon-us-control-receipt-v3'
@@ -783,11 +837,13 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             worker_exit_code = $workerExitCode
             recorded_actions = $quality.recorded_actions
             completed_actions = $quality.completed_actions
+            variant_redirect_actions = $quality.variant_redirect_actions
             failed_actions = $quality.failed_actions
             blocked_actions = $quality.blocked_actions
             inferred_actions = $quality.inferred_actions
+            unrequested_actions = $quality.unrequested_actions
             traffic = $quality.traffic
-            proxy_session_pool = if ($null -ne $finalRun) { $finalRun.proxy_session_pool } else { $null }
+            proxy_session_pool = if ($null -ne $finalSnapshot.run) { $finalSnapshot.run.proxy_session_pool } else { $null }
             capacity_authorization = $capacityAuthorization
             quality_gate_ok = $qualityGateOk
             completion_gate_ok = $completionGateOk
@@ -845,11 +901,13 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             status = $failureStatus
             exit_code = $failureExitCode
             worker_exit_code = if ($null -ne $process -and $process.HasExited) { $process.ExitCode } else { $null }
-            recorded_actions = 0
-            completed_actions = 0
-            failed_actions = 0
-            blocked_actions = 0
-            inferred_actions = 0
+            recorded_actions = $null
+            completed_actions = $null
+            variant_redirect_actions = $null
+            failed_actions = $null
+            blocked_actions = $null
+            inferred_actions = $null
+            unrequested_actions = $null
             traffic = $null
             proxy_session_pool = $null
             capacity_authorization = $capacityAuthorization

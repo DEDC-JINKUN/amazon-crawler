@@ -34,6 +34,7 @@ h3 { margin-bottom: 8px; color: var(--muted); font-size: 12px; font-weight: 600;
 .live-badge i { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 5px rgba(77,212,168,.12); }
 .live-badge.offline { color: #ffb2b8; border-color: #64333a; background: #351c22; }
 .live-badge.offline i { background: var(--red); }
+.live-badge.locked { color: #ffd58a; border-color: #705526; background: #382b16; }
 main { padding: 24px 32px 42px; }
 .batch-panel { margin-bottom: 14px; }
 .batch-panel tbody tr { cursor: pointer; }

@@ -1,5 +1,5 @@
 const initialTenant = new URL(window.location.href).searchParams.get('tenant') || '';
-const state = { overview: null, batches: [], operations: [], items: [], tenant: initialTenant, selectedRun: '', timer: null, loading: false };
+const state = { overview: null, batches: [], operations: [], items: [], tenant: initialTenant, selectedRun: '', timer: null, loading: false, apiKey: '', authCancelled: false };
 const $ = (id) => document.getElementById(id);
 const number = (value) => new Intl.NumberFormat('zh-CN').format(Number(value || 0));
 const dateTime = (value) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
@@ -20,20 +20,34 @@ const text = (tag, value, className = '') => {
 };
 const clear = (node) => { while (node.firstChild) node.removeChild(node.firstChild); };
 
-function apiKey() { return sessionStorage.getItem('amazonConsoleApiKey') || ''; }
+function apiKey() { return state.apiKey; }
+function consoleRequestError(code, message) { const error = new Error(message); error.code = code; return error; }
+function promptForApiKey(force = false) {
+  if (state.authCancelled && !force) return false;
+  const supplied = window.prompt('该控制台需要本地API Key。Key只保存在当前标签页内存。');
+  if (!supplied) {
+    state.apiKey = '';
+    state.authCancelled = true;
+    return false;
+  }
+  state.apiKey = supplied;
+  state.authCancelled = false;
+  return true;
+}
 async function request(path) {
-  const headers = apiKey() ? { 'X-Collection-API-Key': apiKey() } : {};
+  const sentKey = apiKey();
+  const headers = sentKey ? { 'X-Collection-API-Key': sentKey } : {};
   const target = new URL(path, window.location.origin);
   if (state.tenant && target.pathname !== '/api/tenants') target.searchParams.set('tenant', state.tenant);
-  const response = await fetch(target, { headers, cache: 'no-store' });
+  let response;
+  try { response = await fetch(target, { headers, cache: 'no-store' }); }
+  catch (_error) { throw consoleRequestError('offline', '网络离线，无法连接本机Console'); }
   if (response.status === 401) {
-    const supplied = window.prompt('该控制台需要本地API Key。Key只保存在当前标签页。');
-    if (supplied) {
-      sessionStorage.setItem('amazonConsoleApiKey', supplied);
-      return request(path);
-    }
+    if (apiKey() && apiKey() !== sentKey) return request(path);
+    if (promptForApiKey()) return request(path);
+    throw consoleRequestError('locked', '需要本地API Key；Console已锁定');
   }
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  if (!response.ok) throw consoleRequestError('api', `Console API返回HTTP ${response.status}`);
   return response.json();
 }
 
@@ -288,9 +302,19 @@ async function refresh() {
     await loadBatches();
     if (!state.tenant) throw new Error('PostgreSQL中没有可见tenant');
     const [overview] = await Promise.all([request('/api/overview'), loadItems(), loadRuns(), loadOperations()]);
-    renderOverview(overview); $('errorBanner').hidden = true; $('liveBadge').classList.remove('offline');
+    renderOverview(overview); $('errorBanner').hidden = true;
+    $('liveBadge').classList.remove('offline', 'locked'); $('liveBadge').textContent = '● 实时';
   } catch (error) {
-    $('errorBanner').textContent = `控制台刷新失败：${error.message}。上一轮数据已保留。`; $('errorBanner').hidden = false; $('liveBadge').classList.add('offline');
+    const locked = error.code === 'locked';
+    const offline = error.code === 'offline';
+    $('errorBanner').textContent = locked
+      ? '需要本地API Key；Console已锁定。自动刷新不会再次弹窗，请点击“API Key”重试。'
+      : offline ? `网络离线：${error.message}。上一轮数据已保留。`
+        : `Console API读取失败：${error.message}。上一轮数据已保留。`;
+    $('errorBanner').hidden = false;
+    $('liveBadge').classList.remove('offline', 'locked');
+    $('liveBadge').classList.add(locked ? 'locked' : 'offline');
+    $('liveBadge').textContent = locked ? '🔒 locked' : '● 离线';
   } finally { state.loading = false; }
 }
 
@@ -298,6 +322,13 @@ $('refreshButton').addEventListener('click', refresh);
 $('tenantSelector').addEventListener('change', (event) => selectTenant(event.target.value));
 $('runSelector').addEventListener('change', (event) => selectRun(event.target.value));
 $('filterForm').addEventListener('submit', (event) => { event.preventDefault(); loadItems().catch((error) => { $('errorBanner').textContent = error.message; $('errorBanner').hidden = false; }); });
-$('apiKeyButton').addEventListener('click', () => { const value = window.prompt('输入新的本地API Key；留空将清除当前Key。', apiKey()); if (value === null) return; if (value) sessionStorage.setItem('amazonConsoleApiKey', value); else sessionStorage.removeItem('amazonConsoleApiKey'); refresh(); });
+$('apiKeyButton').addEventListener('click', () => {
+  if (promptForApiKey(true)) refresh();
+  else {
+    $('errorBanner').textContent = '需要本地API Key；Console已锁定。自动刷新不会再次弹窗，请点击“API Key”重试。';
+    $('errorBanner').hidden = false;
+    $('liveBadge').classList.remove('offline'); $('liveBadge').classList.add('locked'); $('liveBadge').textContent = '🔒 locked';
+  }
+});
 $('closeDrawer').addEventListener('click', closeDetail); $('drawerBackdrop').addEventListener('click', closeDetail);
 refresh(); state.timer = window.setInterval(refresh, 5000);
