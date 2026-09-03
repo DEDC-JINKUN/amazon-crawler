@@ -1705,6 +1705,64 @@ def test_incomplete_or_foreign_parent_child_evidence_remains_asin_mismatch(data)
     assert worker._valid_asin_identity(data, "B07VK5XSRP") is False
 
 
+def test_sqlite_strict_sibling_variant_completes_without_snapshot_and_explicit_refresh_can_recheck():
+    worker = load_worker()
+    html = """
+    <html><head><link rel='canonical' href='https://www.amazon.com/dp/B0B9ZFZZZZ'></head><body>
+      <input id='ASIN' value='B0B9ZFZZZZ'><span id='productTitle'>Sibling</span>
+      <script>var x={parentAsin:'B0PARENT01',landingAsin:'B0B9ZFZZZZ',
+      dimensionValuesDisplayData:{'B0B9ZFDZNJ':['A'],'B0B9ZFZZZZ':['B']}};</script>
+    </body></html>
+    """
+
+    class Adapter:
+        source_type = "http_html"
+        last_transfer_bytes = 100
+        last_retry_after_seconds = None
+        def fetch(self, _url): return html, 200
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        manifest = root / "manifest.csv"
+        manifest.write_text(
+            "\ufeffasin,url,marketplace,source_site_label,source_workbook\n"
+            "B0B9ZFDZNJ,https://www.amazon.com/dp/B0B9ZFDZNJ,US,test,fixture.xlsx\n",
+            encoding="utf-8",
+        )
+        conn = worker.init_db(root / "state.sqlite3")
+        config = {
+            **worker.DEFAULTS, "max_actions_per_run": 1,
+            "output_dir": root / "out", "raw_html_dir": None, "context": {},
+        }
+        worker.initialize_manifest(conn, manifest, config)
+
+        assert worker.run_actions(conn, Adapter(), config, limit=1, run_id="run-variant-1") == 1
+        assert worker.run_actions(conn, Adapter(), config, limit=1, run_id="run-variant-normal-reclaim") == 0
+        state = conn.execute("SELECT status,last_error FROM item_state WHERE asin='B0B9ZFDZNJ'").fetchone()
+        product = conn.execute("SELECT asin FROM product_snapshot WHERE asin='B0B9ZFDZNJ'").fetchone()
+        evidence = conn.execute(
+            "SELECT error_code,context_json FROM collection_evidence WHERE asin='B0B9ZFDZNJ' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.execute(
+            "INSERT INTO refresh_request(job_id,marketplace,asin,requested_by,reason,status,requested_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            ("refresh-variant", "US", "B0B9ZFDZNJ", "test", "recheck", "queued", worker.utc_now()),
+        )
+        conn.commit()
+        assert worker.run_actions(conn, Adapter(), config, limit=1, run_id="run-variant-2") == 1
+        refresh_status = conn.execute(
+            "SELECT status FROM refresh_request WHERE job_id='refresh-variant'"
+        ).fetchone()[0]
+        conn.close()
+
+    assert tuple(state) == ("succeeded", None)
+    assert product is None
+    assert evidence["error_code"] == "asin_mismatch"
+    identity = json.loads(evidence["context_json"])["identity"]
+    assert identity["canonical_valid_amazon"] is True
+    assert refresh_status == "completed"
+
+
 def _invalid_canonical_product_html(canonical_url):
     return f"""
     <html><head><link rel="canonical" href="{canonical_url}"></head><body>

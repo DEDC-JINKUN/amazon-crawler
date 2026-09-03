@@ -560,7 +560,22 @@ def test_console_projects_proxy_connectivity_separately_from_amazon_business_out
         "requested_actions": 20, "recorded_actions": 10, "completed_actions": 6,
         "variant_redirect_actions": 3, "failed_actions": 0, "blocked_actions": 1,
         "unrequested_actions": 10, "access_control_rate": 0.1,
+        "quality_gate_ok": False, "quality_gate_reason": "incomplete_or_failed_business_outcomes",
     }
+
+
+def test_variant_resolutions_satisfy_business_quality_without_inflating_product_success():
+    module = load_module()
+    items = ([{"outcome": "completed"}] * 4) + ([{"outcome": "variant_redirect"}] * 3)
+
+    business = module.project_amazon_business(
+        items, requested_actions=7, recorded_actions=7, unrequested_actions=0,
+    )
+
+    assert business["quality_gate_ok"] is True
+    assert business["quality_gate_reason"] == "completed_or_variant"
+    assert business["completed_actions"] == 4
+    assert business["variant_redirect_actions"] == 3
 
 
 def test_variant_redirect_requires_explicit_same_parent_sibling_evidence():

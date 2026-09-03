@@ -1213,7 +1213,7 @@ class PostgresWorkerStorage:
         *,
         task: Mapping[str, Any],
         reason: str,
-        error: str,
+        error: str | None,
         evidence: Mapping[str, Any] | None = None,
         next_status: str = "failed",
         state_fields: Mapping[str, Any] | None = None,

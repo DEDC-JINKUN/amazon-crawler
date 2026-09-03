@@ -509,7 +509,8 @@ function Test-ProbeRunQuality([object]$Run, [int]$ExpectedActions) {
     if ($inferred -ne 0) { $reasons.Add("inferred_actions:$inferred") }
     if ($failed -ne 0) { $reasons.Add("failed_actions:$failed") }
     if ($blocked -ne 0) { $reasons.Add("blocked_actions:$blocked") }
-    if ($completed -ne $ExpectedActions) { $reasons.Add("completed_actions:$completed/$ExpectedActions") }
+    if (($completed + $variant) -ne $recorded) { $reasons.Add("resolved_actions:$($completed + $variant)/$recorded") }
+    if ($null -ne $unrequested -and $unrequested -ne 0) { $reasons.Add("unrequested_actions:$unrequested") }
     if ($nonEvidence -ne 0) { $reasons.Add("non_evidence_items:$nonEvidence") }
     if ($items.Count -ne $recorded) { $reasons.Add("item_count:$($items.Count)/$recorded") }
     return [pscustomobject][ordered]@{

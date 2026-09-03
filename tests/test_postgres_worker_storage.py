@@ -643,6 +643,36 @@ def test_save_terminal_failure_exhausts_attempts_and_releases_lease():
     assert "lease_token=NULL" in statements
 
 
+def test_save_variant_resolution_completes_state_without_snapshot_or_attempt_exhaustion():
+    storage = load_storage()
+    connection = ScriptedConnection([[{"status": "running"}]])
+    repository = storage.PostgresWorkerStorage(
+        "postgresql://example", tenant_id="tenant-a", subject_type="own", connect=lambda: connection
+    )
+
+    assert repository.save_failure(
+        task={"asin": "B0B9ZFDZNJ", "lease_token": "token-1", "lease_owner": "worker-1"},
+        reason="variant_redirect", error=None,
+        evidence={"run_id": "run-1", "url": "https://www.amazon.com/dp/B0B9ZFDZNJ",
+                  "http_status": 200, "error_code": "asin_mismatch", "context_json": {"identity": {}}},
+        next_status="succeeded", state_fields={"task_stage": "complete", "resume_status": None},
+        increment_attempts=False,
+    ) is True
+
+    statements = "\n".join(sql for sql, _ in connection.cursor_instance.executed).replace(" ", "")
+    assert "INSERTINTOamazon_us.collection_evidence" in statements
+    assert "INSERTINTOamazon_us.product_snapshot" not in statements
+    assert "attempts=attempts+1" not in statements
+    assert "attempts=max_attempts" not in statements
+    update_params = next(
+        params for sql, params in connection.cursor_instance.executed
+        if "UPDATE amazon_us.item_state SET" in sql
+    )
+    assert update_params[0:2] == ("succeeded", None)
+    history_params = connection.cursor_instance.executed[-1][1]
+    assert history_params[-1] == "variant_redirect"
+
+
 def test_save_review_result_persists_page_records_summary_and_checkpoint():
     storage = load_storage()
     connection = ScriptedConnection([[{"status": "running"}]])

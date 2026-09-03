@@ -110,6 +110,16 @@ def project_amazon_business(
         round(counts["blocked"] / recorded_actions, 4)
         if recorded_actions not in {None, 0} else None
     )
+    quality_gate_ok = bool(
+        requested_actions is not None
+        and recorded_actions is not None
+        and unrequested_actions is not None
+        and requested_actions == recorded_actions
+        and counts["completed"] + counts["variant_redirect"] == recorded_actions
+        and counts["failed"] == 0
+        and counts["blocked"] == 0
+        and unrequested_actions == 0
+    )
     return {
         "requested_actions": requested_actions,
         "recorded_actions": recorded_actions,
@@ -119,6 +129,8 @@ def project_amazon_business(
         "blocked_actions": counts["blocked"],
         "unrequested_actions": unrequested_actions,
         "access_control_rate": access_control_rate,
+        "quality_gate_ok": quality_gate_ok,
+        "quality_gate_reason": "completed_or_variant" if quality_gate_ok else "incomplete_or_failed_business_outcomes",
     }
 
 
@@ -139,6 +151,7 @@ def _explicit_sibling_identity(row: dict[str, Any]) -> bool:
         and canonical == observed
         and requested in children
         and observed in children
+        and identity.get("canonical_valid_amazon") is not False
     )
 
 

@@ -526,6 +526,79 @@ def test_agent_api_refresh_is_consumed_and_returned_from_real_postgres():
 
 
 @pytest.mark.skipif(not DSN, reason="AMAZON_TEST_POSTGRES_DSN is not configured")
+def test_variant_resolution_is_terminal_for_normal_claim_but_explicit_refresh_can_recheck():
+    import psycopg
+
+    storage_module = load_storage()
+    collection_module = load_script("collection_storage")
+    tenant_id = f"variant-resolution-{uuid.uuid4().hex}"
+    connect = lambda: psycopg.connect(DSN)
+    with connect() as connection:
+        connection.execute((ROOT / "schema" / "postgres_schema.sql").read_text(encoding="utf-8"))
+        connection.commit()
+    storage = storage_module.PostgresWorkerStorage(DSN, tenant_id=tenant_id, subject_type="own")
+    storage.initialize_manifest([{
+        "asin": "B0B9ZFDZNJ", "url": "https://www.amazon.com/dp/B0B9ZFDZNJ",
+        "marketplace": "US", "source_site_label": "variant-test", "source_workbook": "fixture",
+    }])
+    with connect() as connection:
+        connection.execute(
+            "UPDATE amazon_us.item_state SET status='running',lease_token='variant-token',"
+            "lease_owner='variant-worker',lease_expires_at=CURRENT_TIMESTAMP+INTERVAL '5 minutes' "
+            "WHERE tenant_id=%s AND asin='B0B9ZFDZNJ'",
+            (tenant_id,),
+        )
+        connection.commit()
+    evidence = {
+        "run_id": "run-variant", "url": "https://www.amazon.com/dp/B0B9ZFDZNJ",
+        "http_status": 200, "transfer_bytes": 100, "source_type": "http_html",
+        "content_hash": "a" * 64, "raw_html_path": None, "block_reason": None,
+        "parser_version": "amazon-us-v3", "error_code": "asin_mismatch",
+        "context_json": {"identity": {
+            "requested_asin": "B0B9ZFDZNJ", "observed_asin": "B0B9ZFZZZZ",
+            "canonical_asin": "B0B9ZFZZZZ", "canonical_valid_amazon": True,
+            "parent_asin": "B0PARENT01", "child_asins": ["B0B9ZFDZNJ", "B0B9ZFZZZZ"],
+        }},
+    }
+
+    try:
+        assert storage.save_failure(
+            task={"asin": "B0B9ZFDZNJ", "lease_token": "variant-token", "lease_owner": "variant-worker"},
+            reason="variant_redirect", error=None, evidence=evidence,
+            next_status="succeeded", state_fields={"task_stage": "complete", "resume_status": None},
+            increment_attempts=False,
+        )
+        with connect() as connection:
+            state = connection.execute(
+                "SELECT status,attempts,last_error FROM amazon_us.item_state WHERE tenant_id=%s AND asin='B0B9ZFDZNJ'",
+                (tenant_id,),
+            ).fetchone()
+            snapshot_count = connection.execute(
+                "SELECT COUNT(*) FROM amazon_us.product_snapshot WHERE tenant_id=%s AND asin='B0B9ZFDZNJ'",
+                (tenant_id,),
+            ).fetchone()[0]
+        assert state == ("succeeded", 0, None)
+        assert snapshot_count == 0
+        assert storage.claim_task("ordinary-worker") is None
+
+        repository = collection_module.PostgresCollectionRepository(DSN, tenant_id=tenant_id)
+        job = repository.request_refresh("US", "B0B9ZFDZNJ", "refresh-agent", "variant_recheck")
+        claimed = storage.claim_refresh_task("refresh-worker", lease_seconds=120)
+        assert claimed["job_id"] == job["job_id"]
+        assert claimed["asin"] == "B0B9ZFDZNJ"
+    finally:
+        with connect() as connection:
+            for table in (
+                "collection_api_audit", "proxy_capacity_reservation", "operation_run", "collection_run",
+                "state_history", "review_page_state", "refresh_request", "collection_evidence",
+                "media_asset", "content_module", "review_summary", "review_record", "product_snapshot",
+                "item_state", "asin_master",
+            ):
+                connection.execute(f"DELETE FROM amazon_us.{table} WHERE tenant_id=%s", (tenant_id,))
+            connection.commit()
+
+
+@pytest.mark.skipif(not DSN, reason="AMAZON_TEST_POSTGRES_DSN is not configured")
 def test_proxy_capacity_reservations_are_atomic_across_tenants_and_recheck_canary_ttl():
     import psycopg
 

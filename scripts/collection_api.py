@@ -114,8 +114,10 @@ def _terminal_job_result(repository: CollectionRepository, job: dict[str, Any]) 
         if isinstance(context, dict) and isinstance(context.get("traffic"), dict):
             traffic.update(context["traffic"])
         traffic.setdefault("transfer_bytes", latest_evidence.get("transfer_bytes"))
+    product = repository.load_product(marketplace, asin)
     return {
-        "product": repository.load_product(marketplace, asin),
+        "product": product,
+        "quality_status": (product or {}).get("quality_status"),
         "latest_evidence": latest_evidence,
         "evidence_after_request": _at_or_after(
             (latest_evidence or {}).get("retrieved_at"), job.get("requested_at")

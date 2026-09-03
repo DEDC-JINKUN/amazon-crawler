@@ -3,10 +3,52 @@ from __future__ import annotations
 
 import sqlite3
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
+
+
+ASIN_RE = re.compile(r"^[A-Z0-9]{10}$")
+
+
+def _context_dict(evidence: dict[str, Any] | None) -> dict[str, Any]:
+    value = (evidence or {}).get("context_json") or {}
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _is_variant_resolution(evidence: dict[str, Any] | None) -> bool:
+    if (evidence or {}).get("error_code") != "asin_mismatch":
+        return False
+    identity = _context_dict(evidence).get("identity") or {}
+    if not isinstance(identity, dict) or identity.get("canonical_valid_amazon") is False:
+        return False
+    requested = str(identity.get("requested_asin") or "").upper()
+    observed = str(identity.get("observed_asin") or "").upper()
+    canonical = str(identity.get("canonical_asin") or "").upper()
+    parent = str(identity.get("parent_asin") or "").upper()
+    children = {str(item).upper() for item in identity.get("child_asins") or []}
+    return bool(
+        ASIN_RE.fullmatch(requested)
+        and ASIN_RE.fullmatch(observed)
+        and ASIN_RE.fullmatch(parent)
+        and requested != observed
+        and canonical == observed
+        and requested in children
+        and observed in children
+    )
+
+
+def _quality_status(status: str, product: dict[str, Any] | None, evidence: dict[str, Any] | None) -> str:
+    if _is_variant_resolution(evidence):
+        return "variant_redirect"
+    return "valid" if product is not None and status in {"product_done", "succeeded"} else status
 
 
 class CollectionRepository(Protocol):
@@ -99,7 +141,7 @@ class SQLiteCollectionRepository:
                 "asin": asin,
                 "retrieved_at": retrieved_at,
                 "freshness": _freshness(retrieved_at),
-                "quality_status": "valid" if status in {"product_done", "succeeded"} else status,
+                "quality_status": _quality_status(status, _dict_row(product), self._with_legacy_context(evidence)),
                 "source": evidence["source_type"] if evidence is not None else None,
                 "product": _dict_row(product),
                 "task": _dict_row(state),
@@ -316,7 +358,7 @@ class PostgresCollectionRepository:
                     "asin": asin,
                     "retrieved_at": retrieved_at,
                     "freshness": _freshness(retrieved_at),
-                    "quality_status": "valid" if status in {"product_done", "succeeded"} else status,
+                    "quality_status": _quality_status(status, product, evidence),
                     "source": (evidence or {}).get("source_type"),
                     "product": product,
                     "task": state,

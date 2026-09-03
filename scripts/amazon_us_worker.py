@@ -1555,6 +1555,7 @@ def _write_product_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.R
     missing_core = [key for key in ("asin", "canonical_url", "title") if not str(data.get(key) or "").strip()]
     missing_error = "missing_core_fields:" + ",".join(missing_core) if missing_core else None
     explicit_identity_mismatch = _has_explicit_asin_mismatch(data, asin)
+    variant_redirect = explicit_identity_mismatch and _is_sibling_variant_redirect(data, asin)
     evidence_error = error_code or (
         "asin_mismatch" if explicit_identity_mismatch and not block_reason
         else missing_error if not block_reason else None
@@ -1571,7 +1572,14 @@ def _write_product_action(conn: sqlite3.Connection, run_id: str, task: sqlite3.R
             _record_failure(conn, "US", asin, "context_mismatch", error_code)
             return
         if explicit_identity_mismatch:
-            _record_failure(conn, "US", asin, "asin_mismatch", "asin_mismatch", terminal=True)
+            if variant_redirect:
+                _set_status(
+                    conn, "US", asin, "succeeded", reason="variant_redirect",
+                    attempts=0, task_stage="complete", resume_status=None,
+                    block_reason=None, last_error=None,
+                )
+            else:
+                _record_failure(conn, "US", asin, "asin_mismatch", "asin_mismatch", terminal=True)
             return
         if missing_core:
             _record_failure(
@@ -2556,6 +2564,7 @@ def _identity_mismatch_evidence_context(
         "requested_asin": expected_asin.upper(),
         "observed_asin": str(data.get("asin") or "").upper(),
         "canonical_asin": str(_canonical_asin(data.get("canonical_url")) or "").upper(),
+        "canonical_valid_amazon": _valid_amazon_canonical(data.get("canonical_url")),
         "parent_asin": str(data.get("parent_asin") or "").upper(),
         "child_asins": sorted({str(value).upper() for value in data.get("identity_child_asins") or [] if value}),
     }
@@ -2568,7 +2577,14 @@ def _is_sibling_variant_redirect(data: dict[str, Any], expected_asin: str) -> bo
     canonical = str(_canonical_asin(data.get("canonical_url")) or "").upper()
     parent = str(data.get("parent_asin") or "").upper()
     children = {str(value).upper() for value in data.get("identity_child_asins") or []}
-    return bool(parent and expected != observed and canonical == observed and expected in children and observed in children)
+    return bool(
+        parent
+        and expected != observed
+        and canonical == observed
+        and expected in children
+        and observed in children
+        and _valid_amazon_canonical(data.get("canonical_url"))
+    )
 
 
 def _assess_product_context(
@@ -2858,10 +2874,16 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
             _write_product_action(
                 conn, run_id, row, data, body, response_status, None,
                 source_type=source_type, raw_html_dir=raw_html_dir,
-                context=_evidence_context(config.get("context"), adapter), transfer_bytes=transfer_bytes,
+                context=_identity_mismatch_evidence_context(
+                    config.get("context"), adapter, data, row["asin"]
+                ),
+                transfer_bytes=transfer_bytes,
             )
             if refresh_job_id and row["asin"] == refresh_asin:
-                _finish_refresh_request(conn, refresh_job_id, "failed")
+                _finish_refresh_request(
+                    conn, refresh_job_id,
+                    "completed" if _is_sibling_variant_redirect(data, row["asin"]) else "failed",
+                )
             actions += 1
             continue
         missing_core = [key for key in ("asin", "canonical_url", "title") if not str(data.get(key) or "").strip()]
@@ -3283,9 +3305,10 @@ def _run_postgres_actions_impl(
                     body, response_status, reason = browser_body, browser_status, browser_reason
                     data = parse_product_html(browser_body, task["url"]) if not browser_reason else {"asin": "", "canonical_url": ""}
         if not reason and _has_explicit_asin_mismatch(data, task["asin"]):
+            variant_redirect = _is_sibling_variant_redirect(data, task["asin"])
             _record_proxy_outcome(
                 adapter,
-                "variant_redirect" if _is_sibling_variant_redirect(data, task["asin"]) else "failed",
+                "variant_redirect" if variant_redirect else "failed",
                 task["asin"],
             )
             source_type = getattr(adapter, "source_type", "http_html")
@@ -3295,11 +3318,23 @@ def _run_postgres_actions_impl(
                 _identity_mismatch_evidence_context(config.get("context"), adapter, data, task["asin"]), transfer_bytes,
                 error_code="asin_mismatch",
             )
-            storage.save_failure(
-                task=task, reason="asin_mismatch", error="asin_mismatch", evidence=evidence, terminal=True
-            )
+            if variant_redirect:
+                storage.save_failure(
+                    task=task, reason="variant_redirect", error=None, evidence=evidence,
+                    next_status="succeeded",
+                    state_fields={
+                        "task_stage": "complete", "resume_status": None,
+                        "next_review_url": None, "next_review_page": None,
+                        "next_retry_at": None, "block_reason": None,
+                    },
+                    increment_attempts=False,
+                )
+            else:
+                storage.save_failure(
+                    task=task, reason="asin_mismatch", error="asin_mismatch", evidence=evidence, terminal=True
+                )
             if refresh_job_id:
-                storage.finish_refresh_request(refresh_job_id, "failed")
+                storage.finish_refresh_request(refresh_job_id, "completed" if variant_redirect else "failed")
             actions += 1
             continue
         missing_core = [key for key in ("asin", "canonical_url", "title") if not str(data.get(key) or "").strip()]

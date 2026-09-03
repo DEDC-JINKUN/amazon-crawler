@@ -442,14 +442,45 @@ def test_postgres_runner_persists_explicit_sibling_identity_without_product_data
     ) == 1
     assert len(storage.saved) == 1
     saved = storage.saved[0]
-    assert saved["reason"] == "asin_mismatch"
+    assert saved["reason"] == "variant_redirect"
+    assert saved["next_status"] == "succeeded"
+    assert saved["increment_attempts"] is False
     assert saved["evidence"]["context_json"]["identity"] == {
         "requested_asin": "B0B9ZFDZNJ",
         "observed_asin": "B0B9ZFZZZZ",
         "canonical_asin": "B0B9ZFZZZZ",
         "parent_asin": "B0PARENT01",
         "child_asins": ["B0B9ZFDZNJ", "B0B9ZFZZZZ"],
+        "canonical_valid_amazon": True,
     }
+    assert all("product" not in entry for entry in storage.saved)
+
+
+def test_agent_refresh_variant_resolution_completes_job_without_product_snapshot():
+    worker = load_worker()
+
+    class RefreshStorage(IdentityMismatchStorage):
+        def __init__(self):
+            super().__init__()
+            self.finished = []
+
+        def claim_refresh_task(self, worker_id, lease_seconds=None):
+            task = self.claim_task(worker_id, lease_seconds)
+            if task is not None:
+                task["job_id"] = "refresh-variant"
+            return task
+
+        def finish_refresh_request(self, job_id, status):
+            self.finished.append((job_id, status))
+
+    storage = RefreshStorage()
+    config = {**worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None, "context": {}}
+
+    assert worker._run_postgres_actions_impl(
+        storage, IdentityMismatchAdapter(), config, limit=1, worker_id="agent-refresh",
+    ) == 1
+    assert storage.finished == [("refresh-variant", "completed")]
+    assert storage.saved[0]["reason"] == "variant_redirect"
     assert all("product" not in entry for entry in storage.saved)
 
 

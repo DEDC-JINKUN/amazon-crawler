@@ -34,7 +34,7 @@ class RefreshOnlyStorageView:
 
     def __init__(self, storage: Any):
         self._storage = storage
-        self._batch_counts = {"processed": 0, "succeeded": 0, "failed": 0, "blocked": 0}
+        self._batch_counts = {"processed": 0, "succeeded": 0, "variant_redirect": 0, "failed": 0, "blocked": 0}
         self._pending_outcome: str | None = None
 
     def __getattr__(self, name: str) -> Any:
@@ -44,7 +44,7 @@ class RefreshOnlyStorageView:
         return None
 
     def begin_batch_metrics(self) -> None:
-        self._batch_counts = {"processed": 0, "succeeded": 0, "failed": 0, "blocked": 0}
+        self._batch_counts = {"processed": 0, "succeeded": 0, "variant_redirect": 0, "failed": 0, "blocked": 0}
         self._pending_outcome = None
 
     def batch_metrics(self) -> dict[str, int]:
@@ -61,7 +61,9 @@ class RefreshOnlyStorageView:
         if result:
             state_fields = dict(payload.get("state_fields") or {})
             self._pending_outcome = (
-                "blocked"
+                "variant_redirect"
+                if payload.get("reason") == "variant_redirect"
+                else "blocked"
                 if payload.get("next_status") == "blocked" or state_fields.get("block_reason")
                 else "failed"
             )
@@ -72,7 +74,7 @@ class RefreshOnlyStorageView:
         if status not in {"completed", "failed", "queued", "cancelled"}:
             return
         outcome = self._pending_outcome
-        if outcome not in {"succeeded", "failed", "blocked"}:
+        if outcome not in {"succeeded", "variant_redirect", "failed", "blocked"}:
             outcome = "succeeded" if status == "completed" else "blocked" if status == "queued" else "failed"
         self._batch_counts["processed"] += 1
         self._batch_counts[outcome] += 1
@@ -104,6 +106,7 @@ class AgentRefreshWorker:
         self._state = "created"
         self._processed_actions = 0
         self._succeeded_actions = 0
+        self._variant_redirect_actions = 0
         self._failed_actions = 0
         self._blocked_actions = 0
         self._last_error: str | None = None
@@ -135,6 +138,7 @@ class AgentRefreshWorker:
                 "state": self._state,
                 "processed_actions": self._processed_actions,
                 "succeeded_actions": self._succeeded_actions,
+                "variant_redirect_actions": self._variant_redirect_actions,
                 "failed_actions": self._failed_actions,
                 "blocked_actions": self._blocked_actions,
                 # Backward-compatible field: completed now means successful, never merely attempted.
@@ -201,6 +205,7 @@ class AgentRefreshWorker:
                     with self._lock:
                         self._processed_actions += metrics["processed"]
                         self._succeeded_actions += metrics["succeeded"]
+                        self._variant_redirect_actions += metrics["variant_redirect"]
                         self._failed_actions += metrics["failed"]
                         self._blocked_actions += metrics["blocked"]
                     with self._lock:
@@ -212,6 +217,7 @@ class AgentRefreshWorker:
                     with self._lock:
                         self._processed_actions += metrics["processed"]
                         self._succeeded_actions += metrics["succeeded"]
+                        self._variant_redirect_actions += metrics["variant_redirect"]
                         self._failed_actions += metrics["failed"]
                         self._blocked_actions += metrics["blocked"]
                         self._last_action_at = datetime.now(timezone.utc).isoformat()

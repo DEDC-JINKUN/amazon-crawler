@@ -499,6 +499,43 @@ class CollectionApiTests(unittest.TestCase):
         repository = api.create_repository("postgres", Path("unused.sqlite3"), "postgresql://example", "tenant-a")
         self.assertEqual(repository.tenant_id, "tenant-a")
 
+    def test_variant_resolution_quality_is_distinct_from_valid_product_and_failure(self):
+        storage = load("collection_storage")
+        evidence = {
+            "error_code": "asin_mismatch",
+            "context_json": {"identity": {
+                "requested_asin": "B0B9ZFDZNJ", "observed_asin": "B0B9ZFZZZZ",
+                "canonical_asin": "B0B9ZFZZZZ", "canonical_valid_amazon": True,
+                "parent_asin": "B0PARENT01",
+                "child_asins": ["B0B9ZFDZNJ", "B0B9ZFZZZZ"],
+            }},
+        }
+
+        self.assertEqual(storage._quality_status("succeeded", None, evidence), "variant_redirect")
+        self.assertEqual(storage._quality_status("succeeded", {"asin": "B0B9ZFDZNJ"}, {}), "valid")
+        self.assertEqual(storage._quality_status("failed", None, {"error_code": "asin_mismatch"}), "failed")
+
+    def test_terminal_agent_job_returns_variant_quality_without_sibling_snapshot(self):
+        api = load("collection_api")
+
+        class Repository:
+            def load_product(self, _marketplace, _asin):
+                return {"quality_status": "variant_redirect", "product": None}
+
+            def load_evidence(self, _marketplace, _asin, limit=1):
+                assert limit == 1
+                return [{"retrieved_at": "2026-09-03T00:00:01+00:00", "transfer_bytes": 100}]
+
+        result = api._terminal_job_result(Repository(), {
+            "marketplace": "US", "asin": "B0B9ZFDZNJ", "status": "completed",
+            "requested_at": "2026-09-03T00:00:00+00:00",
+            "claimed_at": "2026-09-03T00:00:00+00:00",
+            "completed_at": "2026-09-03T00:00:01+00:00",
+        })
+
+        self.assertEqual(result["quality_status"], "variant_redirect")
+        self.assertIsNone(result["product"]["product"])
+
     def test_required_api_key_refuses_missing_environment_value(self):
         api = load("collection_api")
         with patch.dict(os.environ, {}, clear=True):

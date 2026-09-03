@@ -312,6 +312,27 @@ def test_agent_health_counts_one_blocked_asin_without_stopping_service():
     assert status["completed_actions"] == 0
 
 
+def test_refresh_storage_counts_variant_resolution_as_processed_not_product_success_or_failure():
+    service = load("agent_collection_service")
+
+    class Storage:
+        def save_failure(self, **_payload): return True
+        def finish_refresh_request(self, _job_id, _status): return None
+
+    view = service.RefreshOnlyStorageView(Storage())
+    view.begin_batch_metrics()
+    assert view.save_failure(
+        task={"asin": "B000000001"}, reason="variant_redirect",
+        error=None, next_status="succeeded", increment_attempts=False,
+    ) is True
+    view.finish_refresh_request("job-1", "completed")
+
+    assert view.batch_metrics() == {
+        "processed": 1, "succeeded": 0, "variant_redirect": 1,
+        "failed": 0, "blocked": 0,
+    }
+
+
 def test_agent_stops_only_when_runner_reports_global_access_circuit():
     service = load("agent_collection_service")
     worker_module = load("amazon_us_worker")

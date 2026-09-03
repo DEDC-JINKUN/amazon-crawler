@@ -303,7 +303,14 @@ $failed = @(
 $good = Test-ProbeRunQuality ([pscustomobject]@{{recorded_actions=3;inferred_actions=0;items=$completed;traffic=@{{}}}}) 3
 $bad = Test-ProbeRunQuality ([pscustomobject]@{{recorded_actions=3;inferred_actions=0;items=$failed;traffic=@{{}}}}) 3
 $partial = Test-ProbeRunQuality ([pscustomobject]@{{recorded_actions=2;inferred_actions=0;items=$completed[0..1];traffic=@{{}}}}) 3
-[ordered]@{{good=$good;bad=$bad;partial=$partial}} | ConvertTo-Json -Depth 8 -Compress
+$mixed = @(
+  [pscustomobject]@{{outcome='completed'; attribution='evidence'}},
+  [pscustomobject]@{{outcome='completed'; attribution='evidence'}},
+  [pscustomobject]@{{outcome='variant_redirect'; attribution='evidence'}}
+)
+$variantComplete = Test-ProbeRunQuality ([pscustomobject]@{{recorded_actions=3;inferred_actions=0;items=$mixed;proxy_session_pool=[pscustomobject]@{{unrequested_count=0}};traffic=@{{}}}}) 3
+$variantUnrequested = Test-ProbeRunQuality ([pscustomobject]@{{recorded_actions=3;inferred_actions=0;items=$mixed;proxy_session_pool=[pscustomobject]@{{unrequested_count=1}};traffic=@{{}}}}) 3
+[ordered]@{{good=$good;bad=$bad;partial=$partial;variant_complete=$variantComplete;variant_unrequested=$variantUnrequested}} | ConvertTo-Json -Depth 8 -Compress
 """
     result = subprocess.run(
         [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
@@ -321,6 +328,11 @@ $partial = Test-ProbeRunQuality ([pscustomobject]@{{recorded_actions=2;inferred_
     assert payload["bad"]["failed_actions"] == 3
     assert payload["partial"]["quality_gate_ok"] is False
     assert "recorded_actions" in payload["partial"]["quality_gate_reason"]
+    assert payload["variant_complete"]["quality_gate_ok"] is True
+    assert payload["variant_complete"]["completed_actions"] == 2
+    assert payload["variant_complete"]["variant_redirect_actions"] == 1
+    assert payload["variant_unrequested"]["quality_gate_ok"] is False
+    assert "unrequested_actions" in payload["variant_unrequested"]["quality_gate_reason"]
 
 
 def test_normal_run_completeness_requires_requested_evidence_but_allows_terminal_variants():
