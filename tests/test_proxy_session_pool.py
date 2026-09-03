@@ -696,7 +696,7 @@ def test_firefox_product_body_survives_delivery_timeout_as_partial_with_raw_hash
     <html><head><link rel='canonical' href='https://www.amazon.com/dp/B000000001'></head><body>
       <input id='ASIN' value='B000000001'><span id='productTitle'>Partial Context Product</span>
       <span class='a-price'><span class='a-offscreen'>$24.99</span></span>
-      <div id='desktop_buybox'>Delivering to United States</div>
+      <div id='desktop_buybox'>Delivering to Los Angeles 90001, United States</div>
     </body></html>
     """
     adapters = []

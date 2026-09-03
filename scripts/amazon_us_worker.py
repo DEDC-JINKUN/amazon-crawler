@@ -2581,6 +2581,9 @@ def _assess_product_context(
     expected_currency = str(expected.get("expected_currency") or "").strip().upper()
     expected_postal = str(expected.get("postal_code") or "").strip()[:5]
     browser_confirmed = bool(getattr(adapter, "last_browser_context_confirmed", False))
+    browser_context_failed = (
+        str(getattr(adapter, "last_context_error_stage", None) or "") == "browser_delivery_context"
+    )
     errors = validate_context(data, expected)
     hard_errors = [error for error in errors if error != "delivery_postal_mismatch"]
 
@@ -2600,9 +2603,16 @@ def _assess_product_context(
     if expected_country == "US" and not browser_confirmed and not explicit_us:
         if "delivery_country_mismatch" not in hard_errors:
             hard_errors.append("delivery_country_not_observed")
-    postal_confirmed = bool(not expected_postal or browser_confirmed or expected_postal in observed_postals)
+    postal_confirmed = bool(
+        not browser_context_failed
+        and (not expected_postal or browser_confirmed or expected_postal in observed_postals)
+    )
     observed_postal = expected_postal if expected_postal in observed_postals else (observed_postals[0] if observed_postals else None)
-    context_quality = "invalid" if hard_errors else "full" if postal_confirmed else "partial"
+    context_quality = (
+        "invalid" if hard_errors
+        else "partial" if browser_context_failed or not postal_confirmed
+        else "full"
+    )
     quality: dict[str, Any] = {
         "context_quality": context_quality,
         "postal_confirmed": postal_confirmed,
