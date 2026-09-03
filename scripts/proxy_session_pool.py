@@ -70,9 +70,12 @@ class ProxySessionPool:
         ports = list(config.get("proxy_session_ports") or [])
         if not ports or len(ports) > MAX_PROXY_SESSION_PORTS:
             raise ValueError(f"proxy_session_ports must contain 1 to {MAX_PROXY_SESSION_PORTS} approved ports")
-        self._ports = [int(port) for port in ports]
-        if len(set(self._ports)) != len(self._ports) or any(port < 1 or port > 65535 for port in self._ports):
+        self._all_ports = [int(port) for port in ports]
+        if len(set(self._all_ports)) != len(self._all_ports) or any(port < 1 or port > 65535 for port in self._all_ports):
             raise ValueError("proxy_session_ports must be unique valid ports")
+        self._ports = list(self._all_ports)
+        self._session_ids = [f"session-{index + 1:02d}" for index in range(len(self._all_ports))]
+        self._capacity_validator: Callable[[], Any] | None = None
         self.max_asins = self._bounded(config, "proxy_session_max_asins", 3, 1, 5)
         self.retry_per_asin = self._bounded(config, "proxy_session_retry_per_asin", 1, 0, 1)
         self.consecutive_limit = self._bounded(config, "proxy_session_consecutive_block_limit", 2, 1, 5)
@@ -128,6 +131,38 @@ class ProxySessionPool:
         self._action_http_bytes = 0
         self._last_transfer_bytes = 0
 
+    def configure_capacity_reservation(
+        self,
+        slot_ids: list[str],
+        validator: Callable[[], Any],
+    ) -> None:
+        if self._slots or self._current is not None or self._run_scope is not None:
+            raise RuntimeError("capacity reservation must be configured before begin_run")
+        if not slot_ids or len(set(slot_ids)) != len(slot_ids) or not callable(validator):
+            raise ValueError("capacity reservation requires unique slot ids and a validator")
+        selected_ports: list[int] = []
+        normalized_ids: list[str] = []
+        for slot_id in slot_ids:
+            match = re.fullmatch(r"session-(\d{2})", str(slot_id))
+            index = int(match.group(1)) - 1 if match else -1
+            if index < 0 or index >= len(self._all_ports):
+                raise ValueError("capacity reservation contains an unknown slot id")
+            normalized_ids.append(f"session-{index + 1:02d}")
+            selected_ports.append(self._all_ports[index])
+        self._ports = selected_ports
+        self._session_ids = normalized_ids
+        self._capacity_validator = validator
+
+    def release_capacity_reservation(self) -> None:
+        self.close()
+        self._slots = []
+        self._current = None
+        self._run_scope = None
+        self._next_port = 0
+        self._ports = list(self._all_ports)
+        self._session_ids = [f"session-{index + 1:02d}" for index in range(len(self._all_ports))]
+        self._capacity_validator = None
+
     def begin_action(self) -> None:
         self._action_generation += 1
         self._persisted_attempts = []
@@ -139,12 +174,14 @@ class ProxySessionPool:
             self._prepare(self._current)
 
     def _new_slot(self) -> _Slot:
+        if self._capacity_validator is not None:
+            self._capacity_validator()
         if self._next_port >= len(self._ports):
             self.circuit_open_reason = self.circuit_open_reason or "session_pool_exhausted"
             raise ProxyCircuitOpen(self.circuit_open_reason)
         slot_config = dict(self.config)
         slot_config["proxy_url"] = self._proxy_url(self._ports[self._next_port])
-        slot = _Slot(f"session-{self._next_port + 1:02d}", self._factory(slot_config))
+        slot = _Slot(self._session_ids[self._next_port], self._factory(slot_config))
         self._next_port += 1
         if self._run_scope and hasattr(slot.adapter, "begin_run"):
             slot.adapter.begin_run(*self._run_scope)

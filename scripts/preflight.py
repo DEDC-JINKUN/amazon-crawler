@@ -72,7 +72,7 @@ def _probe_postgres(dsn: str) -> tuple[bool, str]:
     return contract == expected, "schema ready" if contract == expected else "required worker schema columns are missing"
 
 
-def run_preflight(manifest: Path, config: Path, db: Path, *, require_live: bool = False, probe_egress: bool = False, probe_target_url: str = "https://www.amazon.com/robots.txt", backend: str = "sqlite", dsn: str = "", postgres_probe=None) -> dict[str, Any]:
+def run_preflight(manifest: Path, config: Path, db: Path, *, require_live: bool = False, probe_egress: bool = False, probe_target_url: str = "https://api.ipify.org?format=json", backend: str = "sqlite", dsn: str = "", postgres_probe=None) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     checks.append(_check("python", sys.version_info >= (3, 11), f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"))
     checks.append(_check("manifest", manifest.exists(), str(manifest)))
@@ -163,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db", type=Path, default=ROOT / "state" / "amazon_us.sqlite3")
     parser.add_argument("--require-live", action="store_true")
     parser.add_argument("--probe-egress", action="store_true", help="Probe configured proxy before allowing the run (network access)")
-    parser.add_argument("--probe-target-url", default="https://www.amazon.com/robots.txt")
+    parser.add_argument("--probe-target-url", default="https://api.ipify.org?format=json")
     parser.add_argument("--backend", choices=("postgres", "sqlite"), default="sqlite")
     parser.add_argument("--dsn-env", default="AMAZON_US_POSTGRES_DSN")
     args = parser.parse_args(argv)

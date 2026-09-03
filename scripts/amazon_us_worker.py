@@ -51,10 +51,10 @@ except ModuleNotFoundError:
     from proxy_tunnel_auth import ProxyTunnelAuthHTTPSHandler
 
 try:
-    from proxy_capacity_gate import ProxyCapacityGateDenied, enforce_capacity_gate as enforce_proxy_capacity_gate
+    from proxy_capacity_gate import ProxyCapacityGateDenied, acquire_capacity_reservation, capacity_config_hash
 except ModuleNotFoundError:
     sys.path.insert(0, str(ROOT / "scripts"))
-    from proxy_capacity_gate import ProxyCapacityGateDenied, enforce_capacity_gate as enforce_proxy_capacity_gate
+    from proxy_capacity_gate import ProxyCapacityGateDenied, acquire_capacity_reservation, capacity_config_hash
 
 DEFAULT_CONFIG = ROOT / "config" / "amazon_us.example.toml"
 DEFAULT_MANIFEST = ROOT / "amazon_us_asin_manifest.csv"
@@ -1376,6 +1376,7 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     config["max_attempts"] = max(1, int(config["max_attempts"]))
     config["max_actions_per_run"] = max(1, int(config["max_actions_per_run"]))
     config["review_page_limit"] = max(0, int(config["review_page_limit"]))
+    config["proxy_credential_generation"] = os.environ.get("AMAZON_PROXY_CREDENTIAL_GENERATION", "").strip()
     return config
 
 
@@ -2763,7 +2764,7 @@ def _postgres_evidence(
     }
 
 
-def run_postgres_actions(
+def _run_postgres_actions_impl(
     storage: Any,
     adapter: Any,
     config: dict[str, Any],
@@ -2774,15 +2775,13 @@ def run_postgres_actions(
     lease_seconds: int = 600,
     product_only: bool = False,
     reviews_only: bool = False,
-    enforce_capacity_gate: bool = False,
+    capacity_validator: Callable[[], dict[str, Any]] | None = None,
 ) -> int:
     """Run a bounded production batch using PostgreSQL task leases."""
     if product_only and reviews_only:
         raise ValueError("product_only and reviews_only are mutually exclusive")
     run_id = run_id or f"run-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
     max_actions = min(limit, int(config["max_actions_per_run"])) if limit else int(config["max_actions_per_run"])
-    if enforce_capacity_gate:
-        enforce_proxy_capacity_gate(storage, config, requested_actions=max_actions)
     fallback_ledger = BrowserFallbackLedger()
     if hasattr(adapter, "begin_run"):
         adapter.begin_run(run_id, str(getattr(storage, "tenant_id", "postgres-local")), worker_id)
@@ -2791,6 +2790,8 @@ def run_postgres_actions(
     actions = 0
     blocked = False
     while actions < max_actions:
+        if capacity_validator is not None:
+            capacity_validator()
         if _proxy_circuit_reason(adapter) or not _proxy_capacity_available(adapter):
             if not _proxy_circuit_reason(adapter):
                 setattr(adapter, "circuit_open_reason", "session_pool_exhausted")
@@ -3189,6 +3190,99 @@ def run_postgres_actions(
     return -1 if blocked else actions
 
 
+def run_postgres_actions(
+    storage: Any,
+    adapter: Any,
+    config: dict[str, Any],
+    *,
+    limit: int | None = None,
+    run_id: str | None = None,
+    worker_id: str = "amazon-us-worker",
+    lease_seconds: int = 600,
+    product_only: bool = False,
+    reviews_only: bool = False,
+    capacity_reservation_id: str | None = None,
+) -> int:
+    """Reserve shared proxy capacity, bind it to the run, and release it on every exit path."""
+    max_actions = min(limit, int(config["max_actions_per_run"])) if limit else int(config["max_actions_per_run"])
+    validate = getattr(storage, "validate_proxy_capacity_reservation", None)
+    release = getattr(storage, "release_proxy_capacity", None)
+    if not callable(validate) or not callable(release):
+        raise ProxyCapacityGateDenied("capacity_reservation_unavailable")
+    if capacity_reservation_id:
+        try:
+            reservation = validate(
+                capacity_reservation_id,
+                worker_id,
+                max_age_seconds=int(config.get("proxy_canary_max_age_seconds") or 3600),
+                lease_seconds=lease_seconds,
+            )
+        except Exception:
+            raise ProxyCapacityGateDenied("capacity_reservation_unavailable") from None
+        if not isinstance(reservation, dict) or reservation.get("status") != "active":
+            reason = str(reservation.get("reason") if isinstance(reservation, dict) else "capacity_reservation_denied")
+            raise ProxyCapacityGateDenied(reason, reservation if isinstance(reservation, dict) else None)
+    else:
+        reservation = acquire_capacity_reservation(
+            storage,
+            config,
+            requested_actions=max_actions,
+            owner_id=worker_id,
+            lease_seconds=lease_seconds,
+        )
+    reservation_id = str(reservation["reservation_id"])
+    expected_hash = capacity_config_hash(config)
+    expected_generation = str(config.get("proxy_credential_generation") or "")
+    if (
+        reservation.get("capacity_config_hash") != expected_hash
+        or reservation.get("credential_generation") != expected_generation
+        or int(reservation.get("requested_capacity") or 0) < max_actions
+        or int(reservation.get("reserved_slots") or 0) < 1
+    ):
+        release(reservation_id, worker_id)
+        raise ProxyCapacityGateDenied("capacity_reservation_scope_mismatch")
+
+    def validate_reservation() -> dict[str, Any]:
+        try:
+            current = validate(
+                reservation_id,
+                worker_id,
+                max_age_seconds=int(config.get("proxy_canary_max_age_seconds") or 3600),
+                lease_seconds=lease_seconds,
+            )
+        except Exception:
+            raise ProxyCapacityGateDenied("capacity_reservation_unavailable") from None
+        if not isinstance(current, dict) or current.get("status") != "active":
+            reason = str(current.get("reason") if isinstance(current, dict) else "capacity_reservation_denied")
+            raise ProxyCapacityGateDenied(reason, current if isinstance(current, dict) else None)
+        return current
+
+    configure_reservation = getattr(adapter, "configure_capacity_reservation", None)
+    if not callable(configure_reservation):
+        release(reservation_id, worker_id)
+        raise ProxyCapacityGateDenied("capacity_adapter_unavailable")
+    try:
+        configure_reservation(list(reservation.get("slot_ids") or []), validate_reservation)
+    except Exception:
+        release(reservation_id, worker_id)
+        raise ProxyCapacityGateDenied("capacity_adapter_configuration_failed") from None
+    scoped_config = dict(config)
+    scoped_context = dict(config.get("context") or {})
+    scoped_context["capacity_authorization"] = dict(reservation)
+    scoped_config["context"] = scoped_context
+    try:
+        return _run_postgres_actions_impl(
+            storage, adapter, scoped_config, limit=limit, run_id=run_id, worker_id=worker_id,
+            lease_seconds=lease_seconds, product_only=product_only, reviews_only=reviews_only,
+            capacity_validator=validate_reservation,
+        )
+    finally:
+        release_adapter = getattr(adapter, "release_capacity_reservation", None)
+        if callable(release_adapter):
+            release_adapter()
+        release(reservation_id, worker_id)
+
+
 def _prepare_paths(args: argparse.Namespace, config: dict[str, Any]) -> tuple[Path, Path, Path]:
     paths = config.get("paths", {})
     manifest = resolve_path(args.manifest or paths.get("manifest", DEFAULT_MANIFEST))
@@ -3223,10 +3317,13 @@ def build_parser() -> argparse.ArgumentParser:
     stage_group.add_argument("--product-only", action="store_true", help="claim only product-stage PostgreSQL tasks")
     stage_group.add_argument("--reviews-only", action="store_true", help="claim only review-stage PostgreSQL tasks")
     parser.add_argument("--run-id", help="explicit run identifier for logs and evidence")
+    parser.add_argument("--capacity-reservation-id", help="controller-created proxy capacity reservation")
     return parser
 
 
 def run(args: argparse.Namespace) -> int:
+    if getattr(args, "live", False) and getattr(args, "backend", "postgres") != "postgres":
+        raise ValueError("SQLite live collection is disabled; production collection requires PostgreSQL capacity gating")
     config = load_config(resolve_path(args.config))
     manifest, state, output = _prepare_paths(args, config)
     config["output_dir"] = output
@@ -3263,7 +3360,7 @@ def run(args: argparse.Namespace) -> int:
                 storage, adapter, config, limit=args.limit, worker_id=args.worker_id,
                 lease_seconds=args.lease_seconds, product_only=args.product_only,
                 reviews_only=args.reviews_only, run_id=args.run_id,
-                enforce_capacity_gate=True,
+                capacity_reservation_id=args.capacity_reservation_id,
             )
             return 3 if action_result == -1 else 0
         finally:
@@ -3296,6 +3393,8 @@ def run(args: argparse.Namespace) -> int:
 
 
 def validate_runtime_args(args: argparse.Namespace) -> None:
+    if args.live and args.backend != "postgres":
+        raise ValueError("SQLite live collection is disabled; production collection requires PostgreSQL capacity gating")
     if args.product_only and args.backend != "postgres":
         raise ValueError("--product-only is supported only with the PostgreSQL backend")
     if args.reviews_only and args.backend != "postgres":

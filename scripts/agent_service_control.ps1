@@ -20,6 +20,7 @@ $proxyCapacityGateScript = Join-Path $PSScriptRoot 'proxy_capacity_gate.py'
 $collectionApiScript = Join-Path $PSScriptRoot 'collection_api.py'
 $collectionStorageScript = Join-Path $PSScriptRoot 'collection_storage.py'
 $postgresStorageScript = Join-Path $PSScriptRoot 'postgres_worker_storage.py'
+$credentialVault = Join-Path $root 'data\secure\amazon_us.secrets.dpapi'
 $controlDir = Join-Path $root 'data\agent_service_control'
 $lockPath = Join-Path $controlDir '.agent-service.lock.json'
 $requestPath = Join-Path $controlDir 'agent-service.request.json'
@@ -36,6 +37,27 @@ function Resolve-ProjectPath([string]$Value) {
         throw 'agent_service_path_outside_project'
     }
     return $candidate
+}
+
+function Get-CredentialGeneration {
+    if (-not (Test-Path -LiteralPath $credentialVault -PathType Leaf)) {
+        throw 'agent_service_credential_vault_missing'
+    }
+    $encoded = ([IO.File]::ReadAllText((Resolve-Path -LiteralPath $credentialVault))).Trim()
+    if ($encoded.StartsWith('{')) {
+        $envelope = $encoded | ConvertFrom-Json
+        if ($envelope.PSObject.Properties.Name -contains 'credential_generation') {
+            $generation = [string]$envelope.credential_generation
+            if ($generation -match '^[A-Za-z0-9_.:-]{8,100}$') { return $generation }
+        }
+        $encoded = [string]$envelope.ciphertext
+    }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::ASCII.GetBytes($encoded))).Replace('-', '').ToLowerInvariant()
+        return 'legacy-' + $hash.Substring(0, 32)
+    }
+    finally { $sha.Dispose() }
 }
 
 function Get-AgentRuntimeFingerprint {
@@ -59,6 +81,7 @@ function Get-AgentRuntimeFingerprint {
         $fileHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
         "$normalized`n$fileHash"
     }
+    $parts += "credential_generation`n$(Get-CredentialGeneration)"
     $sha = [Security.Cryptography.SHA256]::Create()
     try {
         $bytes = [Text.Encoding]::UTF8.GetBytes(($parts -join "`n"))

@@ -47,6 +47,18 @@ def test_collection_operations_are_registered_before_console_and_preflight():
     assert "Finish-Operation" in body
 
 
+def test_controller_atomically_reserves_and_binds_capacity_before_collection_run():
+    text = SCRIPT.read_text(encoding="utf-8")
+    body = text[text.index("function Start-Crawl"):text.index("function Stop-Locked")]
+
+    assert "--reserve" in text
+    assert "Bind-OperationCapacity" in body
+    assert body.index("Invoke-CapacityGate") < body.index("Bind-OperationCapacity") < body.index("Start-RunLedger")
+    assert "--capacity-reservation-id" in body
+    assert body.count("capacity_authorization = $capacityAuthorization") >= 2
+    assert "Release-CapacityReservation" in body
+
+
 def test_setup_failures_are_audited_before_paths_limits_and_locks():
     text = SCRIPT.read_text(encoding="utf-8")
     main = text[text.index("$exitCode = 0"):]

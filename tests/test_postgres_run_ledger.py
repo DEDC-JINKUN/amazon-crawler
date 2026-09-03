@@ -66,6 +66,7 @@ def test_run_ledger_schema_is_idempotent_and_postgres_is_the_receipt_truth():
     statements = "\n".join(sql for sql, _ in connection.cursor_instance.executed)
     assert "CREATE TABLE IF NOT EXISTS amazon_us.collection_run" in statements
     assert "receipt_json jsonb" in statements
+    assert "collection_run_capacity_binding_v2_check" in statements
     assert connection.commits == 2
 
 
@@ -75,7 +76,7 @@ def test_run_ledger_start_and_finish_are_tenant_scoped():
     connect = lambda: connection
 
     module.start_run(connect, tenant_id="tenant-a", run_id="run-1", command="run", requested_actions=97,
-                     worker_id="worker-1", controller_pid=123)
+                     worker_id="worker-1", controller_pid=123, operation_id="op-run-1")
     module.finish_run(connect, tenant_id="tenant-a", run_id="run-1", status="interrupted",
                       controller_exit_code=130, worker_exit_code=-15,
                       termination_reason="controller_exited", receipt={"status": "interrupted"})
@@ -85,6 +86,30 @@ def test_run_ledger_start_and_finish_are_tenant_scoped():
     assert any("UPDATE amazon_us.collection_run" in sql and "tenant-a" in params and "run-1" in params
                for sql, params in statements)
     assert connection.commits == 2
+
+
+def test_run_start_copies_bound_canary_and_reservation_from_control_operation():
+    module = load_module()
+    connection = Connection()
+
+    module.start_run(
+        lambda: connection,
+        tenant_id="tenant-a",
+        run_id="run-1",
+        command="run",
+        requested_actions=3,
+        worker_id="worker-1",
+        controller_pid=123,
+        operation_id="op-run-1",
+    )
+
+    sql, params = connection.cursor_instance.executed[0]
+    assert "control_operation_id" in sql
+    assert "authorizing_canary_operation_id" in sql
+    assert "capacity_reservation_id" in sql
+    assert "capacity_authorization_json" in sql
+    assert "FROM amazon_us.operation_run" in sql
+    assert "op-run-1" in params
 
 
 def test_run_ledger_finish_fails_closed_when_run_is_missing():
@@ -125,11 +150,18 @@ def test_interrupted_collection_run_also_finalizes_linked_operation(monkeypatch)
     module = load_module()
     connection = Connection()
     calls = []
+    releases = []
     fake_operation = types.SimpleNamespace(
         finish_operation=lambda operation_id, tenant_id, status, stage, error, **_kwargs:
             calls.append((operation_id, tenant_id, status, stage, error))
     )
     monkeypatch.setitem(sys.modules, "operation_ledger", fake_operation)
+    fake_storage = types.SimpleNamespace(
+        PostgresWorkerStorage=lambda _dsn, tenant_id: types.SimpleNamespace(
+            release_proxy_capacity=lambda reservation_id, owner_id: releases.append((tenant_id, reservation_id, owner_id)) or True
+        )
+    )
+    monkeypatch.setitem(sys.modules, "postgres_worker_storage", fake_storage)
     monkeypatch.setenv("AMAZON_TEST_DSN", "postgresql://example")
     monkeypatch.setattr(module, "_default_connect", lambda _dsn: connection)
     with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
@@ -139,10 +171,14 @@ def test_interrupted_collection_run_also_finalizes_linked_operation(monkeypatch)
             "tenant_id": "tenant-a",
             "run_id": "run-1",
             "operation_id": "op-1",
+            "worker_id": "worker-1",
             "command": "run",
             "requested_actions": 10,
             "receipt_path": str(receipt),
+            "capacity_authorization": {"canary_operation_id": "op-canary-1", "reservation_id": "reservation-1"},
         }, -15)
 
         assert calls == [("op-1", "tenant-a", "interrupted", "worker", "controller_exited")]
+        assert releases == [("tenant-a", "reservation-1", "worker-1")]
         assert receipt.exists()
+        assert "op-canary-1" in receipt.read_text(encoding="utf-8")

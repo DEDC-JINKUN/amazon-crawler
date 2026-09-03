@@ -224,7 +224,7 @@ proxy_canary_max_age_seconds = 3600
 
 Evidence 继续使用现有 `context_json.proxy_session_pool`，不新增 schema。只保存 `session-01` 形式的脱敏ID、sticky模式、ASIN/请求数、completed/variant/failed/blocked/network_error、响应字节、延迟、隔离原因、熔断原因和未请求数。跨会话重试的先前阻断正文写入原 raw store，context 仅保留content hash、raw指针和状态归因；不保存真实代理IP、端口映射、用户名、密码、Cookie、Authorization或响应正文。Console run/详情与receipt读取同一对象。
 
-所有PostgreSQL live入口还必须通过启动前容量Gate：最新canary必须与当前代理host/端口集合、凭据环境名、每槽预算、目标和超时的非秘密哈希一致，必须在有效期内，并且canary的计划规模与唯一出口容量覆盖本次action上限。Controller在创建`collection_run`前检查；Worker在`begin_run`和`claim_task`前再次检查；Agent refresh使用同一Worker门。任一层拒绝均不访问Amazon。
+所有PostgreSQL live入口还必须通过原子容量预约：最新canary必须与当前代理host/端口集合、凭据环境名、非秘密credential generation、每槽预算、目标和超时哈希一致，状态/计数必须自洽且在有效期内。PostgreSQL用配置哈希advisory lock跨tenant/进程预约具体`session-NN`；Controller在`collection_run`前预约并绑定，Worker在每次claim和新槽前复核TTL，Agent/direct CLI使用同一公共入口。任一层拒绝均不访问Amazon。
 
 ## 5. Firefox 与 WebDriver BiDi
 
@@ -736,18 +736,18 @@ DPAPI `CurrentUser` 密钥仓必须由将来启动爬虫的同一 Windows 账号
 
 2026-09-03新增`crawler.ps1 canary -Limit N`和DPAPI包装入口。每个计划端口只发一次非Amazon HTTPS请求；成功同时证明该次认证、CONNECT和TLS，真实出口IP仅在进程内用`ipaddress`规范化并比较，公开结果、operation、Console和日志只保存`session-NN`、状态/原因、HTTP状态、延迟及聚合计数。未测试（如凭据缺失）使用`unknown/null`；全部实际探测失败才允许记录已知0。
 
-`amazon_us.operation_run`新增canary聚合字段和经过字段白名单验证的`capacity_detail_json`。Console/API显示planned/tested/available/unique、duplicates、requested capacity、required slots、slot capacity、Gate状态/原因和P95。配置缺失、事实缺失/过期、指纹不匹配、canary计划规模不足、容量unknown或唯一容量不足都以稳定原因拒绝。
+`amazon_us.operation_run`保存canary聚合与字段白名单验证的`capacity_detail_json`；窄表`proxy_capacity_reservation`只保存脱敏slot ID、owner、TTL、状态/原因和安全快照。Console/API显示planned/tested/available/unique、duplicates、requested/slot capacity、required/reserved slots、authorizing canary、事实过期时间和P95。unknown/failed/denied、跨字段不一致、generation/配置不匹配、过期、计划不足或被其他消费者预约都fail closed。
 
-生产入口一致性：`crawler.ps1`在`collection_run`之前检查；`run_postgres_actions`在adapter begin和任何lease claim之前复核；Agent refresh强制启用同一门；旧`run_once_windows.bat`与`run_scheduled_windows.bat`不再直接启动live Worker，而是进入controller。live preflight改用同一个非Amazon目标，避免容量证明前访问Amazon。
+生产入口一致性：SQLite live已禁用；`egress/check_egress/preflight`默认和显式目标只能是精确允许的非Amazon HTTPS端点并禁止重定向；`crawler.ps1`在`collection_run`前预约，公开`run_postgres_actions`没有跳过Gate的参数；Agent refresh强制同一预约；旧bat进入controller，`run_once`验证固定使用项目venv。
 
-新鲜实机事实为34/34可用、34唯一、0重复、102 action容量、P95 2356.1ms；PostgreSQL读回对3 action返回`allowed/capacity_sufficient`。它只排除了“当前计划端口整体不可达/容量不足”这一层根因，未排除Amazon目标侧CAPTCHA/WAF、会话声誉、Cookie/地区上下文、HTTP/Firefox或解析问题。下一步仍必须由用户明确授权固定cohort的Amazon 3条，再依据证据决定是否进入20条。
+`42b0a0a`前的实机事实曾为34/34可用、34唯一、0重复、102 action容量、P95 2356.1ms，但独立审查发现其缺少credential generation、usable-slot明细和原子reservation；该历史operation不能授权修复后的运行。新候选部署后必须重新执行非Amazon canary。它仍只排除供应商连通/容量层根因，不证明Amazon CAPTCHA/WAF、上下文或解析问题已解决。
 
 为防止失败后替换样本，下一次真实验收固定复用既有事实中的以下顺序（UTF-8、每行一个ASIN并保留末尾换行）：
 
 - Gate 3：`B0CC2FRY3J`、`B0CC2JBW2H`、`B0CJFNJCNV`；SHA-256 `117ae0753d074291e44ff4cb1ea6a6298683b0cdc9e40c1b31bb816aa7538038`。上一轮分别是1个真实`sibling_variant_redirect`与2个`completed/partial`，3/3均有raw/hash/evidence，无blocked。
 - Gate 20：`B01FSJD0ZO`、`B01LWJ0JIC`、`B06VWMP73S`、`B0774G18QS`、`B07CRHSTSL`、`B07FMMYMQQ`、`B07RY2JNFK`、`B07VK5XSRP`、`B07X2S6J1W`、`B08Q82X8ZL`、`B09V7LZ4F4`、`B0B3RNWG7R`、`B0B7WX481S`、`B0B9XQYGM2`、`B0B9XSRZNB`、`B0B9XT6GX1`、`B0B9XTD4LN`、`B0B9ZFDZNJ`、`B0BB1HFRZ1`、`B0BHSF13TZ`；SHA-256 `89054e06d4189131ed0a3f6aa0762c5197d84990c1e795f0f75e53cb70296ece`。上一轮为16 completed、3 sibling variant、1 context/currency采集失败、0 blocked。
 
-Gate 3通过后必须再执行`canary -Limit 20`；当前`canary -Limit 3`事实即使物理容量为102，也因计划规模合同不能直接授权20。真实运行要使用隔离tenant/manifest只包含上述cohort，并以新run_id执行；不得从1093任务队列的“下一个pending”近似替代。
+修复候选必须先通过独立delta review，再重新执行`canary -Limit 3`并申请真实Gate 3授权；Gate 3通过后再执行`canary -Limit 20`。真实运行使用隔离tenant/manifest只包含冻结cohort，不得从1093任务队列的“下一个pending”近似替代。
 
 ## 12. 测试矩阵
 

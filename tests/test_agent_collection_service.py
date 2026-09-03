@@ -25,9 +25,14 @@ class RefreshStorage:
         self.claimed = False
         self.saved = []
         self.finished = []
+        self.capacity_fresh = True
+        self.capacity_reservation = None
 
     def reclaim_expired_leases(self):
         return 0
+
+    def has_pending_refresh_task(self):
+        return not self.claimed
 
     def load_latest_proxy_capacity(self, *, max_age_seconds):
         assert max_age_seconds == 3600
@@ -40,6 +45,32 @@ class RefreshStorage:
             "capacity_gate_reason": "capacity_sufficient",
             "is_fresh": True,
         }
+
+    def reserve_proxy_capacity(self, **kwargs):
+        if not self.capacity_fresh:
+            return {"status": "denied", "reason": "capacity_evidence_stale", "reservation_id": kwargs["reservation_id"]}
+        self.capacity_reservation = {
+            "status": "active", "reason": "capacity_reserved", "reservation_id": kwargs["reservation_id"],
+            "owner_id": kwargs["owner_id"], "canary_operation_id": "op-canary-agent",
+            "capacity_config_hash": kwargs["capacity_config_hash"],
+            "credential_generation": kwargs["credential_generation"],
+            "requested_capacity": kwargs["requested_capacity"], "required_slots": kwargs["required_slots"],
+            "reserved_slots": kwargs["required_slots"],
+            "slot_ids": [f"session-{index + 1:02d}" for index in range(kwargs["required_slots"])],
+            "fact_finished_at": "2026-09-03T01:00:00+00:00",
+            "fact_expires_at": "2026-09-03T02:00:00+00:00",
+            "reservation_expires_at": "2026-09-03T01:10:00+00:00",
+            "capacity_snapshot": {"unique_egress_count": 2, "slot_capacity": 10},
+        }
+        return dict(self.capacity_reservation)
+
+    def validate_proxy_capacity_reservation(self, *_args, **_kwargs):
+        if not self.capacity_fresh:
+            return {"status": "denied", "reason": "capacity_evidence_stale", "reservation_id": "capacity-agent"}
+        return dict(self.capacity_reservation)
+
+    def release_proxy_capacity(self, *_args):
+        return True
 
     def claim_refresh_task(self, worker_id, lease_seconds=None):
         if self.claimed:
@@ -71,6 +102,13 @@ class Adapter:
     source_type = "http_html"
     last_transfer_bytes = 321
     last_retry_after_seconds = None
+
+    def configure_capacity_reservation(self, slot_ids, validator):
+        self.capacity_slot_ids = list(slot_ids)
+        self.capacity_validator = validator
+
+    def release_capacity_reservation(self):
+        return None
 
     def fetch(self, url):
         return """
@@ -108,6 +146,7 @@ def test_background_service_executes_only_refresh_jobs_and_reports_health():
         "proxy_url": "http://proxy.example:10000",
         "proxy_session_ports": [10000],
         "proxy_session_max_asins": 5,
+        "proxy_credential_generation": "test-generation-1",
     })
     storage.capacity_config_hash = load("proxy_canary").capacity_config_hash(config)
     background = service.AgentRefreshWorker(
@@ -158,7 +197,7 @@ def test_background_service_gives_one_agent_batch_to_one_bounded_pool_run():
 
     assert calls
     assert calls[0]["limit"] == 5
-    assert calls[0]["enforce_capacity_gate"] is True
+    assert "enforce_capacity_gate" not in calls[0]
 
 
 def test_agent_capacity_denial_claims_nothing_and_recovers_after_fresh_canary():
@@ -173,17 +212,10 @@ def test_agent_capacity_denial_claims_nothing_and_recovers_after_fresh_canary():
         "proxy_url": "http://proxy.example:10000",
         "proxy_session_ports": [10000],
         "proxy_session_max_asins": 5,
+        "proxy_credential_generation": "test-generation-1",
     })
     storage.capacity_config_hash = load("proxy_canary").capacity_config_hash(config)
-    fresh = False
-    original_reader = storage.load_latest_proxy_capacity
-
-    def capacity(*, max_age_seconds):
-        value = original_reader(max_age_seconds=max_age_seconds)
-        value["is_fresh"] = fresh
-        return value
-
-    storage.load_latest_proxy_capacity = capacity
+    storage.capacity_fresh = False
     background = service.AgentRefreshWorker(
         storage=storage,
         adapter_factory=Adapter,
@@ -197,9 +229,10 @@ def test_agent_capacity_denial_claims_nothing_and_recovers_after_fresh_canary():
     while background.status()["state"] != "blocked" and time.monotonic() < deadline:
         time.sleep(0.01)
     assert background.status()["last_error"] == "capacity_evidence_stale"
+    assert background.status()["capacity_decision"]["reason"] == "capacity_evidence_stale"
     assert storage.claimed is False
 
-    fresh = True
+    storage.capacity_fresh = True
     background.notify()
     deadline = time.monotonic() + 2
     while not storage.finished and time.monotonic() < deadline:
@@ -298,6 +331,7 @@ def test_unexpected_worker_error_terminalizes_claimed_refresh_without_detail_lea
         "proxy_url": "http://proxy.example:10000",
         "proxy_session_ports": [10000],
         "proxy_session_max_asins": 5,
+        "proxy_credential_generation": "test-generation-1",
     })
     storage.capacity_config_hash = load("proxy_canary").capacity_config_hash(config)
     background = service.AgentRefreshWorker(

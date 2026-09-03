@@ -7,6 +7,11 @@ lease checks; parsing and transport remain in the existing worker layers.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from datetime import datetime, timedelta, timezone
+import json
+from pathlib import Path
+import re
+import sys
 import uuid
 from typing import Any, Callable
 
@@ -201,18 +206,322 @@ class PostgresWorkerStorage:
             with conn.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT canary_status,planned_slots,tested_slots,available_slots,
+                    SELECT operation_id,canary_status,planned_slots,tested_slots,available_slots,
                            unique_egress_count,duplicate_egress_count,requested_capacity,
-                           required_slots,slot_capacity,capacity_gate_status,capacity_gate_reason,
-                           capacity_config_hash,canary_p95_latency_ms,finished_at,
+                           required_slots,slot_budget,slot_capacity,capacity_gate_status,capacity_gate_reason,
+                           capacity_config_hash,credential_generation,canary_p95_latency_ms,
+                           capacity_detail_json,finished_at,
+                           finished_at + (%s * INTERVAL '1 second') AS fact_expires_at,
+                           CURRENT_TIMESTAMP AS observed_at,
                            finished_at >= CURRENT_TIMESTAMP - (%s * INTERVAL '1 second') AS is_fresh
                     FROM amazon_us.operation_run
                     WHERE tenant_id=%s AND operation_type='canary' AND finished_at IS NOT NULL
                     ORDER BY started_at DESC LIMIT 1
                     """,
-                    (seconds, self.tenant_id),
+                    (seconds, seconds, self.tenant_id),
                 )
                 return self._as_dict(cursor.fetchone())
+
+    @staticmethod
+    def _iso_time(value: Any) -> str | None:
+        if value is None:
+            return None
+        return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+    @staticmethod
+    def _capacity_snapshot(fact: Mapping[str, Any] | None) -> dict[str, Any]:
+        if fact is None:
+            return {}
+        result = {
+            key: fact.get(key)
+            for key in (
+                "canary_status", "planned_slots", "tested_slots", "available_slots",
+                "unique_egress_count", "duplicate_egress_count", "requested_capacity",
+                "required_slots", "slot_capacity", "capacity_gate_status", "capacity_gate_reason",
+                "slot_budget",
+                "canary_p95_latency_ms",
+            )
+        }
+        if result.get("canary_p95_latency_ms") is not None:
+            result["canary_p95_latency_ms"] = float(result["canary_p95_latency_ms"])
+        return result
+
+    def reserve_proxy_capacity(
+        self,
+        *,
+        reservation_id: str,
+        owner_id: str,
+        capacity_config_hash: str,
+        credential_generation: str,
+        requested_capacity: int,
+        required_slots: int,
+        slot_budget: int,
+        max_age_seconds: int,
+        lease_seconds: int,
+    ) -> dict[str, Any]:
+        """Atomically reserve distinct redacted canary slots across all tenants and consumers."""
+        for value, name in ((reservation_id, "reservation_id"), (owner_id, "owner_id")):
+            if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", str(value or "")):
+                raise ValueError(f"invalid {name}")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(capacity_config_hash or "")):
+            raise ValueError("invalid capacity_config_hash")
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{8,100}", str(credential_generation or "")):
+            raise ValueError("invalid credential_generation")
+        if min(int(requested_capacity), int(required_slots), int(slot_budget), int(max_age_seconds), int(lease_seconds)) < 1:
+            raise ValueError("capacity reservation values must be positive")
+        if int(slot_budget) > 5 or int(max_age_seconds) > 86400 or int(lease_seconds) > 3600:
+            raise ValueError("capacity reservation limits are out of range")
+        expected_required = (int(requested_capacity) + int(slot_budget) - 1) // int(slot_budget)
+        if int(required_slots) != expected_required:
+            raise ValueError("required_slots does not match requested capacity")
+        try:
+            from proxy_capacity_gate import evaluate_capacity_snapshot
+        except ModuleNotFoundError:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from proxy_capacity_gate import evaluate_capacity_snapshot
+
+        with self._connect_factory() as conn:
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (capacity_config_hash,))
+                    cursor.execute(
+                        """
+                        UPDATE amazon_us.proxy_capacity_reservation
+                        SET status='expired',reason='reservation_expired',updated_at=CURRENT_TIMESTAMP
+                        WHERE capacity_config_hash=%s AND status='active' AND expires_at <= CURRENT_TIMESTAMP
+                        """,
+                        (capacity_config_hash,),
+                    )
+                    cursor.execute(
+                        """
+                        SELECT reservation_id,owner_id,canary_operation_id,capacity_config_hash,
+                               credential_generation,requested_capacity,required_slots,reserved_slots,
+                               slot_ids_json,status,reason,fact_finished_at,fact_expires_at,expires_at,
+                               capacity_snapshot_json
+                        FROM amazon_us.proxy_capacity_reservation
+                        WHERE reservation_id=%s FOR UPDATE
+                        """,
+                        (reservation_id,),
+                    )
+                    existing = self._as_dict(cursor.fetchone())
+                    if existing is not None:
+                        if (
+                            existing.get("owner_id") != owner_id
+                            or existing.get("capacity_config_hash") != capacity_config_hash
+                            or int(existing.get("requested_capacity") or 0) != int(requested_capacity)
+                            or int(existing.get("required_slots") or 0) != int(required_slots)
+                        ):
+                            raise ValueError("capacity reservation identity conflict")
+                        result = {
+                            "status": existing.get("status"), "reason": existing.get("reason"),
+                            "reservation_id": existing.get("reservation_id"), "owner_id": existing.get("owner_id"),
+                            "canary_operation_id": existing.get("canary_operation_id"),
+                            "capacity_config_hash": existing.get("capacity_config_hash"),
+                            "credential_generation": existing.get("credential_generation"),
+                            "requested_capacity": int(existing.get("requested_capacity") or 0),
+                            "required_slots": int(existing.get("required_slots") or 0),
+                            "reserved_slots": int(existing.get("reserved_slots") or 0),
+                            "slot_ids": list(existing.get("slot_ids_json") or []),
+                            "fact_finished_at": self._iso_time(existing.get("fact_finished_at")),
+                            "fact_expires_at": self._iso_time(existing.get("fact_expires_at")),
+                            "reservation_expires_at": self._iso_time(existing.get("expires_at")),
+                            "capacity_snapshot": dict(existing.get("capacity_snapshot_json") or {}),
+                        }
+                        conn.commit()
+                        return result
+                    cursor.execute(
+                        """
+                        SELECT operation_id,canary_status,planned_slots,tested_slots,available_slots,
+                               unique_egress_count,duplicate_egress_count,requested_capacity,
+                               required_slots,slot_budget,slot_capacity,capacity_gate_status,capacity_gate_reason,
+                               capacity_config_hash,credential_generation,canary_p95_latency_ms,
+                               capacity_detail_json,finished_at,
+                               finished_at + (%s * INTERVAL '1 second') AS fact_expires_at,
+                               CURRENT_TIMESTAMP AS observed_at,
+                               finished_at >= CURRENT_TIMESTAMP - (%s * INTERVAL '1 second') AS is_fresh
+                        FROM amazon_us.operation_run
+                        WHERE tenant_id=%s AND operation_type='canary' AND finished_at IS NOT NULL
+                        ORDER BY started_at DESC LIMIT 1 FOR UPDATE
+                        """,
+                        (max_age_seconds, max_age_seconds, self.tenant_id),
+                    )
+                    fact = self._as_dict(cursor.fetchone())
+                    decision = evaluate_capacity_snapshot(
+                        fact,
+                        expected_config_hash=capacity_config_hash,
+                        slot_budget=slot_budget,
+                        requested_actions=requested_capacity,
+                    )
+                    if fact is not None and str(fact.get("credential_generation") or "") != credential_generation:
+                        decision = {**decision, "status": "denied", "reason": "credential_generation_mismatch"}
+                    slot_ids: list[str] = []
+                    if decision["status"] == "allowed" and fact is not None:
+                        sessions = list((fact.get("capacity_detail_json") or {}).get("sessions") or [])
+                        usable = [
+                            str(item.get("session_id")) for item in sessions
+                            if isinstance(item, Mapping) and item.get("status") == "available" and item.get("usable") is True
+                        ]
+                        if (
+                            len(usable) != int(fact.get("unique_egress_count") or -1)
+                            or len(set(usable)) != len(usable)
+                            or any(not re.fullmatch(r"session-\d{2}", value) for value in usable)
+                        ):
+                            decision = {**decision, "status": "denied", "reason": "capacity_fact_inconsistent"}
+                        else:
+                            cursor.execute(
+                                """
+                                SELECT slot_ids_json FROM amazon_us.proxy_capacity_reservation
+                                WHERE capacity_config_hash=%s AND status='active' AND expires_at>CURRENT_TIMESTAMP
+                                FOR UPDATE
+                                """,
+                                (capacity_config_hash,),
+                            )
+                            occupied = {
+                                str(slot_id)
+                                for row in cursor.fetchall()
+                                for slot_id in list((dict(row) if isinstance(row, Mapping) else {"slot_ids_json": row[0]}).get("slot_ids_json") or [])
+                            }
+                            slot_ids = [slot_id for slot_id in usable if slot_id not in occupied][:required_slots]
+                            if len(slot_ids) < required_slots:
+                                decision = {**decision, "status": "denied", "reason": "capacity_reserved_elsewhere"}
+                                slot_ids = []
+                    now = (fact or {}).get("observed_at") or datetime.now(timezone.utc)
+                    fact_finished = (fact or {}).get("finished_at")
+                    fact_expires = (fact or {}).get("fact_expires_at")
+                    reservation_expires = min(fact_expires, now + timedelta(seconds=lease_seconds)) if fact_expires else None
+                    status = "active" if decision["status"] == "allowed" and len(slot_ids) == required_slots else "denied"
+                    reason = "capacity_reserved" if status == "active" else str(decision.get("reason") or "capacity_reservation_denied")
+                    snapshot = self._capacity_snapshot(fact)
+                    result = {
+                        "status": status, "reason": reason, "reservation_id": reservation_id,
+                        "owner_id": owner_id, "canary_operation_id": (fact or {}).get("operation_id"),
+                        "capacity_config_hash": capacity_config_hash,
+                        "credential_generation": credential_generation,
+                        "requested_capacity": requested_capacity, "required_slots": required_slots,
+                        "reserved_slots": len(slot_ids), "slot_ids": slot_ids,
+                        "fact_finished_at": self._iso_time(fact_finished),
+                        "fact_expires_at": self._iso_time(fact_expires),
+                        "reservation_expires_at": self._iso_time(reservation_expires),
+                        "capacity_snapshot": snapshot,
+                    }
+                    cursor.execute(
+                        """
+                        INSERT INTO amazon_us.proxy_capacity_reservation
+                          (reservation_id,tenant_id,owner_id,canary_operation_id,capacity_config_hash,
+                           credential_generation,requested_capacity,required_slots,reserved_slots,slot_ids_json,
+                           status,reason,fact_finished_at,fact_expires_at,expires_at,capacity_snapshot_json)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s::jsonb)
+                        """,
+                        (
+                            reservation_id, self.tenant_id, owner_id, result["canary_operation_id"], capacity_config_hash,
+                            credential_generation, requested_capacity, required_slots, len(slot_ids), json.dumps(slot_ids),
+                            status, reason, fact_finished, fact_expires, reservation_expires,
+                            json.dumps(snapshot, ensure_ascii=False),
+                        ),
+                    )
+                conn.commit()
+                return result
+            except Exception:
+                conn.rollback()
+                raise
+
+    def validate_proxy_capacity_reservation(
+        self,
+        reservation_id: str,
+        owner_id: str,
+        *,
+        max_age_seconds: int,
+        lease_seconds: int,
+    ) -> dict[str, Any]:
+        """Revalidate and renew one reservation without extending past its canary fact expiry."""
+        with self._connect_factory() as conn:
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT r.*,CURRENT_TIMESTAMP AS observed_at,
+                               o.operation_id AS authorizing_canary_operation_id,o.canary_status,o.capacity_gate_status,
+                               o.capacity_gate_reason,o.capacity_config_hash AS fact_config_hash,
+                               o.credential_generation AS fact_credential_generation,o.finished_at AS authorizing_finished_at,
+                               o.finished_at + (%s * INTERVAL '1 second') AS authorizing_fact_expires_at
+                        FROM amazon_us.proxy_capacity_reservation r
+                        LEFT JOIN amazon_us.operation_run o
+                          ON o.operation_id=r.canary_operation_id AND o.tenant_id=r.tenant_id
+                         AND o.operation_type='canary' AND o.finished_at IS NOT NULL
+                        WHERE r.reservation_id=%s AND r.owner_id=%s
+                        FOR UPDATE OF r
+                        """,
+                        (max_age_seconds, reservation_id, owner_id),
+                    )
+                    row = self._as_dict(cursor.fetchone())
+                    reason = None
+                    if row is None:
+                        reason = "capacity_reservation_missing"
+                    elif row.get("status") != "active":
+                        reason = str(row.get("reason") or "capacity_reservation_inactive")
+                    elif row.get("expires_at") is None or row.get("expires_at") <= row.get("observed_at"):
+                        reason = "capacity_reservation_expired"
+                    elif row.get("authorizing_canary_operation_id") != row.get("canary_operation_id"):
+                        reason = "capacity_evidence_missing"
+                    elif row.get("authorizing_fact_expires_at") is None or row.get("authorizing_fact_expires_at") <= row.get("observed_at"):
+                        reason = "capacity_evidence_stale"
+                    elif row.get("canary_status") not in {"succeeded", "partial"} or row.get("capacity_gate_status") != "allowed":
+                        reason = "canary_fact_denied"
+                    elif row.get("fact_config_hash") != row.get("capacity_config_hash"):
+                        reason = "capacity_config_mismatch"
+                    elif row.get("fact_credential_generation") != row.get("credential_generation"):
+                        reason = "credential_generation_mismatch"
+                    if reason:
+                        if row is not None and row.get("status") == "active":
+                            cursor.execute(
+                                "UPDATE amazon_us.proxy_capacity_reservation SET status='expired',reason=%s,updated_at=CURRENT_TIMESTAMP WHERE reservation_id=%s",
+                                (reason, reservation_id),
+                            )
+                        conn.commit()
+                        return {"status": "denied", "reason": reason, "reservation_id": reservation_id}
+                    new_expiry = min(
+                        row["authorizing_fact_expires_at"],
+                        row["observed_at"] + timedelta(seconds=lease_seconds),
+                    )
+                    cursor.execute(
+                        "UPDATE amazon_us.proxy_capacity_reservation SET expires_at=%s,updated_at=CURRENT_TIMESTAMP WHERE reservation_id=%s",
+                        (new_expiry, reservation_id),
+                    )
+                    result = {
+                        "status": "active", "reason": "capacity_reserved",
+                        "reservation_id": reservation_id, "owner_id": owner_id,
+                        "canary_operation_id": row.get("canary_operation_id"),
+                        "capacity_config_hash": row.get("capacity_config_hash"),
+                        "credential_generation": row.get("credential_generation"),
+                        "requested_capacity": int(row.get("requested_capacity") or 0),
+                        "required_slots": int(row.get("required_slots") or 0),
+                        "reserved_slots": int(row.get("reserved_slots") or 0),
+                        "slot_ids": list(row.get("slot_ids_json") or []),
+                        "fact_finished_at": self._iso_time(row.get("fact_finished_at")),
+                        "fact_expires_at": self._iso_time(row.get("fact_expires_at")),
+                        "reservation_expires_at": self._iso_time(new_expiry),
+                        "capacity_snapshot": dict(row.get("capacity_snapshot_json") or {}),
+                    }
+                conn.commit()
+                return result
+            except Exception:
+                conn.rollback()
+                raise
+
+    def release_proxy_capacity(self, reservation_id: str, owner_id: str) -> bool:
+        with self._connect_factory() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE amazon_us.proxy_capacity_reservation
+                    SET status='released',reason='capacity_released',released_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+                    WHERE reservation_id=%s AND owner_id=%s AND status='active'
+                    """,
+                    (reservation_id, owner_id),
+                )
+                changed = cursor.rowcount == 1
+            conn.commit()
+        return changed
 
     def update_task(
         self,
@@ -371,6 +680,30 @@ class PostgresWorkerStorage:
                 conn.rollback()
                 raise
         return request
+
+    def has_pending_refresh_task(self) -> bool:
+        """Read whether this Agent scope has claimable refresh work without taking a lease."""
+        with self._connect_factory() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT EXISTS (
+                      SELECT 1
+                      FROM amazon_us.refresh_request r
+                      JOIN amazon_us.item_state s
+                        ON s.tenant_id=r.tenant_id AND s.marketplace=r.marketplace
+                       AND s.asin=r.asin AND s.subject_type=r.subject_type
+                      WHERE r.tenant_id=%s AND r.marketplace='US' AND r.subject_type=%s
+                        AND r.status='queued'
+                        AND (s.status<>'running' OR s.lease_expires_at <= CURRENT_TIMESTAMP)
+                    ) AS has_pending
+                    """,
+                    (self.tenant_id, self.subject_type),
+                )
+                row = cursor.fetchone()
+        if isinstance(row, Mapping):
+            return bool(row.get("has_pending"))
+        return bool(row[0]) if row else False
 
     def claim_refresh_task(self, worker_id: str, *, lease_seconds: int | None = None) -> dict[str, Any] | None:
         """Atomically claim a queued refresh request and lease its requested ASIN."""

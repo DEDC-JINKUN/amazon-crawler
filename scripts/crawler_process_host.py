@@ -217,12 +217,15 @@ def finalize_interrupted_run(lifecycle: dict, worker_exit_code: int | None, pyth
         python_executable, str(script), "interrupt", "--dsn-env", str(lifecycle.get("dsn_env") or "AMAZON_US_POSTGRES_DSN"),
         "--tenant-id", str(lifecycle["tenant_id"]), "--run-id", str(lifecycle["run_id"]),
         "--command", str(lifecycle["command"]), "--requested-actions", str(lifecycle["requested_actions"]),
+        "--worker-id", str(lifecycle.get("worker_id") or ""),
         "--receipt", str(lifecycle["receipt_path"]),
     ]
     if worker_exit_code is not None:
         command.extend(["--worker-exit-code", str(worker_exit_code)])
     if lifecycle.get("operation_id"):
         command.extend(["--operation-id", str(lifecycle["operation_id"])])
+    if lifecycle.get("capacity_authorization_path"):
+        command.extend(["--capacity-authorization", str(lifecycle["capacity_authorization_path"])])
     completed = subprocess.run(command, cwd=str(Path(__file__).resolve().parents[1]), timeout=30)
     if completed.returncode != 0:
         raise RuntimeError(f"interrupted run finalization failed with exit code {completed.returncode}")

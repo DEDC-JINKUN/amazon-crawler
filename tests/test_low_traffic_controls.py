@@ -689,7 +689,7 @@ def test_postgres_http_and_browser_transport_failures_persist_action_evidence():
         "context": {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
     }
 
-    assert worker.run_postgres_actions(
+    assert worker._run_postgres_actions_impl(
         storage, DoubleFailureAdapter(), config, limit=1, run_id="run-window-loss", worker_id="worker-a"
     ) == 1
 
@@ -821,7 +821,7 @@ def test_postgres_review_only_browser_fallback_commits_confirmed_cookie_context(
     adapter = ReviewOnlyFallbackAdapter()
     config = {**worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None, "context": {}}
 
-    assert worker.run_postgres_actions(storage, adapter, config, limit=1, run_id="run-review", worker_id="worker-a") == 1
+    assert worker._run_postgres_actions_impl(storage, adapter, config, limit=1, run_id="run-review", worker_id="worker-a") == 1
 
     assert adapter.commits == [("run-review", True)]
     assert storage.saved[0]["next_status"] == "succeeded"
@@ -881,7 +881,7 @@ def test_postgres_cookie_bridge_failure_is_audited_without_leaving_review_lease_
     adapter = FailingBridgeAdapter()
     config = {**worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None, "context": {}}
 
-    assert worker.run_postgres_actions(storage, adapter, config, limit=1, run_id="run-review", worker_id="worker-a") == 1
+    assert worker._run_postgres_actions_impl(storage, adapter, config, limit=1, run_id="run-review", worker_id="worker-a") == 1
 
     assert storage.saved[0]["next_status"] == "succeeded"
     assert storage.saved[0]["evidence"]["context_json"]["cookie_bridge"] == {
@@ -996,7 +996,7 @@ def test_product_fallback_reason_and_nullable_browser_traffic_are_persisted_in_e
         "context": {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
     }
 
-    assert worker.run_postgres_actions(storage, adapter, config, limit=1, run_id="run-1", worker_id="worker-a") == 1
+    assert worker._run_postgres_actions_impl(storage, adapter, config, limit=1, run_id="run-1", worker_id="worker-a") == 1
 
     assert adapter.browser_calls == [("context_mismatch", "run-1", "B00RCPDCQU")]
     assert adapter.commit_calls == 1
@@ -1065,7 +1065,7 @@ def test_postgres_postal_only_mismatch_saves_partial_product_without_cookie_brid
         "context": {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
     }
 
-    assert worker.run_postgres_actions(
+    assert worker._run_postgres_actions_impl(
         storage, adapter, config, limit=1, run_id="run-partial", worker_id="worker-a"
     ) == 1
 
@@ -1145,7 +1145,7 @@ def test_postgres_explicit_us_without_postal_saves_partial_after_firefox_failure
         "context": {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
     }
 
-    assert worker.run_postgres_actions(
+    assert worker._run_postgres_actions_impl(
         storage, adapter, config, limit=1, run_id="run-partial-no-postal", worker_id="worker-a"
     ) == 1
     context = storage.saved[0]["evidence"]["context_json"]
@@ -1186,7 +1186,7 @@ def test_postgres_hard_context_errors_remain_failed_when_firefox_is_unavailable(
         "context": {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
     }
 
-    assert worker.run_postgres_actions(
+    assert worker._run_postgres_actions_impl(
         storage, adapter, config, limit=1, run_id="run-hard-context", worker_id="worker-a"
     ) == 1
 
@@ -1273,7 +1273,7 @@ def test_blocking_response_never_starts_firefox(status, body, expected_reason):
     config = {**worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None, "context": {}}
 
     expected_exit = -1 if expected_reason else 1
-    assert worker.run_postgres_actions(storage, Adapter(), config, limit=1, run_id="run-1", worker_id="worker-a") == expected_exit
+    assert worker._run_postgres_actions_impl(storage, Adapter(), config, limit=1, run_id="run-1", worker_id="worker-a") == expected_exit
     assert storage.saved[0]["reason"] == expected_reason
 
 
@@ -1305,11 +1305,11 @@ def test_explicit_different_asin_redirect_and_noncore_description_gap_do_not_sta
     config = {**worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None, "context": {}}
 
     first = OneProductStorage()
-    worker.run_postgres_actions(first, Adapter(redirected), config, limit=1, run_id="run-1", worker_id="worker-a")
+    worker._run_postgres_actions_impl(first, Adapter(redirected), config, limit=1, run_id="run-1", worker_id="worker-a")
     assert first.saved[0]["reason"] == "asin_mismatch"
 
     second = OneProductStorage()
-    worker.run_postgres_actions(second, Adapter(valid_without_description), config, limit=1, run_id="run-2", worker_id="worker-a")
+    worker._run_postgres_actions_impl(second, Adapter(valid_without_description), config, limit=1, run_id="run-2", worker_id="worker-a")
     assert second.saved[0]["next_status"] == "succeeded"
 
 
@@ -1352,7 +1352,7 @@ def test_trade_in_sign_in_prompt_on_product_page_is_not_a_login_wall_and_keeps_a
     storage = Storage()
     config = {**worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None, "context": {}}
 
-    assert worker.run_postgres_actions(
+    assert worker._run_postgres_actions_impl(
         storage, Adapter(), config, limit=1, run_id="run-trade-in", worker_id="worker-a"
     ) == 1
     assert storage.saved[0]["reason"] == "asin_mismatch"
@@ -1418,7 +1418,7 @@ def test_postgres_canonical_parent_with_explicit_child_membership_saves_child_wi
     adapter = Adapter()
     config = {**worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None, "context": {}}
 
-    assert worker.run_postgres_actions(
+    assert worker._run_postgres_actions_impl(
         storage, adapter, config, limit=1, run_id="run-parent-child", worker_id="worker-a"
     ) == 1
 
@@ -1573,7 +1573,7 @@ def test_postgres_invalid_canonical_is_rejected_before_context_browser(canonical
         "context": {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
     }
 
-    assert worker.run_postgres_actions(
+    assert worker._run_postgres_actions_impl(
         storage, adapter, config, limit=1, run_id="run-invalid-canonical", worker_id="worker-a"
     ) == 1
     assert adapter.browser_calls == 0
@@ -1681,7 +1681,7 @@ def test_postgres_explicit_asin_mismatch_precedes_context_fallback():
         "context": {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
     }
 
-    assert worker.run_postgres_actions(
+    assert worker._run_postgres_actions_impl(
         storage, adapter, config, limit=1, run_id="run-identity-first", worker_id="worker-a"
     ) == 1
 

@@ -343,7 +343,7 @@ def test_two_workers_claim_distinct_tasks_from_real_postgres():
     finally:
         with psycopg.connect(DSN) as connection:
             for table in (
-                "operation_run", "collection_run", "state_history", "review_page_state", "refresh_request", "collection_evidence", "media_asset", "content_module",
+                "proxy_capacity_reservation", "operation_run", "collection_run", "state_history", "review_page_state", "refresh_request", "collection_evidence", "media_asset", "content_module",
                 "review_summary", "review_record", "product_snapshot", "item_state", "asin_master",
             ):
                 connection.execute(f"DELETE FROM amazon_us.{table} WHERE tenant_id=%s", (tenant_id,))
@@ -379,6 +379,12 @@ def test_agent_api_refresh_is_consumed_and_returned_from_real_postgres():
         last_transfer_bytes = 789
         last_retry_after_seconds = None
 
+        def configure_capacity_reservation(self, slot_ids, validator):
+            self.capacity_slot_ids = list(slot_ids)
+            self.capacity_validator = validator
+
+        def release_capacity_reservation(self): return None
+
         def fetch(self, url):
             return """
             <html><head><link rel="canonical" href="https://www.amazon.com/dp/B00RCPDCQU"></head><body>
@@ -396,6 +402,7 @@ def test_agent_api_refresh_is_consumed_and_returned_from_real_postgres():
         "proxy_url": "http://proxy.example:10000",
         "proxy_session_ports": [10000],
         "proxy_session_max_asins": 5,
+        "proxy_credential_generation": "test-generation-1",
     })
     capacity_fact = {
         "schema_version": "amazon-us-proxy-canary-v1",
@@ -407,14 +414,17 @@ def test_agent_api_refresh_is_consumed_and_returned_from_real_postgres():
         "duplicate_egress_count": 0,
         "requested_capacity": 5,
         "required_slots": 1,
+        "slot_budget": 5,
         "slot_capacity": 5,
         "capacity_gate_status": "allowed",
         "capacity_gate_reason": "capacity_sufficient",
+        "credential_generation": "test-generation-1",
         "p95_latency_ms": 10.0,
         "config_hash": canary_module.capacity_config_hash(config),
         "sessions": [{
             "session_id": "session-01",
             "status": "available",
+            "usable": True,
             "auth_status": "succeeded",
             "connect_tls_status": "succeeded",
             "error_class": None,
@@ -449,6 +459,8 @@ def test_agent_api_refresh_is_consumed_and_returned_from_real_postgres():
         assert item["job"]["status"] == "completed"
         assert item["result"]["product"]["product"]["title"] == "Agent E2E Product"
         assert item["result"]["latest_evidence"]["transfer_bytes"] == 789
+        assert item["result"]["latest_evidence"]["context_json"]["capacity_authorization"]["canary_operation_id"] == operation_id
+        assert item["result"]["latest_evidence"]["context_json"]["capacity_authorization"]["reservation_id"]
         assert item["result"]["evidence_after_request"] is True
         with psycopg.connect(DSN) as connection:
             audit = connection.execute(
@@ -479,9 +491,105 @@ def test_agent_api_refresh_is_consumed_and_returned_from_real_postgres():
         background.stop()
         with psycopg.connect(DSN) as connection:
             for table in (
-                "collection_api_audit", "operation_run", "collection_run", "state_history", "review_page_state",
+                "collection_api_audit", "proxy_capacity_reservation", "operation_run", "collection_run", "state_history", "review_page_state",
                 "refresh_request", "collection_evidence", "media_asset", "content_module", "review_summary",
                 "review_record", "product_snapshot", "item_state", "asin_master",
             ):
                 connection.execute(f"DELETE FROM amazon_us.{table} WHERE tenant_id=%s", (tenant_id,))
+            connection.commit()
+
+
+@pytest.mark.skipif(not DSN, reason="AMAZON_TEST_POSTGRES_DSN is not configured")
+def test_proxy_capacity_reservations_are_atomic_across_tenants_and_recheck_canary_ttl():
+    import psycopg
+
+    operation = load_script("operation_ledger")
+    canary = load_script("proxy_canary")
+    storage_module = load_storage()
+    generation = "integration-generation-1"
+    config = {
+        "proxy_url": "http://proxy.example:10000",
+        "proxy_username_env": "PROXY_USER",
+        "proxy_password_env": "PROXY_PASS",
+        "proxy_session_ports": [10000],
+        "proxy_session_max_asins": 1,
+        "proxy_canary_url": "https://api.ipify.org?format=json",
+        "proxy_canary_timeout_seconds": 5,
+        "proxy_canary_max_age_seconds": 3600,
+        "proxy_credential_generation": generation,
+    }
+    config_hash = canary.capacity_config_hash(config)
+    tenants = [f"capacity-a-{uuid.uuid4().hex}", f"capacity-b-{uuid.uuid4().hex}"]
+    operation_ids = [f"op-canary-{uuid.uuid4().hex}" for _ in tenants]
+    fact = {
+        "schema_version": "amazon-us-proxy-canary-v1",
+        "canary_status": "succeeded",
+        "planned_slots": 1,
+        "tested_slots": 1,
+        "available_slots": 1,
+        "unique_egress_count": 1,
+        "duplicate_egress_count": 0,
+        "requested_capacity": 1,
+        "required_slots": 1,
+        "slot_budget": 1,
+        "slot_capacity": 1,
+        "capacity_gate_status": "allowed",
+        "capacity_gate_reason": "capacity_sufficient",
+        "credential_generation": generation,
+        "p95_latency_ms": 10.0,
+        "config_hash": config_hash,
+        "sessions": [{
+            "session_id": "session-01", "status": "available", "usable": True,
+            "auth_status": "succeeded", "connect_tls_status": "succeeded",
+            "error_class": None, "http_status": 200, "latency_ms": 10.0,
+        }],
+    }
+    connect = lambda: psycopg.connect(DSN)
+    operation.ensure_schema(connect)
+    for tenant_id, operation_id in zip(tenants, operation_ids):
+        operation.start_operation(operation_id, tenant_id, "canary", "dataimpulse-us", None, connect=connect)
+        operation.finish_operation(operation_id, tenant_id, "succeeded", None, None, capacity_fact=fact, connect=connect)
+    storages = [storage_module.PostgresWorkerStorage(DSN, tenant_id=tenant_id) for tenant_id in tenants]
+    barrier = threading.Barrier(2)
+
+    def reserve(index):
+        barrier.wait()
+        return storages[index].reserve_proxy_capacity(
+            reservation_id=f"reservation-{index}-{uuid.uuid4().hex}",
+            owner_id=f"worker-{index}",
+            capacity_config_hash=config_hash,
+            credential_generation=generation,
+            requested_capacity=1,
+            required_slots=1,
+            slot_budget=1,
+            max_age_seconds=3600,
+            lease_seconds=600,
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(reserve, (0, 1)))
+        assert sorted(item["status"] for item in results) == ["active", "denied"]
+        denied = next(item for item in results if item["status"] == "denied")
+        assert denied["reason"] == "capacity_reserved_elsewhere"
+        active = next(item for item in results if item["status"] == "active")
+        active_index = int(active["owner_id"].split("-")[-1])
+        assert active["slot_ids"] == ["session-01"]
+
+        with psycopg.connect(DSN) as connection:
+            connection.execute(
+                "UPDATE amazon_us.operation_run SET finished_at=CURRENT_TIMESTAMP-INTERVAL '2 hours' "
+                "WHERE operation_id=%s",
+                (active["canary_operation_id"],),
+            )
+            connection.commit()
+        expired = storages[active_index].validate_proxy_capacity_reservation(
+            active["reservation_id"], active["owner_id"], max_age_seconds=3600, lease_seconds=600
+        )
+        assert expired["status"] == "denied"
+        assert expired["reason"] == "capacity_evidence_stale"
+    finally:
+        with psycopg.connect(DSN) as connection:
+            connection.execute("DELETE FROM amazon_us.proxy_capacity_reservation WHERE tenant_id=ANY(%s)", (tenants,))
+            connection.execute("DELETE FROM amazon_us.operation_run WHERE tenant_id=ANY(%s)", (tenants,))
             connection.commit()

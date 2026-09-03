@@ -444,6 +444,68 @@ def test_canary_operation_projection_preserves_unknown_and_safe_capacity_details
     assert "unknown" in app
 
 
+def test_console_operations_include_bound_run_capacity_and_agent_reservation_denials():
+    module = load_module()
+    run_operation = {
+        "operation_id": "op-run-1", "tenant_id": "tenant-a", "operation_type": "run",
+        "status": "running", "preflight_status": "succeeded", "preflight_duration_ms": 10,
+        "failure_stage": None, "error_class": None, "egress_id": "dataimpulse-us",
+        "collection_run_id": "run-1", "http_status": None, "response_bytes": None,
+        "probe_elapsed_ms": None, "started_at": None, "finished_at": None, "duration_ms": None,
+        "canary_status": None, "planned_slots": None, "tested_slots": None, "available_slots": None,
+        "unique_egress_count": None, "duplicate_egress_count": None, "requested_capacity": None,
+        "required_slots": None, "slot_budget": None, "slot_capacity": None,
+        "capacity_gate_status": None, "capacity_gate_reason": None, "canary_p95_latency_ms": None,
+        "capacity_detail_json": None, "credential_generation": None,
+        "authorizing_canary_operation_id": "op-canary-1", "capacity_reservation_id": "reservation-1",
+        "capacity_fact_finished_at": None, "capacity_fact_expires_at": None, "reserved_slots": 1,
+        "capacity_authorization_json": {"canary_operation_id": "op-canary-1", "reservation_id": "reservation-1"},
+    }
+    denied_reservation = {
+        "reservation_id": "reservation-denied", "tenant_id": "tenant-a", "owner_id": "agent-refresh",
+        "canary_operation_id": "op-canary-1", "requested_capacity": 5, "required_slots": 2,
+        "reserved_slots": 0, "status": "denied", "reason": "capacity_reserved_elsewhere",
+        "fact_finished_at": None, "fact_expires_at": None, "expires_at": None,
+        "capacity_snapshot_json": {"unique_egress_count": 1, "slot_capacity": 3},
+        "created_at": None, "released_at": None, "updated_at": None,
+    }
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def execute(self, sql, _params=()):
+            if "to_regclass('amazon_us.operation_run')" in sql:
+                self.rows = [{"relation": "amazon_us.operation_run"}]
+            elif "FROM amazon_us.operation_run" in sql:
+                self.rows = [run_operation]
+            elif "to_regclass('amazon_us.proxy_capacity_reservation')" in sql:
+                self.rows = [{"relation": "amazon_us.proxy_capacity_reservation"}]
+            elif "FROM amazon_us.proxy_capacity_reservation" in sql:
+                self.rows = [denied_reservation]
+            else:
+                raise AssertionError(sql)
+        def fetchone(self): return self.rows[0]
+        def fetchall(self): return self.rows
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def cursor(self): return Cursor()
+
+    repository = module.PostgresConsoleRepository("postgresql://fixture", "tenant-a")
+    repository._connect = lambda: Connection()
+    items = repository.list_operations()
+
+    assert {item["operation_type"] for item in items} == {"run", "capacity_reservation"}
+    run = next(item for item in items if item["operation_type"] == "run")
+    denial = next(item for item in items if item["operation_type"] == "capacity_reservation")
+    assert run["authorizing_canary_operation_id"] == "op-canary-1"
+    assert run["capacity_reservation_id"] == "reservation-1"
+    assert denial["status"] == "denied"
+    assert denial["capacity_gate_reason"] == "capacity_reserved_elsewhere"
+    assert denial["available_slots"] is None
+
+
 def test_console_tooltips_explain_all_operational_terms_accessibly():
     html = (ROOT / "console" / "index.html").read_text(encoding="utf-8")
     for term in (

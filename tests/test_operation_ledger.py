@@ -55,6 +55,9 @@ def test_preflight_failure_remains_visible_as_terminal_operation():
     assert "preflight_status" in sql
     assert "failure_stage" in sql
     assert "error_class" in sql
+    assert "operation_canary_counts_v2_check" in sql
+    assert "operation_canary_state_v2_check" in sql
+    assert "operation_capacity_binding_v2_check" in sql
     assert connection.commits == 4
 
 
@@ -94,9 +97,11 @@ def test_canary_capacity_fact_is_persisted_without_egress_identity_or_unknown_ze
         "duplicate_egress_count": None,
         "requested_capacity": 3,
         "required_slots": 1,
+        "slot_budget": 3,
         "slot_capacity": None,
         "capacity_gate_status": "denied",
         "capacity_gate_reason": "credentials_missing",
+        "credential_generation": "test-generation-1",
         "p95_latency_ms": None,
         "config_hash": "a" * 64,
         "sessions": [],
@@ -119,3 +124,70 @@ def test_canary_capacity_fact_is_persisted_without_egress_identity_or_unknown_ze
     assert "203.0.113" not in rendered
     assert "proxy.example" not in rendered
     assert "secret" not in rendered
+
+
+def test_run_operation_binds_one_specific_capacity_reservation_snapshot():
+    module = load_module()
+    connection = Connection()
+    authorization = {
+        "status": "active",
+        "reason": "capacity_reserved",
+        "reservation_id": "reservation-1",
+        "owner_id": "worker-a",
+        "canary_operation_id": "op-canary-1",
+        "capacity_config_hash": "a" * 64,
+        "credential_generation": "test-generation-1",
+        "requested_capacity": 3,
+        "required_slots": 1,
+        "reserved_slots": 1,
+        "slot_ids": ["session-02"],
+        "fact_finished_at": "2026-09-03T01:00:00+00:00",
+        "fact_expires_at": "2026-09-03T02:00:00+00:00",
+        "reservation_expires_at": "2026-09-03T01:10:00+00:00",
+        "capacity_snapshot": {"unique_egress_count": 3, "slot_capacity": 9},
+    }
+
+    module.bind_capacity_authorization(
+        "op-run-1", "tenant-a", authorization, connect=lambda: connection
+    )
+
+    sql, params = connection.cursor_instance.executed[0]
+    assert "authorizing_canary_operation_id" in sql
+    assert "capacity_reservation_id" in sql
+    assert "capacity_authorization_json" in sql
+    assert "op-canary-1" in params and "reservation-1" in params
+    rendered = repr(params)
+    assert "proxy.example" not in rendered and "203.0.113" not in rendered
+
+
+def test_operation_ledger_rejects_unknown_denied_fact_with_success_counts():
+    module = load_module()
+    fact = {
+        "schema_version": "amazon-us-proxy-canary-v1",
+        "canary_status": "unknown",
+        "planned_slots": 1,
+        "tested_slots": 1,
+        "available_slots": 1,
+        "unique_egress_count": 1,
+        "duplicate_egress_count": 0,
+        "requested_capacity": 1,
+        "required_slots": 1,
+        "slot_budget": 1,
+        "slot_capacity": 1,
+        "capacity_gate_status": "denied",
+        "capacity_gate_reason": "credentials_missing",
+        "credential_generation": "test-generation-1",
+        "p95_latency_ms": 10.0,
+        "config_hash": "a" * 64,
+        "sessions": [{
+            "session_id": "session-01", "status": "available", "usable": True,
+            "auth_status": "succeeded", "connect_tls_status": "succeeded",
+            "error_class": None, "http_status": 200, "latency_ms": 10.0,
+        }],
+    }
+
+    with pytest.raises(ValueError, match="unknown capacity fact"):
+        module.finish_operation(
+            "op-canary-1", "tenant-a", "failed", "capacity_gate", "credentials_missing",
+            capacity_fact=fact, connect=lambda: Connection(),
+        )

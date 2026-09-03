@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import socket
 import ssl
 import urllib.error
@@ -30,6 +31,7 @@ def config(**overrides):
         "proxy_session_max_asins": 3,
         "proxy_canary_url": "https://api.ipify.org?format=json",
         "proxy_canary_timeout_seconds": 5,
+        "proxy_credential_generation": "test-generation-1",
     }
     value.update(overrides)
     return value
@@ -39,6 +41,7 @@ def test_all_sessions_succeed_and_public_result_contains_only_redacted_capacity(
     module = load_module()
     monkeypatch.setenv("PROXY_USER", "private-user")
     monkeypatch.setenv("PROXY_PASS", "private-pass")
+    monkeypatch.setenv("AMAZON_PROXY_CREDENTIAL_GENERATION", "test-generation-1")
     responses = iter(
         [
             {"ok": True, "egress_ip": "203.0.113.10", "http_status": 200, "latency_ms": 30.0},
@@ -59,15 +62,17 @@ def test_all_sessions_succeed_and_public_result_contains_only_redacted_capacity(
         "duplicate_egress_count": 0,
         "requested_capacity": 9,
         "required_slots": 3,
+        "slot_budget": 3,
         "slot_capacity": 9,
         "capacity_gate_status": "allowed",
         "capacity_gate_reason": "capacity_sufficient",
+        "credential_generation": "test-generation-1",
         "p95_latency_ms": 30.0,
         "config_hash": module.capacity_config_hash(config()),
         "sessions": [
-            {"session_id": "session-01", "status": "available", "auth_status": "succeeded", "connect_tls_status": "succeeded", "error_class": None, "http_status": 200, "latency_ms": 30.0},
-            {"session_id": "session-02", "status": "available", "auth_status": "succeeded", "connect_tls_status": "succeeded", "error_class": None, "http_status": 200, "latency_ms": 10.0},
-            {"session_id": "session-03", "status": "available", "auth_status": "succeeded", "connect_tls_status": "succeeded", "error_class": None, "http_status": 200, "latency_ms": 20.0},
+            {"session_id": "session-01", "status": "available", "usable": True, "auth_status": "succeeded", "connect_tls_status": "succeeded", "error_class": None, "http_status": 200, "latency_ms": 30.0},
+            {"session_id": "session-02", "status": "available", "usable": True, "auth_status": "succeeded", "connect_tls_status": "succeeded", "error_class": None, "http_status": 200, "latency_ms": 10.0},
+            {"session_id": "session-03", "status": "available", "usable": True, "auth_status": "succeeded", "connect_tls_status": "succeeded", "error_class": None, "http_status": 200, "latency_ms": 20.0},
         ],
     }
     rendered = repr(result)
@@ -98,6 +103,7 @@ def test_partial_port_failure_can_allow_only_the_capacity_proven_by_unique_egres
     assert result["sessions"][1] == {
         "session_id": "session-02",
         "status": "unavailable",
+        "usable": False,
         "auth_status": "unknown",
         "connect_tls_status": "failed",
         "error_class": "connect_failed",
@@ -151,7 +157,23 @@ def test_duplicate_egress_is_compared_only_in_memory_and_reduces_usable_capacity
     assert result["canary_status"] == "partial"
     assert result["capacity_gate_status"] == "denied"
     assert result["capacity_gate_reason"] == "duplicate_egress_capacity_insufficient"
+    assert [item["usable"] for item in result["sessions"]] == [True, False, True]
     assert "203.0.113" not in repr(result)
+
+
+def test_credential_generation_changes_hash_without_hashing_secret_values(monkeypatch):
+    module = load_module()
+    monkeypatch.setenv("PROXY_USER", "private-user-v1")
+    monkeypatch.setenv("PROXY_PASS", "private-pass-v1")
+    first = module.capacity_config_hash(config(proxy_credential_generation="vault-generation-1"))
+    monkeypatch.setenv("PROXY_USER", "private-user-v2")
+    monkeypatch.setenv("PROXY_PASS", "private-pass-v2")
+    second = module.capacity_config_hash(config(proxy_credential_generation="vault-generation-2"))
+
+    assert first != second
+    assert re.fullmatch(r"[0-9a-f]{64}", first)
+    with pytest.raises(ValueError, match="credential generation"):
+        module.capacity_config_hash(config(proxy_credential_generation=""))
 
 
 def test_all_sessions_failed_including_timeout_reports_known_zero_without_success(monkeypatch):
@@ -188,12 +210,36 @@ def test_canary_rejects_amazon_targets_before_any_probe(monkeypatch):
         nonlocal called
         called = True
 
-    with pytest.raises(ValueError, match="must not target Amazon"):
+    with pytest.raises(ValueError, match="approved non-Amazon allowlist"):
         module.run_proxy_canary(
             config(proxy_canary_url="https://www.amazon.com/robots.txt"),
             requested_actions=3,
             probe_slot=probe,
         )
+    assert called is False
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "https://www.amazon.co.uk/robots.txt",
+        "https://example.com/ip",
+        "http://api.ipify.org?format=json",
+        "https://api.ipify.org.evil.example/ip",
+    ],
+)
+def test_canary_accepts_only_the_exact_non_amazon_https_allowlist(target, monkeypatch):
+    module = load_module()
+    monkeypatch.setenv("PROXY_USER", "private-user")
+    monkeypatch.setenv("PROXY_PASS", "private-pass")
+    called = False
+
+    def probe(**_kwargs):
+        nonlocal called
+        called = True
+
+    with pytest.raises(ValueError, match="approved non-Amazon allowlist"):
+        module.run_proxy_canary(config(proxy_canary_url=target), requested_actions=3, probe_slot=probe)
     assert called is False
 
 
@@ -245,6 +291,42 @@ def test_probe_slot_proves_authenticated_https_tunnel_and_keeps_ip_internal():
         "error_class": None,
     }
     assert any(handler.__class__.__name__ == "ProxyTunnelAuthHTTPSHandler" for handler in captured)
+
+
+def test_probe_slot_rejects_a_redirected_final_amazon_url_without_exposing_ip():
+    module = load_module()
+
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def read(self, _limit): return b'{"ip":"203.0.113.99"}'
+        def getcode(self): return 200
+        def geturl(self): return "https://www.amazon.com/redirected"
+
+    class Opener:
+        def open(self, _request, timeout):
+            assert timeout == 5
+            return Response()
+
+    result = module.probe_proxy_slot(
+        proxy_url="http://proxy.example:10000",
+        target_url="https://api.ipify.org?format=json",
+        timeout_seconds=5,
+        username="private-user",
+        password="private-pass",
+        opener_factory=lambda *_handlers: Opener(),
+        clock=iter([1.0, 1.010]).__next__,
+    )
+
+    assert result == {
+        "ok": False,
+        "http_status": 200,
+        "latency_ms": 10.0,
+        "auth_status": "succeeded",
+        "connect_tls_status": "succeeded",
+        "error_class": "redirect_not_allowed",
+    }
+    assert "203.0.113" not in repr(result)
 
 
 @pytest.mark.parametrize(
@@ -330,6 +412,7 @@ def test_execute_canary_records_the_same_sanitized_fact_in_operation_ledger(tmp_
     )
     monkeypatch.setenv("PROXY_USER", "private-user")
     monkeypatch.setenv("PROXY_PASS", "private-pass")
+    monkeypatch.setenv("AMAZON_PROXY_CREDENTIAL_GENERATION", "test-generation-1")
 
     class Cursor:
         rowcount = 1

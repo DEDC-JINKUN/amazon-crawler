@@ -273,10 +273,11 @@ function Update-LegacyIdentityEvidence {
     if ($LASTEXITCODE -ne 0) { throw "Legacy identity evidence backfill failed with exit code $LASTEXITCODE" }
 }
 
-function Start-RunLedger([string]$RunId, [string]$Mode, [int]$ActionLimit, [string]$WorkerId) {
+function Start-RunLedger([string]$RunId, [string]$Mode, [int]$ActionLimit, [string]$WorkerId, [string]$OperationId) {
     Invoke-RunLedger @(
         'start','--tenant-id',$TenantId,'--run-id',$RunId,'--command',$Mode,
-        '--requested-actions',[string]$ActionLimit,'--worker-id',$WorkerId,'--controller-pid',[string]$PID
+        '--requested-actions',[string]$ActionLimit,'--worker-id',$WorkerId,'--controller-pid',[string]$PID,
+        '--operation-id',$OperationId
     )
 }
 
@@ -542,20 +543,35 @@ function Start-ProxyCanary([string]$ConfigValue, [int]$RequestedActions) {
     return $canaryExit
 }
 
-function Invoke-CapacityGate([string]$ResolvedConfig, [int]$RequestedActions) {
+function Invoke-CapacityGate([string]$ResolvedConfig, [int]$RequestedActions, [string]$OwnerId, [string]$ReservationId) {
     $output = & $python $proxyCapacityGateScript --config $ResolvedConfig --tenant-id $TenantId `
-        --requested-actions $RequestedActions
+        --requested-actions $RequestedActions --reserve --reservation-owner $OwnerId `
+        --reservation-id $ReservationId --lease-seconds 600
     $gateExit = $LASTEXITCODE
     try { $result = ($output | Out-String) | ConvertFrom-Json }
     catch { throw 'Capacity gate returned invalid output.' }
-    if ($gateExit -ne 0 -or $result.status -ne 'allowed') {
+    if ($gateExit -ne 0 -or $result.status -ne 'active') {
         $reason = if ($result.reason) { [string]$result.reason } else { 'capacity_gate_error' }
         $script:PendingCapacityGateReason = $reason
         throw "Capacity gate denied: $reason"
     }
-    Write-Host ("Capacity gate: allowed reason={0} required_slots={1} available_unique_slots={2} capacity={3}/{4}" -f `
-        $result.reason,$result.required_slots,$result.available_unique_slots,$result.slot_capacity,$result.requested_capacity)
+    Write-Host ("Capacity gate: reserved reason={0} reservation={1} canary={2} slots={3} capacity={4}" -f `
+        $result.reason,$result.reservation_id,$result.canary_operation_id,$result.reserved_slots,$result.requested_capacity)
     return $result
+}
+
+function Bind-OperationCapacity([string]$OperationId, [string]$AuthorizationPath) {
+    Invoke-OperationLedger @(
+        'capacity','--operation-id',$OperationId,'--tenant-id',$TenantId,
+        '--capacity-authorization',$AuthorizationPath
+    )
+}
+
+function Release-CapacityReservation([string]$ResolvedConfig, [int]$RequestedActions, [string]$OwnerId, [string]$ReservationId) {
+    & $python $proxyCapacityGateScript --config $ResolvedConfig --tenant-id $TenantId `
+        --requested-actions $RequestedActions --release-reservation-id $ReservationId `
+        --reservation-owner $OwnerId *> $null
+    if ($LASTEXITCODE -ne 0) { throw 'Capacity reservation release failed.' }
 }
 
 function Initialize-CrawlOperation([string]$Mode) {
@@ -605,6 +621,7 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
     $gatePath = Join-Path $runDir 'worker.start.gate'
     $cancelPath = Join-Path $runDir 'worker.cancel'
     $heartbeatPath = Join-Path $runDir 'controller.heartbeat'
+    $capacityAuthorizationPath = Join-Path $runDir 'capacity.authorization.json'
     $startedAt = [DateTime]::UtcNow
     $controllerStartTime = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o')
     $runLedgerStarted = $false
@@ -612,6 +629,7 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
     $operationStarted = $script:PendingOperationStarted
     $operationFinished = $false
     $operationStage = 'credentials'
+    $capacityAuthorization = $null
     Reserve-Worker $WorkerLock $runId $Mode $ActionLimit
     $process = $null
     try {
@@ -640,9 +658,12 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
         Mark-OperationPreflight $operationId $preflightStatus $preflightDurationMs $preflightErrorClass
         if ($preflightExit -ne 0) { throw "Preflight failed with exit code $preflightExit" }
         $operationStage = 'capacity_gate'
-        $null = Invoke-CapacityGate $ResolvedConfig $ActionLimit
+        $reservationId = "capacity-${runId}"
+        $capacityAuthorization = Invoke-CapacityGate $ResolvedConfig $ActionLimit $workerId $reservationId
+        Write-JsonAtomic $capacityAuthorization $capacityAuthorizationPath
+        Bind-OperationCapacity $operationId $capacityAuthorizationPath
         $operationStage = 'collection_ledger'
-        Start-RunLedger $runId $Mode $ActionLimit $workerId
+        Start-RunLedger $runId $Mode $ActionLimit $workerId $operationId
         $runLedgerStarted = $true
         $operationStage = 'worker'
         $stageOnlyArgument = if ($Mode -eq 'reviews') { '--reviews-only' } else { '--product-only' }
@@ -652,7 +673,8 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             '--tenant-id', $TenantId, '--subject-type', 'own',
             '--worker-id', $workerId, '--lease-seconds', '600',
             '--manifest', $ResolvedManifest, '--output-dir', $ResolvedOutput,
-            '--run-id', $runId, '--live', '--once', '--limit', [string]$ActionLimit, $stageOnlyArgument
+            '--run-id', $runId, '--capacity-reservation-id', $capacityAuthorization.reservation_id,
+            '--live', '--once', '--limit', [string]$ActionLimit, $stageOnlyArgument
         )
         Write-JsonAtomic ([ordered]@{
             python = $python
@@ -670,8 +692,11 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
                 run_id = $runId
                 command = $Mode
                 requested_actions = $ActionLimit
+                worker_id = $workerId
                 receipt_path = $receiptPath
                 operation_id = $operationId
+                capacity_authorization = $capacityAuthorization
+                capacity_authorization_path = $capacityAuthorizationPath
             }
         }) $requestPath
         [IO.File]::WriteAllText($heartbeatPath, [DateTime]::UtcNow.ToString('o'))
@@ -687,6 +712,7 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             stdout = $stdout
             stderr = $stderr
             receipt = $receiptPath
+            capacity_authorization = $capacityAuthorization
         }) $WorkerLock
         New-Item -ItemType File -Path $gatePath | Out-Null
         Write-Host "Worker started: pid=$($process.Id) run_id=$runId"
@@ -754,6 +780,7 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             inferred_actions = $quality.inferred_actions
             traffic = $quality.traffic
             proxy_session_pool = if ($null -ne $finalRun) { $finalRun.proxy_session_pool } else { $null }
+            capacity_authorization = $capacityAuthorization
             quality_gate_ok = $qualityGateOk
             completion_gate_ok = $completionGateOk
             run_verification_reason = $runVerificationReason
@@ -817,6 +844,7 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             inferred_actions = 0
             traffic = $null
             proxy_session_pool = $null
+            capacity_authorization = $capacityAuthorization
             quality_gate_ok = $false
             run_verification_reason = $failureReason
             termination_reason = $failureReason
@@ -850,6 +878,12 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
         throw
     }
     finally {
+        if ($null -ne $capacityAuthorization -and $capacityAuthorization.reservation_id) {
+            try {
+                Release-CapacityReservation $ResolvedConfig $ActionLimit $workerId ([string]$capacityAuthorization.reservation_id)
+            }
+            catch { Write-Host 'WARNING: capacity reservation release will rely on TTL expiry.' }
+        }
         $lock = Read-Lock $WorkerLock
         $processStillRunning = $null -ne $process -and -not $process.HasExited
         if (-not $processStillRunning -and $null -ne $lock -and $lock.run_id -eq $runId) {

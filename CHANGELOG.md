@@ -2,6 +2,8 @@
 
 ## 2026-09-03
 
+- Independent review repairs: prohibit SQLite live and Amazon health probes, enforce exact non-Amazon allowlist/no redirects, validate fact invariants, add credential generations, and atomically reserve redacted proxy slots across consumers with per-claim/per-slot TTL checks.
+- Bind authorizing canary/reservation/fact expiry/capacity snapshot through control operations, collection runs, receipts, evidence, Agent denials, and Console; one-shot verification now uses the project venv.
 - Added a DPAPI-compatible multi-session non-Amazon proxy canary, PostgreSQL capacity facts, and Console/API projection without persisting credentials, proxy endpoints, or egress IPs.
 - Added a fresh/config-matched/size-scoped capacity gate before controller collection-run creation and before every PostgreSQL worker or Agent task claim.
 - Routed legacy Windows one-shot and scheduled entries through the controller, changed production preflight to a non-Amazon endpoint, and preserved unknown egress bytes as null.

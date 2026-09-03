@@ -20,13 +20,15 @@ def test_windows_entrypoints_reference_existing_python_scripts():
     entrypoints = ("run_once_windows.bat", "run_scheduled_windows.bat", "verify_windows.bat")
     for name in entrypoints:
         text = (ROOT / name).read_text(encoding="utf-8")
-        scripts = re.findall(r"python\s+scripts\\([^\s]+\.py)", text, flags=re.IGNORECASE)
+        scripts = re.findall(r"(?:python|\.venv\\Scripts\\python\.exe)\s+scripts\\([^\s]+\.py)", text, flags=re.IGNORECASE)
         assert scripts, name
         for script in scripts:
             assert (ROOT / "scripts" / script).exists(), f"{name} references missing scripts/{script}"
     for name in ("run_once_windows.bat", "run_scheduled_windows.bat"):
         text = (ROOT / name).read_text(encoding="utf-8")
         assert "crawler.ps1" in text
+        if name == "run_once_windows.bat":
+            assert ".venv\\Scripts\\python.exe scripts\\verify_postgres.py" in text
         assert "AMAZON_US_POSTGRES_DSN" in text
         assert "state\\amazon_us.sqlite3" not in text
 
@@ -71,6 +73,7 @@ def test_secure_dpapi_launcher_works_under_windows_powershell(request):
     marker = tmp_path / "child.ok"
     child.write_text(
         f"if ($env:AMAZON_PROXY_USER -ne 'fake-user') {{ exit 9 }}; "
+        f"if ([string]::IsNullOrWhiteSpace($env:AMAZON_PROXY_CREDENTIAL_GENERATION)) {{ exit 10 }}; "
         f"[IO.File]::WriteAllText('{str(marker).replace(chr(39), chr(39) * 2)}','child-ok')",
         encoding="utf-8",
     )
@@ -128,6 +131,7 @@ def test_dpapi_envelope_verifies_and_launches_for_calling_windows_user(request):
     assert envelope["schema"] == "amazon-us-dpapi-envelope-v1"
     assert envelope["scope"] == "CurrentUser"
     assert re.fullmatch(r"S-\d(?:-\d+)+", envelope["owner_sid"])
+    assert re.fullmatch(r"[a-f0-9]{32}", envelope["credential_generation"])
     assert envelope["ciphertext"]
     combined = configured.stdout + configured.stderr
     for secret in (b"fake-login", b"fake-proxy-pass", b"fake-pg-pass", b"fake-api-key"):
@@ -139,6 +143,7 @@ def test_dpapi_envelope_verifies_and_launches_for_calling_windows_user(request):
         if ($env:AMAZON_PROXY_PASS -ne 'fake-proxy-pass') {{ exit 12 }}
         if ($env:AMAZON_US_POSTGRES_DSN -notlike '*password=fake-pg-pass') {{ exit 13 }}
         if ([string]::IsNullOrWhiteSpace($env:AMAZON_COLLECTION_API_KEY)) {{ exit 14 }}
+        if ($env:AMAZON_PROXY_CREDENTIAL_GENERATION -ne '{envelope["credential_generation"]}') {{ exit 15 }}
         [IO.File]::WriteAllText('{str(marker).replace("'", "''")}','ok')
     """), encoding="utf-8")
     launch_wrapper = tmp_path / "launch.ps1"
@@ -163,6 +168,16 @@ def test_dpapi_envelope_verifies_and_launches_for_calling_windows_user(request):
     )
     assert verified.returncode == 0, verified.stderr.decode("utf-8", errors="replace")
     assert b"verified for the current Windows user" in verified.stdout
+
+    rotated = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", configure,
+         "-Mode", "Rotate", "-SecretPath", vault],
+        env=configure_env,
+        capture_output=True,
+    )
+    assert rotated.returncode == 0, rotated.stderr.decode("utf-8", errors="replace")
+    rotated_envelope = json.loads(vault.read_text(encoding="ascii"))
+    assert rotated_envelope["credential_generation"] != envelope["credential_generation"]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows DPAPI runtime test")
@@ -255,6 +270,8 @@ def test_agent_service_runtime_fingerprint_covers_worker_pool_api_storage_and_co
     ):
         assert dependency in control
     assert control.count("Get-AgentRuntimeFingerprint") >= 3
+    assert "Get-CredentialGeneration" in control
+    assert "credential_generation" in control
 
 
 def test_agent_service_start_replaces_only_a_verified_ready_stale_runtime():

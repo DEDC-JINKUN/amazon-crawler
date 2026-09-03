@@ -27,9 +27,36 @@ CREATE TABLE IF NOT EXISTS amazon_us.collection_run (
     started_at timestamptz NOT NULL DEFAULT now(),
     finished_at timestamptz,
     receipt_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+    control_operation_id text,
+    authorizing_canary_operation_id text,
+    capacity_reservation_id text,
+    capacity_fact_finished_at timestamptz,
+    capacity_fact_expires_at timestamptz,
+    reserved_slots integer,
+    capacity_authorization_json jsonb,
     updated_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, run_id)
 );
+ALTER TABLE amazon_us.collection_run
+    ADD COLUMN IF NOT EXISTS control_operation_id text,
+    ADD COLUMN IF NOT EXISTS authorizing_canary_operation_id text,
+    ADD COLUMN IF NOT EXISTS capacity_reservation_id text,
+    ADD COLUMN IF NOT EXISTS capacity_fact_finished_at timestamptz,
+    ADD COLUMN IF NOT EXISTS capacity_fact_expires_at timestamptz,
+    ADD COLUMN IF NOT EXISTS reserved_slots integer,
+    ADD COLUMN IF NOT EXISTS capacity_authorization_json jsonb;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='collection_run_capacity_binding_v2_check' AND conrelid='amazon_us.collection_run'::regclass) THEN
+    ALTER TABLE amazon_us.collection_run ADD CONSTRAINT collection_run_capacity_binding_v2_check CHECK (
+      capacity_reservation_id IS NULL OR (
+        control_operation_id IS NOT NULL AND authorizing_canary_operation_id IS NOT NULL
+        AND capacity_fact_finished_at IS NOT NULL AND capacity_fact_expires_at IS NOT NULL
+        AND reserved_slots IS NOT NULL AND reserved_slots > 0 AND capacity_authorization_json IS NOT NULL
+      )
+    ) NOT VALID;
+  END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_collection_run_tenant_started
     ON amazon_us.collection_run (tenant_id, started_at DESC);
 DO $$
@@ -65,19 +92,30 @@ def start_run(
     requested_actions: int,
     worker_id: str,
     controller_pid: int,
+    operation_id: str,
 ) -> None:
-    if not tenant_id or not run_id or requested_actions < 1:
-        raise ValueError("tenant_id, run_id and positive requested_actions are required")
+    if not tenant_id or not run_id or not operation_id or requested_actions < 1:
+        raise ValueError("tenant_id, run_id, operation_id and positive requested_actions are required")
     with connect() as connection, connection.cursor() as cursor:
         cursor.execute(
             """
             INSERT INTO amazon_us.collection_run
-              (tenant_id,run_id,command,requested_actions,status,worker_id,controller_pid,started_at,updated_at)
-            VALUES (%s,%s,%s,%s,'running',%s,%s,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+              (tenant_id,run_id,command,requested_actions,status,worker_id,controller_pid,
+               control_operation_id,authorizing_canary_operation_id,capacity_reservation_id,
+               capacity_fact_finished_at,capacity_fact_expires_at,reserved_slots,capacity_authorization_json,
+               started_at,updated_at)
+            SELECT %s,%s,%s,%s,'running',%s,%s,o.operation_id,o.authorizing_canary_operation_id,
+                   o.capacity_reservation_id,o.capacity_fact_finished_at,o.capacity_fact_expires_at,
+                   o.reserved_slots,o.capacity_authorization_json,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP
+            FROM amazon_us.operation_run o
+            WHERE o.operation_id=%s AND o.tenant_id=%s AND o.status='running'
+              AND o.capacity_reservation_id IS NOT NULL AND o.authorizing_canary_operation_id IS NOT NULL
             ON CONFLICT (tenant_id,run_id) DO NOTHING
             """,
-            (tenant_id, run_id, command, requested_actions, worker_id, controller_pid),
+            (tenant_id, run_id, command, requested_actions, worker_id, controller_pid, operation_id, tenant_id),
         )
+        if cursor.rowcount != 1:
+            raise RuntimeError("run start requires a bound active capacity authorization")
         connection.commit()
 
 
@@ -150,6 +188,7 @@ def finish_interrupted_from_host(lifecycle: dict[str, Any], worker_exit_code: in
         "exit_code": 130,
         "worker_exit_code": worker_exit_code,
         "termination_reason": "controller_exited",
+        "capacity_authorization": lifecycle.get("capacity_authorization"),
         "finished_at": now,
     }
     connect = lambda: _default_connect(dsn)
@@ -163,6 +202,14 @@ def finish_interrupted_from_host(lifecycle: dict[str, Any], worker_exit_code: in
         termination_reason="controller_exited",
         receipt=receipt,
     )
+    capacity_authorization = lifecycle.get("capacity_authorization") or {}
+    reservation_id = capacity_authorization.get("reservation_id") if isinstance(capacity_authorization, dict) else None
+    worker_id = lifecycle.get("worker_id")
+    if reservation_id and worker_id:
+        from postgres_worker_storage import PostgresWorkerStorage
+        PostgresWorkerStorage(dsn, tenant_id=str(lifecycle["tenant_id"])).release_proxy_capacity(
+            str(reservation_id), str(worker_id)
+        )
     operation_id = lifecycle.get("operation_id")
     if operation_id:
         from operation_ledger import finish_operation
@@ -209,6 +256,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--worker-exit-code", type=int)
     parser.add_argument("--termination-reason")
     parser.add_argument("--receipt", type=Path)
+    parser.add_argument("--capacity-authorization", type=Path)
     args = parser.parse_args(argv)
     try:
         dsn = os.environ.get(args.dsn_env, "").strip()
@@ -226,6 +274,7 @@ def main(argv: list[str] | None = None) -> int:
                 requested_actions=int(args.requested_actions or 0),
                 worker_id=str(args.worker_id or ""),
                 controller_pid=int(args.controller_pid or 0),
+                operation_id=str(args.operation_id or ""),
             )
         elif args.event == "finish":
             receipt = _load_receipt(args.receipt) if args.receipt is not None else _load_receipt_stdin()
@@ -249,8 +298,13 @@ def main(argv: list[str] | None = None) -> int:
                     "run_id": str(args.run_id or ""),
                     "command": str(args.command or ""),
                     "requested_actions": int(args.requested_actions or 0),
+                    "worker_id": str(args.worker_id or ""),
                     "receipt_path": str(args.receipt),
                     "operation_id": args.operation_id,
+                    "capacity_authorization": (
+                        _load_receipt(args.capacity_authorization)
+                        if args.capacity_authorization is not None else None
+                    ),
                 },
                 args.worker_exit_code,
             )

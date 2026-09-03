@@ -16,11 +16,21 @@ function ConvertTo-QuotedWindowsArgument([string]$Value) {
     return '"' + [regex]::Replace($Value, '(\\*)"', '$1$1\"').Replace('\\"', '\\\"') + '"'
 }
 
+function Get-CipherGeneration([byte[]]$Cipher) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $hex = [BitConverter]::ToString($sha.ComputeHash($Cipher)).Replace('-', '').ToLowerInvariant()
+        return 'legacy-' + $hex.Substring(0, 32)
+    }
+    finally { $sha.Dispose() }
+}
+
 function Get-Secrets([string]$Path) {
     $script:LauncherStage = 'get-secrets-path'
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw 'DPAPI secret vault was not found.' }
     $script:LauncherStage = 'get-secrets-read'
     $encoded = ([IO.File]::ReadAllText((Resolve-Path -LiteralPath $Path))).Trim()
+    $generation = $null
     if ($encoded.StartsWith('{')) {
         $script:LauncherStage = 'vault-envelope'
         $envelope = $encoded | ConvertFrom-Json
@@ -31,10 +41,15 @@ function Get-Secrets([string]$Path) {
             $script:LauncherStage = 'vault-owner-mismatch'
             throw 'DPAPI vault owner does not match the current Windows account.'
         }
+        if ($envelope.PSObject.Properties.Name -contains 'credential_generation') {
+            $generation = [string]$envelope.credential_generation
+        }
         $encoded = [string]$envelope.ciphertext
     }
     $script:LauncherStage = 'get-secrets-ciphertext'
     $cipher = [Convert]::FromBase64String($encoded)
+    if ([string]::IsNullOrWhiteSpace($generation)) { $generation = Get-CipherGeneration $cipher }
+    if ($generation -notmatch '^[A-Za-z0-9_.:-]{8,100}$') { throw 'DPAPI vault credential generation is invalid.' }
     $script:LauncherStage = 'get-secrets-unprotect'
     [void][System.Reflection.Assembly]::LoadWithPartialName('System.Security')
     $plain = [System.Security.Cryptography.ProtectedData]::Unprotect(
@@ -46,7 +61,7 @@ function Get-Secrets([string]$Path) {
         if ($schema -ne 'amazon-us-secrets-v1') { throw 'DPAPI secret vault schema is not supported.' }
         $values = if ($payload.PSObject.Properties.Name -contains 'values') { $payload.values } else { $payload }
         $script:LauncherStage = 'get-secrets-return'
-        return [pscustomobject]@{ Values = $values; Cipher = $cipher; Plain = $plain }
+        return [pscustomobject]@{ Values = $values; Generation = $generation; Cipher = $cipher; Plain = $plain }
     }
     catch {
         [Array]::Clear($plain, 0, $plain.Length)
@@ -56,22 +71,11 @@ function Get-Secrets([string]$Path) {
 }
 
 $material = $null
+$originalEnvironment = @{}
+$injectedEnvironmentNames = [Collections.Generic.List[string]]::new()
 $script:LauncherStage = 'get-secrets'
 try {
     $material = Get-Secrets $SecretPath
-    $script:LauncherStage = 'process-start-info'
-    $startInfo = [Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = $FilePath
-    $startInfo.UseShellExecute = $false
-    if ($startInfo.PSObject.Properties.Name -contains 'ArgumentList') {
-        foreach ($argument in $ArgumentList) { $startInfo.ArgumentList.Add([string]$argument) }
-    }
-    else {
-        $startInfo.Arguments = (($ArgumentList | ForEach-Object {
-            ConvertTo-QuotedWindowsArgument ([string]$_)
-        }) -join ' ')
-    }
-
     $script:LauncherStage = 'environment'
     if ($AgentId) {
         if ($SecretNames.Count -ne 4) { throw 'Agent mode cannot inject service secrets.' }
@@ -79,27 +83,38 @@ try {
         if ([string]::IsNullOrWhiteSpace($master)) { throw 'Collection service key is unavailable.' }
         $hmac = [Security.Cryptography.HMACSHA256]::new([Text.Encoding]::UTF8.GetBytes($master))
         try {
-            $derived = [Convert]::ToHexString($hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes("amazon-us-collection-agent-v1:$AgentId"))).ToLowerInvariant()
-            $startInfo.EnvironmentVariables['AMAZON_COLLECTION_AGENT_ID'] = $AgentId
-            $startInfo.EnvironmentVariables['AMAZON_COLLECTION_AGENT_KEY'] = $derived
+            $derived = [BitConverter]::ToString(
+                $hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes("amazon-us-collection-agent-v1:$AgentId"))
+            ).Replace('-', '').ToLowerInvariant()
+            foreach ($pair in @(@('AMAZON_COLLECTION_AGENT_ID',$AgentId),@('AMAZON_COLLECTION_AGENT_KEY',$derived))) {
+                $name = [string]$pair[0]
+                $originalEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+                [Environment]::SetEnvironmentVariable($name, [string]$pair[1], 'Process')
+                $injectedEnvironmentNames.Add($name)
+            }
         }
         finally { $hmac.Dispose(); $derived = $null; $master = $null }
     }
     else {
+        $script:LauncherStage = 'environment-generation'
+        $generationName = 'AMAZON_PROXY_CREDENTIAL_GENERATION'
+        $originalEnvironment[$generationName] = [Environment]::GetEnvironmentVariable($generationName, 'Process')
+        [Environment]::SetEnvironmentVariable($generationName, [string]$material.Generation, 'Process')
+        $injectedEnvironmentNames.Add($generationName)
         foreach ($name in $SecretNames) {
             $script:LauncherStage = "environment-read-$name"
             $value = [string]$material.Values.$name
             if ([string]::IsNullOrWhiteSpace($value)) { throw "Required secret '$name' is unavailable." }
             $script:LauncherStage = "environment-set-$name"
-            $startInfo.EnvironmentVariables[$name] = $value
+            $originalEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+            [Environment]::SetEnvironmentVariable($name, $value, 'Process')
+            $injectedEnvironmentNames.Add($name)
             $value = $null
         }
     }
     $script:LauncherStage = 'process-start'
-    $child = [Diagnostics.Process]::Start($startInfo)
-    $script:LauncherStage = 'process-wait'
-    $child.WaitForExit()
-    exit $child.ExitCode
+    & $FilePath @ArgumentList
+    exit $LASTEXITCODE
 }
 catch {
     # Never serialize exception internals: these can contain command line or provider data.
@@ -114,6 +129,9 @@ catch {
     exit 2
 }
 finally {
+    foreach ($name in $injectedEnvironmentNames) {
+        [Environment]::SetEnvironmentVariable($name, $originalEnvironment[$name], 'Process')
+    }
     if ($null -ne $material) {
         if ($material.Plain) { [Array]::Clear($material.Plain, 0, $material.Plain.Length) }
         if ($material.Cipher) { [Array]::Clear($material.Cipher, 0, $material.Cipher.Length) }

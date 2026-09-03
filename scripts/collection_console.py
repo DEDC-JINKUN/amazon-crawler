@@ -679,6 +679,7 @@ class PostgresConsoleRepository:
                 **duration_projection,
                 "terminal_status": status,
                 "termination_reason": ledger.get("termination_reason"),
+                "capacity_authorization": ledger.get("capacity_authorization_json"),
             })
         results.sort(key=lambda row: row.get("started_at") or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
         return results[:limit]
@@ -696,17 +697,81 @@ class PostgresConsoleRepository:
                        failure_stage,error_class,egress_id,collection_run_id,http_status,response_bytes,
                        probe_elapsed_ms,started_at,finished_at,duration_ms,
                        canary_status,planned_slots,tested_slots,available_slots,unique_egress_count,
-                       duplicate_egress_count,requested_capacity,required_slots,slot_capacity,
-                       capacity_gate_status,capacity_gate_reason,canary_p95_latency_ms,capacity_detail_json
+                       duplicate_egress_count,requested_capacity,required_slots,slot_budget,slot_capacity,
+                       capacity_gate_status,capacity_gate_reason,canary_p95_latency_ms,capacity_detail_json,
+                       credential_generation,authorizing_canary_operation_id,capacity_reservation_id,
+                       capacity_fact_finished_at,capacity_fact_expires_at,reserved_slots,capacity_authorization_json
                 FROM amazon_us.operation_run
                 WHERE tenant_id=%s ORDER BY started_at DESC LIMIT %s
                 """,
                 (tenant_id, limit),
             )
             rows = [dict(row) for row in cursor.fetchall()]
+            cursor.execute("SELECT to_regclass('amazon_us.proxy_capacity_reservation') AS relation")
+            if cursor.fetchone()["relation"] is not None:
+                cursor.execute(
+                    """
+                    SELECT reservation_id,tenant_id,owner_id,canary_operation_id,requested_capacity,
+                           required_slots,reserved_slots,status,reason,fact_finished_at,fact_expires_at,
+                           expires_at,capacity_snapshot_json,created_at,released_at,updated_at
+                    FROM amazon_us.proxy_capacity_reservation
+                    WHERE tenant_id=%s ORDER BY created_at DESC LIMIT %s
+                    """,
+                    (tenant_id, limit),
+                )
+                for value in cursor.fetchall():
+                    reservation = dict(value)
+                    snapshot = dict(reservation.get("capacity_snapshot_json") or {})
+                    rows.append({
+                        "operation_id": reservation.get("reservation_id"),
+                        "tenant_id": reservation.get("tenant_id"),
+                        "operation_type": "capacity_reservation",
+                        "status": reservation.get("status"),
+                        "preflight_status": "not_applicable",
+                        "failure_stage": "capacity_gate" if reservation.get("status") == "denied" else None,
+                        "error_class": reservation.get("reason"),
+                        "egress_id": None,
+                        "collection_run_id": None,
+                        "http_status": None,
+                        "response_bytes": None,
+                        "probe_elapsed_ms": None,
+                        "started_at": reservation.get("created_at"),
+                        "finished_at": reservation.get("released_at") or reservation.get("updated_at"),
+                        "duration_ms": None,
+                        "duration_seconds": None,
+                        "canary_status": snapshot.get("canary_status"),
+                        "planned_slots": snapshot.get("planned_slots"),
+                        "tested_slots": snapshot.get("tested_slots"),
+                        "available_slots": snapshot.get("available_slots"),
+                        "unique_egress_count": snapshot.get("unique_egress_count"),
+                        "duplicate_egress_count": snapshot.get("duplicate_egress_count"),
+                        "requested_capacity": reservation.get("requested_capacity"),
+                        "required_slots": reservation.get("required_slots"),
+                        "slot_budget": snapshot.get("slot_budget"),
+                        "slot_capacity": snapshot.get("slot_capacity"),
+                        "capacity_gate_status": "allowed" if reservation.get("status") in {"active", "released"} else "denied",
+                        "capacity_gate_reason": reservation.get("reason"),
+                        "canary_p95_latency_ms": snapshot.get("canary_p95_latency_ms"),
+                        "authorizing_canary_operation_id": reservation.get("canary_operation_id"),
+                        "capacity_reservation_id": reservation.get("reservation_id"),
+                        "capacity_fact_finished_at": reservation.get("fact_finished_at"),
+                        "capacity_fact_expires_at": reservation.get("fact_expires_at"),
+                        "reserved_slots": reservation.get("reserved_slots"),
+                        "capacity_authorization_json": {
+                            "reservation_id": reservation.get("reservation_id"),
+                            "canary_operation_id": reservation.get("canary_operation_id"),
+                            "reserved_slots": reservation.get("reserved_slots"),
+                            "fact_finished_at": reservation.get("fact_finished_at"),
+                            "fact_expires_at": reservation.get("fact_expires_at"),
+                            "reservation_expires_at": reservation.get("expires_at"),
+                            "capacity_snapshot": snapshot,
+                        },
+                    })
         for row in rows:
-            row["duration_seconds"] = round(float(row.get("duration_ms") or 0) / 1000, 2) if row.get("duration_ms") is not None else None
-        return rows
+            if "duration_seconds" not in row:
+                row["duration_seconds"] = round(float(row.get("duration_ms") or 0) / 1000, 2) if row.get("duration_ms") is not None else None
+        rows.sort(key=lambda row: row.get("started_at") or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+        return rows[:limit]
 
     def load_run(self, run_id: str) -> dict[str, Any] | None:
         tenant_id = self._require_tenant()
@@ -750,6 +815,7 @@ class PostgresConsoleRepository:
                     "recorded_actions": 0,
                     "inferred_actions": 0,
                     "terminal_status": ledger.get("status"),
+                    "capacity_authorization": ledger.get("capacity_authorization_json"),
                     "started_at": effective_started_at,
                     "ended_at": effective_finished_at,
                     **duration_projection,
@@ -815,6 +881,7 @@ class PostgresConsoleRepository:
             "items": items,
             "terminal_status": (ledger or {}).get("status") or ("legacy_blocked" if any(item["outcome"] == "blocked" for item in items) else "legacy_complete"),
             "termination_reason": (ledger or {}).get("termination_reason"),
+            "capacity_authorization": (ledger or {}).get("capacity_authorization_json"),
             **duration_projection,
             "warning": "time_window_inference is legacy fallback; new network failures write run evidence",
         }

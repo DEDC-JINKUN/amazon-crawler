@@ -47,7 +47,7 @@ $env:AMAZON_COLLECTION_API_KEY = '当前会话的随机值'
 
 - 批次总览：任务进度、有效商品、blocked/failed、四种规模口径和字节证据；
 - 本次运行：按 `run_id` 选择一次Worker启动，逐项显示ASIN、结果、来源、HTTP、错误和流量；
-- 操作记录：canary、egress、preflight与采集控制；canary显示计划/已测/可用/唯一槽、重复出口计数、容量、Gate原因和P95延迟，`unknown`不显示为0；
+- 操作记录：canary、容量reservation（含Agent/直接Worker拒绝）、egress、preflight与采集控制；显示authorizing canary、reservation、计划/已测/可用/唯一/预约槽、事实过期时间、Gate原因和P95，`unknown`不显示为0；
 - 状态与信号：status、stage、source、error、block、最近 run；
 - 任务表：按状态、阶段、ASIN、标题和错误筛选；
 - ASIN 详情：商品、媒体 URL、top reviews、内容模块、评论摘要、历史和 evidence。

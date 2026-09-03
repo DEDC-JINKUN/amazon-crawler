@@ -281,7 +281,7 @@ def test_postgres_runner_records_retry_attribution_and_sanitized_session_metrics
     storage = ProductStorage()
     worker_config = {**worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None, "context": {}}
 
-    assert worker.run_postgres_actions(
+    assert worker._run_postgres_actions_impl(
         storage, pool, worker_config, limit=1, run_id="run-pool", worker_id="worker-a"
     ) == 1
     context = storage.saved[0]["evidence"]["context_json"]["proxy_session_pool"]
@@ -308,7 +308,7 @@ def test_postgres_runner_reports_circuit_and_nineteen_unrequested_actions():
     storage = ProductStorage(count=20)
     worker_config = {**worker.DEFAULTS, "max_actions_per_run": 20, "raw_html_dir": None, "context": {}}
 
-    assert worker.run_postgres_actions(
+    assert worker._run_postgres_actions_impl(
         storage, pool, worker_config, limit=20, run_id="run-circuit", worker_id="worker-a"
     ) == -1
     context = storage.saved[0]["evidence"]["context_json"]["proxy_session_pool"]
@@ -334,7 +334,7 @@ def test_blocked_attempt_is_preserved_when_retry_session_has_network_error():
     storage = ProductStorage()
     worker_config = {**worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None, "context": {}}
 
-    assert worker.run_postgres_actions(
+    assert worker._run_postgres_actions_impl(
         storage, pool, worker_config, limit=1, run_id="run-block-network", worker_id="worker-a"
     ) == 1
     context = storage.saved[0]["evidence"]["context_json"]["proxy_session_pool"]
@@ -384,7 +384,7 @@ def test_simulated_twenty_products_all_record_evidence_and_rotate_bounded_sessio
     storage = ProductStorage(count=20)
     worker_config = {**worker.DEFAULTS, "max_actions_per_run": 20, "raw_html_dir": None, "context": {}}
 
-    assert worker.run_postgres_actions(
+    assert worker._run_postgres_actions_impl(
         storage, pool, worker_config, limit=20, run_id="run-20", worker_id="worker-a"
     ) == 20
     assert len(storage.saved) == 20
@@ -419,7 +419,7 @@ def test_simulated_hundred_products_fit_in_a_finite_thirty_four_slot_pool():
     storage = ProductStorage(count=100)
     worker_config = {**worker.DEFAULTS, "max_actions_per_run": 100, "raw_html_dir": None, "context": {}}
 
-    assert worker.run_postgres_actions(
+    assert worker._run_postgres_actions_impl(
         storage, pool, worker_config, limit=100, run_id="run-100", worker_id="worker-a"
     ) == 100
     assert len(storage.saved) == 100
@@ -441,3 +441,28 @@ def test_worker_builds_pool_only_when_approved_session_ports_are_configured():
     finally:
         plain.close()
         pooled.close()
+
+
+def test_reserved_slot_ids_select_only_assigned_ports_and_validate_before_slot_creation():
+    module = load_pool()
+    events = []
+    adapters = []
+
+    def factory(slot_config):
+        events.append(("factory", slot_config["proxy_url"]))
+        adapter = FakeAdapter(slot_config, [("product", 200, 10)])
+        adapters.append(adapter)
+        return adapter
+
+    pool = module.ProxySessionPool(
+        config(proxy_session_ports=[10000, 10001, 10002], proxy_session_max_asins=1),
+        factory,
+        classifier,
+    )
+    pool.configure_capacity_reservation(["session-02"], lambda: events.append("validate"))
+    pool.begin_run("run-1", "tenant-a", "worker-a")
+    pool.fetch("https://www.amazon.com/dp/B000000001")
+
+    assert events[0] == "validate"
+    assert events[1][0] == "factory" and events[1][1].endswith(":10001")
+    assert pool.evidence_context()["sessions"][0]["session_id"] == "session-02"

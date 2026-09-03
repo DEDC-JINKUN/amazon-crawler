@@ -67,6 +67,7 @@ class AgentRefreshWorker:
         self._state = "created"
         self._completed_actions = 0
         self._last_error: str | None = None
+        self._last_capacity_decision: dict[str, Any] | None = None
         self._last_action_at: str | None = None
 
     def start(self) -> None:
@@ -95,6 +96,7 @@ class AgentRefreshWorker:
                 "completed_actions": self._completed_actions,
                 "last_action_at": self._last_action_at,
                 "last_error": self._last_error,
+                "capacity_decision": dict(self._last_capacity_decision) if self._last_capacity_decision else None,
             }
 
     def _run(self) -> None:
@@ -106,6 +108,11 @@ class AgentRefreshWorker:
             with self._lock:
                 self._state = "running"
             while not self._stop.is_set():
+                has_pending = getattr(self.storage, "has_pending_refresh_task", None)
+                if callable(has_pending) and not has_pending():
+                    self._event.wait(self.poll_seconds)
+                    self._event.clear()
+                    continue
                 run_id = f"agent-refresh-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}-{uuid.uuid4().hex[:8]}"
                 try:
                     result = run_postgres_actions(
@@ -116,19 +123,20 @@ class AgentRefreshWorker:
                         run_id=run_id,
                         worker_id=worker_id,
                         lease_seconds=self.lease_seconds,
-                        enforce_capacity_gate=True,
                     )
                 except ProxyCapacityGateDenied as exc:
                     with self._lock:
                         self._state = "blocked"
                         self._last_error = exc.reason
-                    self._event.wait(self.poll_seconds)
+                        self._last_capacity_decision = dict(exc.decision)
+                    self._event.wait(max(self.poll_seconds, 30.0))
                     self._event.clear()
                     continue
                 with self._lock:
                     if self._state == "blocked":
                         self._state = "running"
                         self._last_error = None
+                        self._last_capacity_decision = None
                 if result == -1:
                     with self._lock:
                         self._state = "blocked"

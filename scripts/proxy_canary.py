@@ -9,6 +9,7 @@ import ipaddress
 import json
 import math
 import os
+import re
 import socket
 import ssl
 import time
@@ -29,12 +30,28 @@ except ModuleNotFoundError:
 
 SCHEMA_VERSION = "amazon-us-proxy-canary-v1"
 DEFAULT_CANARY_URL = "https://api.ipify.org?format=json"
+APPROVED_CANARY_URLS = frozenset({DEFAULT_CANARY_URL})
 MAX_PROXY_SESSION_PORTS = 40
+
+
+def validate_canary_target_url(value: str) -> str:
+    target_url = str(value or "").strip()
+    if target_url not in APPROVED_CANARY_URLS:
+        raise ValueError("proxy_canary_url must use the approved non-Amazon allowlist")
+    return target_url
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
 
 
 def _validated_shape(config: dict[str, Any]) -> dict[str, Any]:
     base = urlsplit(str(config.get("proxy_url") or "").strip())
-    if base.scheme not in {"http", "https"} or not base.hostname or base.username or base.password:
+    if (
+        base.scheme not in {"http", "https"} or not base.hostname or base.username or base.password
+        or base.path not in {"", "/"} or base.query or base.fragment
+    ):
         raise ValueError("proxy_url must be an approved credential-free HTTP(S) endpoint")
     ports = [int(value) for value in list(config.get("proxy_session_ports") or [])]
     if not ports or len(ports) > MAX_PROXY_SESSION_PORTS:
@@ -44,13 +61,11 @@ def _validated_shape(config: dict[str, Any]) -> dict[str, Any]:
     max_asins = int(config.get("proxy_session_max_asins") or 3)
     if max_asins < 1 or max_asins > 5:
         raise ValueError("proxy_session_max_asins must be between 1 and 5")
-    target_url = str(config.get("proxy_canary_url") or DEFAULT_CANARY_URL).strip()
+    target_url = validate_canary_target_url(str(config.get("proxy_canary_url") or DEFAULT_CANARY_URL))
     target = urlsplit(target_url)
     target_host = (target.hostname or "").lower().rstrip(".")
-    if target.scheme != "https" or not target_host or target.username or target.password:
-        raise ValueError("proxy_canary_url must be an explicit HTTPS URL")
-    if target_host == "amazon.com" or target_host.endswith(".amazon.com"):
-        raise ValueError("proxy_canary_url must not target Amazon")
+    if target.scheme != "https" or target_host != "api.ipify.org" or target.username or target.password:
+        raise ValueError("proxy_canary_url must use the approved non-Amazon allowlist")
     timeout_seconds = int(config.get("proxy_canary_timeout_seconds") or 15)
     if timeout_seconds < 1 or timeout_seconds > 120:
         raise ValueError("proxy_canary_timeout_seconds must be between 1 and 120")
@@ -65,13 +80,22 @@ def _validated_shape(config: dict[str, Any]) -> dict[str, Any]:
 
 def capacity_config_hash(config: dict[str, Any]) -> str:
     shape = _validated_shape(config)
+    credential_generation = str(
+        config.get("proxy_credential_generation")
+        or os.environ.get("AMAZON_PROXY_CREDENTIAL_GENERATION")
+        or ""
+    ).strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{8,100}", credential_generation):
+        raise ValueError("proxy credential generation is required")
     payload = {
         "proxy_scheme": shape["base"].scheme,
         "proxy_host": shape["base"].hostname,
+        "proxy_path": shape["base"].path,
         "ports": shape["ports"],
         "max_asins": shape["max_asins"],
         "target_url": shape["target_url"],
         "timeout_seconds": shape["timeout_seconds"],
+        "credential_generation": credential_generation,
         "username_env": str(config.get("proxy_username_env") or ""),
         "password_env": str(config.get("proxy_password_env") or ""),
     }
@@ -103,9 +127,11 @@ def probe_proxy_slot(
     clock: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
     """Return an internal probe result; callers must remove ``egress_ip`` before serialization."""
+    target_url = validate_canary_target_url(target_url)
     handlers = [
         urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}),
         ProxyTunnelAuthHTTPSHandler(username, password),
+        _NoRedirectHandler(),
     ]
     opener = (opener_factory or urllib.request.build_opener)(*handlers)
     request = urllib.request.Request(
@@ -116,11 +142,23 @@ def probe_proxy_slot(
     started = clock()
     try:
         with opener.open(request, timeout=timeout_seconds) as response:
+            final_url = response.geturl() if callable(getattr(response, "geturl", None)) else target_url
+            if final_url != target_url:
+                return {
+                    "ok": False,
+                    "http_status": int(response.getcode() or 200),
+                    "latency_ms": round((clock() - started) * 1000, 1),
+                    "auth_status": "succeeded",
+                    "connect_tls_status": "succeeded",
+                    "error_class": "redirect_not_allowed",
+                }
             body = response.read(4096)
             status = int(response.getcode() or 200)
     except Exception as exc:
         reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
-        if isinstance(exc, urllib.error.HTTPError) and exc.code == 407:
+        if isinstance(exc, urllib.error.HTTPError) and 300 <= exc.code < 400:
+            error_class, status, auth_status, tunnel_status = "redirect_not_allowed", int(exc.code), "succeeded", "succeeded"
+        elif isinstance(exc, urllib.error.HTTPError) and exc.code == 407:
             error_class, status, auth_status, tunnel_status = "proxy_auth_failed", 407, "failed", "unknown"
         elif isinstance(reason, (TimeoutError, socket.timeout)):
             error_class, status, auth_status, tunnel_status = "timeout", None, "unknown", "failed"
@@ -179,6 +217,13 @@ def run_proxy_canary(
     shape = _validated_shape(config)
     if requested_actions < 1:
         raise ValueError("requested_actions must be positive")
+    credential_generation = str(
+        config.get("proxy_credential_generation")
+        or os.environ.get("AMAZON_PROXY_CREDENTIAL_GENERATION")
+        or ""
+    ).strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{8,100}", credential_generation):
+        raise ValueError("proxy credential generation is required")
     username_env = str(config.get("proxy_username_env") or "").strip()
     password_env = str(config.get("proxy_password_env") or "").strip()
     username = os.environ.get(username_env) if username_env else None
@@ -195,9 +240,11 @@ def run_proxy_canary(
             "duplicate_egress_count": None,
             "requested_capacity": requested_actions,
             "required_slots": required_slots,
+            "slot_budget": shape["max_asins"],
             "slot_capacity": None,
             "capacity_gate_status": "denied",
             "capacity_gate_reason": "credentials_missing",
+            "credential_generation": credential_generation,
             "p95_latency_ms": None,
             "config_hash": capacity_config_hash(config),
             "sessions": [],
@@ -219,10 +266,11 @@ def run_proxy_canary(
         )
         ok = bool(probe.get("ok"))
         identity = ipaddress.ip_address(str(probe.get("egress_ip") or "")) if ok else None
+        usable = bool(ok and identity not in identities)
         latency = float(probe["latency_ms"]) if probe.get("latency_ms") is not None else None
         if ok:
             available_slots += 1
-            if identity in identities:
+            if not usable:
                 duplicate_count += 1
             identities.add(identity)
             if latency is not None:
@@ -230,6 +278,7 @@ def run_proxy_canary(
         sessions.append({
             "session_id": f"session-{index:02d}",
             "status": "available" if ok else "unavailable",
+            "usable": usable,
             "auth_status": "succeeded" if ok else str(probe.get("auth_status") or "unknown"),
             "connect_tls_status": "succeeded" if ok else str(probe.get("connect_tls_status") or "unknown"),
             "error_class": None if ok else str(probe.get("error_class") or "canary_failed"),
@@ -259,9 +308,11 @@ def run_proxy_canary(
         "duplicate_egress_count": duplicate_count,
         "requested_capacity": requested_actions,
         "required_slots": required_slots,
+        "slot_budget": shape["max_asins"],
         "slot_capacity": slot_capacity,
         "capacity_gate_status": "allowed" if allowed else "denied",
         "capacity_gate_reason": gate_reason,
+        "credential_generation": credential_generation,
         "p95_latency_ms": _p95(latencies),
         "config_hash": capacity_config_hash(config),
         "sessions": sessions,
@@ -346,7 +397,13 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if result["capacity_gate_status"] == "allowed" else 3
 
 
-__all__ = ["capacity_config_hash", "execute_canary", "probe_proxy_slot", "run_proxy_canary"]
+__all__ = [
+    "capacity_config_hash",
+    "execute_canary",
+    "probe_proxy_slot",
+    "run_proxy_canary",
+    "validate_canary_target_url",
+]
 
 
 if __name__ == "__main__":

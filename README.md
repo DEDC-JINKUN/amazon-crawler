@@ -15,7 +15,7 @@
 - PostgreSQL 是正式任务、断点、结果和历史的唯一事实源；SQLite 仅保留给历史回放和离线回归测试。
 - 原始 HTML、采集时间、来源和解析器版本必须可追溯。
 - PostgreSQL 使用租约和 `FOR UPDATE SKIP LOCKED` 支持多个 Worker 安全领取；当前 Windows 默认仍以单 Worker 小批量运行。
-- 正式 PostgreSQL live 入口必须配置已批准粘滞端口，并先有同配置、未过期、容量足够的非 Amazon canary；否则在创建collection run、领取任务和访问Amazon前拒绝。普通 Worker 与 Agent refresh Worker共用同一Gate与有界会话池。
+- 正式 PostgreSQL live 入口必须配置已批准粘滞端口，并先有同配置、同credential generation、未过期且状态/计数一致的非Amazon canary。系统在PostgreSQL中原子预约具体`session-NN`槽，跨tenant/Controller/Agent不允许超卖；预约或事实失效时在创建collection run、领取任务和访问Amazon前拒绝。
 - 不读取个人浏览器 Profile、Cookie、Token 或密码，不绕过验证码和访问控制。
 
 ## 目录
@@ -57,7 +57,7 @@ Windows本机推荐使用统一控制入口：
 .\crawler.ps1 stop
 ```
 
-`canary` 对每个计划会话只访问一次非Amazon HTTPS出口检查端点，验证认证、CONNECT/TLS、延迟和本次运行内的出口去重；真实IP只在内存比较。结果进入PostgreSQL operation事实源。`probe/run/reviews`只有在最新canary与当前配置指纹一致、未过期、且唯一可用槽容量覆盖本次Limit时才继续。它自动处理隐藏密码、preflight、run_id、单实例锁、日志、receipt和只读控制台。超过100个action需要显式 `-ConfirmLargeBatch`。完整说明见 [`docs/crawler_control.md`](docs/crawler_control.md)。
+`canary` 对每个计划会话只访问一次精确允许的非Amazon HTTPS端点，禁止重定向，验证认证、CONNECT/TLS、延迟和本次运行内的出口去重；真实IP只在内存比较。DPAPI vault每次轮换生成非秘密credential generation，使旧canary立即不匹配。`probe/run/reviews`先原子预约未被其他消费者占用的槽，并把canary operation、事实/过期时间、reservation和容量快照写入operation、collection run、receipt、evidence及Console。超过100个action仍需显式 `-ConfirmLargeBatch`。
 
 ```powershell
 $env:AMAZON_US_POSTGRES_DSN = 'host=127.0.0.1 port=5432 dbname=postgres user=postgres'
@@ -118,7 +118,7 @@ Agent 调用使用 DPAPI 派生的 scoped key，子进程不会得到 PostgreSQL
 
 服务身份同时指纹化 Agent 服务、Worker、代理池、API、存储模块和实际 TOML。业务调用发现已验证的旧版本进程时会受控替换；无法证明归属的监听器不会被终止或接管。
 
-带 `-Wait` 的刷新会等待 PostgreSQL job 进入 `completed`、`failed` 或 `cancelled`，并返回最新商品快照、evidence、请求到终态的耗时及可用流量字段。同一次 Agent 批量的最多 5 条由一个 runner run 处理。Agent Worker 与普通 Worker 都使用同一容量Gate与有界会话池：证据缺失、过期、配置不匹配或容量不足时不领取refresh；单 ASIN 最多换会话一次，达到连续/滑窗阈值立即熔断。不做无限轮换、验证码处理、登录或个人 Cookie 读取。
+带 `-Wait` 的刷新会等待 PostgreSQL job 进入 `completed`、`failed` 或 `cancelled`，并返回最新商品快照、evidence、请求到终态的耗时及可用流量字段。同一次 Agent 批量的最多5条由一个runner run处理。Agent与普通Worker共享原子容量reservation：每次claim和创建新槽前复核TTL，只使用分配给自己的slot；拒绝事实持久化并通过`/readyz`与Console解释。单ASIN最多换会话一次，不做无限轮换、验证码处理、登录或个人Cookie读取。
 
 本机只读运营控制台：
 

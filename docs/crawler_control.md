@@ -50,12 +50,12 @@ console      http://127.0.0.1:8770
 2. 隐藏输入PostgreSQL密码；
 3. 复用或启动loopback-only只读Console；
 4. 使用非Amazon端点执行live preflight；
-5. 读取PostgreSQL最新canary operation，验证配置指纹、新鲜度、计划规模和唯一槽容量；拒绝时不创建collection run、不领取任务、不访问Amazon；
-6. 生成唯一run_id和worker_id；
+5. 读取PostgreSQL最新canary operation，验证credential generation、配置指纹、事实状态/计数、新鲜度和计划规模；在全局配置哈希advisory lock内原子预约具体可用槽；
+6. 把canary operation、reservation ID、事实/过期时间及安全容量快照绑定到控制operation和collection run；拒绝时不创建collection run、不领取任务、不访问Amazon；
 7. 启动Windows Job Object宿主；宿主先等待gate，控制器登记真实宿主PID后才允许启动Worker；
 8. 当前控制台每5秒显示run进度；
 9. Worker结束后写receipt，打印stdout/stderr尾部并清除Worker锁；
-10. 控制脚本清除自己创建的密码环境变量。
+10. Worker与Controller幂等释放reservation；异常终止依赖同一释放路径或TTL回收；控制脚本清除自己创建的密码环境变量。
 
 所有任务固定使用 `--product-only`、`--once` 和PostgreSQL事实源。遇CAPTCHA/403/429/WAF时，Worker仍按配置立即停止；控制脚本不会自动换IP、重排blocked或继续剩余任务。
 
@@ -71,6 +71,7 @@ data/<batch>/control/runs/<run_id>/
 ```
 
 receipt记录run_id、worker_id、tenant、命令、请求上限、状态、退出码、起止时间、耗时、日志和Console URL，不记录密码或DSN。
+receipt还记录具体authorizing canary、capacity reservation、事实完成/过期时间、预约槽数和安全容量快照，不记录端口映射或出口IP。
 
 锁文件：
 

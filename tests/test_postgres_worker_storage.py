@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 import importlib.util
+import json
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -153,6 +157,98 @@ def test_latest_proxy_capacity_fact_is_tenant_scoped_and_reports_freshness():
     assert "operation_type='canary'" in sql.replace(" ", "")
     assert "tenant-a" in params
     assert 3600 in params
+
+
+def test_atomic_reservation_kernel_prevents_two_tenants_from_overbooking_one_slot():
+    storage = load_storage()
+    now = datetime.now(timezone.utc)
+
+    class SharedDatabase:
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.active_slot_rows = []
+            self.events = []
+
+    shared = SharedDatabase()
+
+    class ReservationCursor:
+        rowcount = 1
+
+        def __init__(self, tenant_id):
+            self.tenant_id = tenant_id
+            self.rows = []
+
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+
+        def execute(self, sql, params=()):
+            shared.events.append(sql)
+            if "pg_advisory_xact_lock" in sql:
+                shared.lock.acquire()
+                self.rows = [(None,)]
+            elif "WHERE reservation_id=%s FOR UPDATE" in sql:
+                self.rows = []
+            elif "FROM amazon_us.operation_run" in sql:
+                self.rows = [{
+                    "operation_id": f"op-{self.tenant_id}",
+                    "canary_status": "succeeded", "planned_slots": 1, "tested_slots": 1,
+                    "available_slots": 1, "unique_egress_count": 1, "duplicate_egress_count": 0,
+                    "requested_capacity": 1, "required_slots": 1, "slot_budget": 1, "slot_capacity": 1,
+                    "capacity_gate_status": "allowed", "capacity_gate_reason": "capacity_sufficient",
+                    "capacity_config_hash": "a" * 64, "credential_generation": "test-generation-1",
+                    "canary_p95_latency_ms": 10.0,
+                    "capacity_detail_json": {"sessions": [{"session_id": "session-01", "status": "available", "usable": True}]},
+                    "finished_at": now, "fact_expires_at": now + timedelta(hours=1),
+                    "observed_at": now, "is_fresh": True,
+                }]
+            elif "SELECT slot_ids_json FROM amazon_us.proxy_capacity_reservation" in sql:
+                self.rows = list(shared.active_slot_rows)
+            elif "INSERT INTO amazon_us.proxy_capacity_reservation" in sql:
+                if params[10] == "active":
+                    shared.active_slot_rows.append({"slot_ids_json": json.loads(params[9])})
+                self.rows = []
+            else:
+                self.rows = []
+
+        def fetchone(self): return self.rows.pop(0) if self.rows else None
+        def fetchall(self): rows, self.rows = self.rows, []; return rows
+
+    class ReservationConnection:
+        def __init__(self, tenant_id): self.cursor_instance = ReservationCursor(tenant_id); self.held = False
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def cursor(self): return self.cursor_instance
+        def commit(self):
+            if shared.lock.locked(): shared.lock.release()
+        def rollback(self):
+            if shared.lock.locked(): shared.lock.release()
+
+    repositories = [
+        storage.PostgresWorkerStorage(
+            "postgresql://example", tenant_id=f"tenant-{index}",
+            connect=lambda index=index: ReservationConnection(f"tenant-{index}"),
+        )
+        for index in range(2)
+    ]
+    barrier = threading.Barrier(2)
+
+    def reserve(index):
+        barrier.wait()
+        return repositories[index].reserve_proxy_capacity(
+            reservation_id=f"reservation-{index}", owner_id=f"worker-{index}",
+            capacity_config_hash="a" * 64, credential_generation="test-generation-1",
+            requested_capacity=1, required_slots=1, slot_budget=1,
+            max_age_seconds=3600, lease_seconds=600,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(reserve, (0, 1)))
+
+    assert sorted(item["status"] for item in results) == ["active", "denied"]
+    assert next(item for item in results if item["status"] == "denied")["reason"] == "capacity_reserved_elsewhere"
+    lock_index = next(index for index, sql in enumerate(shared.events) if "pg_advisory_xact_lock" in sql)
+    active_index = next(index for index, sql in enumerate(shared.events) if "SELECT slot_ids_json" in sql)
+    assert lock_index < active_index
 
 
 def test_claim_task_can_filter_to_product_stage():

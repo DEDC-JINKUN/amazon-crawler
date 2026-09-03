@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -278,7 +280,7 @@ def test_postgres_runner_claims_and_persists_a_product_without_sqlite():
     config = dict(worker.DEFAULTS)
     config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}})
 
-    assert worker.run_postgres_actions(storage, Adapter(), config, limit=1, worker_id="worker-a") == 1
+    assert worker._run_postgres_actions_impl(storage, Adapter(), config, limit=1, worker_id="worker-a") == 1
     assert len(storage.saved) == 1
     assert storage.saved[0]["next_status"] == "succeeded"
     assert storage.saved[0]["evidence"]["transfer_bytes"] == 321
@@ -290,7 +292,7 @@ def test_postgres_runner_accepts_same_asin_clp_canonical():
     config = dict(worker.DEFAULTS)
     config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}})
 
-    assert worker.run_postgres_actions(storage, SameAsinClpCanonicalAdapter(), config, limit=1, worker_id="worker-a") == 1
+    assert worker._run_postgres_actions_impl(storage, SameAsinClpCanonicalAdapter(), config, limit=1, worker_id="worker-a") == 1
     assert storage.saved[0]["next_status"] == "succeeded"
 
 
@@ -300,7 +302,7 @@ def test_postgres_runner_rejects_canonical_for_different_asin():
     config = dict(worker.DEFAULTS)
     config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}})
 
-    assert worker.run_postgres_actions(storage, DifferentAsinCanonicalAdapter(), config, limit=1, worker_id="worker-a") == 1
+    assert worker._run_postgres_actions_impl(storage, DifferentAsinCanonicalAdapter(), config, limit=1, worker_id="worker-a") == 1
     assert storage.saved[0]["reason"] == "asin_mismatch"
 
 
@@ -358,6 +360,26 @@ def test_reviews_only_rejects_legacy_sqlite_backend():
         worker.validate_runtime_args(args)
 
 
+def test_live_collection_rejects_legacy_sqlite_backend_before_network():
+    worker = load_worker()
+    args = worker.build_parser().parse_args(["--backend", "sqlite", "--live"])
+
+    with pytest.raises(ValueError, match="SQLite live collection is disabled"):
+        worker.validate_runtime_args(args)
+
+
+def test_sqlite_live_cli_fails_closed_in_a_no_network_subprocess():
+    result = subprocess.run(
+        [sys.executable, ROOT / "scripts" / "amazon_us_worker.py", "--backend", "sqlite", "--live"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 2
+    assert "SQLite live collection is disabled" in result.stderr
+
+
 def test_run_id_rejects_unsafe_characters():
     worker = load_worker()
     args = worker.build_parser().parse_args(["--run-id", "run id/unsafe"])
@@ -372,7 +394,7 @@ def test_postgres_runner_product_only_claims_only_product_stage():
     config = dict(worker.DEFAULTS)
     config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}})
 
-    assert worker.run_postgres_actions(
+    assert worker._run_postgres_actions_impl(
         storage, Adapter(), config, limit=1, worker_id="worker-a", product_only=True
     ) == 1
     assert storage.saved[0]["next_status"] == "succeeded"
@@ -384,7 +406,7 @@ def test_postgres_runner_reviews_only_claims_only_review_stage():
     config = dict(worker.DEFAULTS)
     config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}, "review_page_limit": 1})
 
-    assert worker.run_postgres_actions(
+    assert worker._run_postgres_actions_impl(
         storage, ReviewAdapter(), config, limit=1, worker_id="worker-a", reviews_only=True
     ) == 1
     assert len(storage.saved) == 1
@@ -401,7 +423,7 @@ def test_postgres_runner_reviews_only_fails_closed_on_malformed_task(task_stage,
     config = dict(worker.DEFAULTS)
     config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}})
 
-    assert worker.run_postgres_actions(
+    assert worker._run_postgres_actions_impl(
         storage, NoFetchAdapter(), config, limit=1, worker_id="worker-a", reviews_only=True
     ) == 1
     assert len(storage.saved) == 1
@@ -415,7 +437,7 @@ def test_postgres_runner_persists_explicit_sibling_identity_without_product_data
     config = dict(worker.DEFAULTS)
     config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}})
 
-    assert worker.run_postgres_actions(
+    assert worker._run_postgres_actions_impl(
         storage, IdentityMismatchAdapter(), config, limit=1, worker_id="worker-a", product_only=True
     ) == 1
     assert len(storage.saved) == 1
@@ -444,7 +466,7 @@ def test_product_fetch_failure_persists_run_evidence():
     config = dict(worker.DEFAULTS)
     config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}})
 
-    assert worker.run_postgres_actions(
+    assert worker._run_postgres_actions_impl(
         storage, FailingAdapter(), config, limit=1, run_id="run-visible-3", worker_id="worker-a"
     ) == 1
     payload = storage.saved[0]
@@ -461,7 +483,7 @@ def test_postgres_runner_persists_review_checkpoint_without_sqlite():
     config = dict(worker.DEFAULTS)
     config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}, "review_page_limit": 0})
 
-    assert worker.run_postgres_actions(storage, ReviewAdapter(), config, limit=1, worker_id="worker-a") == 1
+    assert worker._run_postgres_actions_impl(storage, ReviewAdapter(), config, limit=1, worker_id="worker-a") == 1
     assert len(storage.saved) == 1
     assert storage.saved[0]["next_status"] == "succeeded"
     assert storage.saved[0]["page"]["page"] == 1
@@ -475,7 +497,7 @@ def test_postgres_runner_uses_stable_review_url_when_portal_page_is_empty():
     config = dict(worker.DEFAULTS)
     config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}, "review_page_limit": 0})
 
-    assert worker.run_postgres_actions(storage, adapter, config, limit=1, worker_id="worker-a") == 1
+    assert worker._run_postgres_actions_impl(storage, adapter, config, limit=1, worker_id="worker-a") == 1
     assert len(adapter.calls) == 2
     assert "/product-reviews/B00RCPDCQU" in adapter.calls[1]
     assert storage.saved[0]["next_status"] == "succeeded"
@@ -489,7 +511,7 @@ def test_empty_review_failure_preserves_review_stage_and_cursor():
     config = dict(worker.DEFAULTS)
     config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}, "review_page_limit": 0})
 
-    assert worker.run_postgres_actions(storage, adapter, config, limit=1, worker_id="worker-a") == 1
+    assert worker._run_postgres_actions_impl(storage, adapter, config, limit=1, worker_id="worker-a") == 1
     payload = storage.saved[0]
     assert payload["next_status"] == "failed"
     assert payload["state_fields"]["task_stage"] == "reviews"
@@ -504,7 +526,7 @@ def test_postgres_runner_executes_and_completes_refresh_request():
     config = dict(worker.DEFAULTS)
     config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}})
 
-    assert worker.run_postgres_actions(storage, Adapter(), config, limit=1, worker_id="worker-a") == 1
+    assert worker._run_postgres_actions_impl(storage, Adapter(), config, limit=1, worker_id="worker-a") == 1
     assert storage.finished == [("job-1", "completed")]
 
 
@@ -518,7 +540,7 @@ def test_postgres_runner_retries_explicit_postal_mismatch_in_browser():
         "context": {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
     })
 
-    assert worker.run_postgres_actions(storage, adapter, config, limit=1, worker_id="worker-a") == 1
+    assert worker._run_postgres_actions_impl(storage, adapter, config, limit=1, worker_id="worker-a") == 1
     assert adapter.calls == ["http", "browser"]
     assert storage.saved[0]["next_status"] == "succeeded"
 
@@ -529,7 +551,7 @@ def test_postgres_runner_rejects_product_without_core_title():
     config = dict(worker.DEFAULTS)
     config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}})
 
-    assert worker.run_postgres_actions(storage, MissingTitleAdapter(), config, limit=1, worker_id="worker-a") == 1
+    assert worker._run_postgres_actions_impl(storage, MissingTitleAdapter(), config, limit=1, worker_id="worker-a") == 1
     assert storage.saved[0]["reason"] == "missing_core_fields"
     assert storage.saved[0]["error"] == "missing_core_fields:title"
     assert storage.saved[0].get("terminal", False) is False
@@ -545,7 +567,7 @@ def test_postgres_runner_marks_404_missing_asin_and_title_terminal():
         "context": {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
     })
 
-    assert worker.run_postgres_actions(storage, Missing404Adapter(), config, limit=1, worker_id="worker-a") == 1
+    assert worker._run_postgres_actions_impl(storage, Missing404Adapter(), config, limit=1, worker_id="worker-a") == 1
     assert storage.saved[0]["reason"] == "missing_core_fields"
     assert storage.saved[0]["error"] == "missing_core_fields:asin,title"
     assert storage.saved[0]["terminal"] is True
@@ -562,7 +584,7 @@ def test_postgres_runner_does_not_terminalize_404_with_complete_identity():
         "context": {"expected_country": "US", "expected_currency": "USD", "postal_code": "90001"},
     })
 
-    assert worker.run_postgres_actions(storage, Complete404Adapter(), config, limit=1, worker_id="worker-a") == 1
+    assert worker._run_postgres_actions_impl(storage, Complete404Adapter(), config, limit=1, worker_id="worker-a") == 1
     assert "product" in storage.saved[0]
     assert storage.saved[0]["evidence"]["http_status"] == 404
     assert storage.saved[0]["evidence"]["error_code"] is None

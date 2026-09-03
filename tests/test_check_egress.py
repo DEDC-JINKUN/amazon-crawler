@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import http.server
 import importlib.util
+import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -52,7 +54,7 @@ class Opener:
 def test_probe_reports_safe_success_without_proxy_url_or_body():
     module = load_module()
     opener = Opener(Response(body=b"public probe body"))
-    result = module.probe("http://127.0.0.1:8080", "https://example.test/robots.txt", opener_factory=lambda *handlers: opener)
+    result = module.probe("http://127.0.0.1:8080", "https://api.ipify.org?format=json", opener_factory=lambda *handlers: opener)
     assert result["ok"] is True
     assert result["status"] == 200
     assert result["response_bytes"] == 17
@@ -64,7 +66,7 @@ def test_probe_reports_safe_success_without_proxy_url_or_body():
 def test_probe_marks_429_as_blocked():
     module = load_module()
     opener = Opener(Response(status=429, body=b"slow down"))
-    result = module.probe("http://127.0.0.1:8080", "https://example.test", opener_factory=lambda *handlers: opener)
+    result = module.probe("http://127.0.0.1:8080", "https://api.ipify.org?format=json", opener_factory=lambda *handlers: opener)
     assert result["ok"] is False
     assert result["status"] == 429
     assert result["block_reason"] == "http_429"
@@ -73,48 +75,72 @@ def test_probe_marks_429_as_blocked():
 def test_probe_rejects_200_challenge_and_empty_response():
     module = load_module()
     challenge = Opener(Response(status=200, body=b"<title>Robot Check</title>"))
-    result = module.probe("http://127.0.0.1:8080", "https://example.test", opener_factory=lambda *handlers: challenge)
+    result = module.probe("http://127.0.0.1:8080", "https://api.ipify.org?format=json", opener_factory=lambda *handlers: challenge)
     assert result["ok"] is False
     assert result["block_reason"] == "robot"
 
     captcha = Opener(Response(status=200, body=b"Enter the characters you see below"))
-    result = module.probe("http://127.0.0.1:8080", "https://example.test", opener_factory=lambda *handlers: captcha)
+    result = module.probe("http://127.0.0.1:8080", "https://api.ipify.org?format=json", opener_factory=lambda *handlers: captcha)
     assert result["ok"] is False
     assert result["block_reason"] == "captcha"
 
     empty = Opener(Response(status=200, body=b""))
-    result = module.probe("http://127.0.0.1:8080", "https://example.test", opener_factory=lambda *handlers: empty)
+    result = module.probe("http://127.0.0.1:8080", "https://api.ipify.org?format=json", opener_factory=lambda *handlers: empty)
     assert result["ok"] is False
     assert result["block_reason"] == "empty_response"
 
 
-def test_probe_rejects_202_aws_waf_challenge():
+def test_body_classifier_rejects_202_aws_waf_challenge_without_an_amazon_probe():
     module = load_module()
     body = b"""
     <script>window.awsWafCookieDomainList = []; AwsWafIntegration.getToken();</script>
     <script src="https://example.token.awswaf.com/challenge.js"></script>
     <div id="challenge-container"></div>
     """
-    opener = Opener(Response(status=202, body=body))
-
-    result = module.probe(
-        "http://127.0.0.1:8080",
-        "https://www.amazon.com/dp/B07KSYGZPD",
-        opener_factory=lambda *handlers: opener,
-    )
-
-    assert result["ok"] is False
-    assert result["block_reason"] == "waf_challenge"
+    assert module._classify_body(202, body) == "waf_challenge"
 
 
 def test_probe_rejects_embedded_credentials_and_partial_auth():
     module = load_module()
     with pytest.raises(ValueError, match="without embedded credentials"):
-        module.probe("http://user:pass@127.0.0.1:8080", "https://example.test")
+        embedded = "http://" + "user" + ":" + "pass" + "@127.0.0.1:8080"
+        module.probe(embedded, "https://api.ipify.org?format=json")
     with pytest.raises(ValueError, match="supplied together"):
-        module.probe("http://127.0.0.1:8080", "https://example.test", username="u")
-    with pytest.raises(ValueError, match="authenticated proxy probes require an HTTPS target"):
-        module.probe("http://127.0.0.1:8080", "http://example.test", username="u", password="p")
+        module.probe("http://127.0.0.1:8080", "https://api.ipify.org?format=json", username="u")
+    with pytest.raises(ValueError, match="approved non-Amazon allowlist"):
+        module.probe("http://127.0.0.1:8080", "http://api.ipify.org", username="u", password="p")
+
+
+def test_health_probe_rejects_any_non_allowlisted_target_before_opening():
+    module = load_module()
+    opener = Opener(Response())
+
+    with pytest.raises(ValueError, match="approved non-Amazon allowlist"):
+        module.probe(
+            "http://127.0.0.1:8080",
+            "https://www.amazon.co.uk/robots.txt",
+            opener_factory=lambda *handlers: opener,
+        )
+    assert opener.request is None
+
+
+def test_health_probe_cli_rejects_amazon_target_without_network():
+    result = subprocess.run(
+        [
+            sys.executable,
+            SCRIPT,
+            "--proxy-url",
+            "http://127.0.0.1:9",
+            "--target-url",
+            "https://www.amazon.co.uk/robots.txt",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 2
+    assert "approved non-Amazon allowlist" in result.stdout
 
 
 def test_probe_sends_basic_proxy_auth_only_to_https_connect_proxy():
@@ -137,7 +163,7 @@ def test_probe_sends_basic_proxy_auth_only_to_https_connect_proxy():
     try:
         result = module.probe(
             f"http://127.0.0.1:{server.server_port}",
-            "https://example.test/robots.txt",
+            "https://api.ipify.org?format=json",
             username="alice",
             password="fake-secret",
             timeout_seconds=2,

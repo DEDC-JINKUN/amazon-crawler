@@ -19,6 +19,17 @@ except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from proxy_tunnel_auth import ProxyTunnelAuthHTTPSHandler
 
+try:
+    from proxy_canary import DEFAULT_CANARY_URL, validate_canary_target_url
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from proxy_canary import DEFAULT_CANARY_URL, validate_canary_target_url
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
 
 def _validate_proxy_url(value: str) -> str:
     parts = urlsplit(value.strip())
@@ -58,12 +69,11 @@ def probe(
     opener_factory: Any | None = None,
 ) -> dict[str, Any]:
     proxy_url = _validate_proxy_url(proxy_url)
+    target_url = validate_canary_target_url(target_url)
     target = urlsplit(target_url)
-    if target.scheme not in {"http", "https"} or not target.hostname:
-        raise ValueError("target_url must be an explicit http(s) URL")
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
-    handlers: list[Any] = [urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})]
+    handlers: list[Any] = [urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}), _NoRedirectHandler()]
     if (username is None) != (password is None):
         raise ValueError("proxy username and password must be supplied together")
     if username is not None and target.scheme != "https":
@@ -79,6 +89,16 @@ def probe(
     started = time.monotonic()
     try:
         with opener.open(request, timeout=timeout_seconds) as response:
+            final_url = response.geturl() if callable(getattr(response, "geturl", None)) else target_url
+            if final_url != target_url:
+                return {
+                    "schema_version": "amazon-us-egress-probe-v1",
+                    "ok": False,
+                    "status": int(response.getcode() or 200),
+                    "block_reason": "redirect_not_allowed",
+                    "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+                    "response_bytes": None,
+                }
             body = response.read()
             status = int(response.getcode() or 200)
     except urllib.error.HTTPError as exc:
@@ -97,7 +117,7 @@ def probe(
             "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
             "response_bytes": None,
         }
-    block_reason = _classify_body(status, body)
+    block_reason = "redirect_not_allowed" if 300 <= status < 400 else _classify_body(status, body)
     return {
         "schema_version": "amazon-us-egress-probe-v1",
         "ok": 200 <= status < 300 and block_reason is None,
@@ -111,7 +131,7 @@ def probe(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--proxy-url", required=True)
-    parser.add_argument("--target-url", default="https://www.amazon.com/robots.txt")
+    parser.add_argument("--target-url", default=DEFAULT_CANARY_URL)
     parser.add_argument("--timeout-seconds", type=int, default=15)
     parser.add_argument("--proxy-username-env")
     parser.add_argument("--proxy-password-env")

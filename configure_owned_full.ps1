@@ -23,17 +23,32 @@ function Read-SecretText([string]$Prompt) {
     }
 }
 
+function Get-CipherGeneration([byte[]]$Cipher) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $hex = [BitConverter]::ToString($sha.ComputeHash($Cipher)).Replace('-', '').ToLowerInvariant()
+        return 'legacy-' + $hex.Substring(0, 32)
+    }
+    finally { $sha.Dispose() }
+}
+
 function Read-Vault([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw 'vault_not_found' }
     $encoded = ([IO.File]::ReadAllText((Resolve-Path -LiteralPath $Path))).Trim()
+    $generation = $null
     if ($encoded.StartsWith('{')) {
         $envelope = $encoded | ConvertFrom-Json
         if ([string]$envelope.schema -ne 'amazon-us-dpapi-envelope-v1' -or
             [string]$envelope.scope -ne 'CurrentUser') { throw 'vault_envelope_invalid' }
         if ([string]$envelope.owner_sid -ne (Get-CurrentUserSid)) { throw 'vault_owner_mismatch' }
+        if ($envelope.PSObject.Properties.Name -contains 'credential_generation') {
+            $generation = [string]$envelope.credential_generation
+        }
         $encoded = [string]$envelope.ciphertext
     }
     $cipher = [Convert]::FromBase64String($encoded)
+    if ([string]::IsNullOrWhiteSpace($generation)) { $generation = Get-CipherGeneration $cipher }
+    if ($generation -notmatch '^[A-Za-z0-9_.:-]{8,100}$') { throw 'vault_generation_invalid' }
     $plain = $null
     try {
         $plain = [System.Security.Cryptography.ProtectedData]::Unprotect(
@@ -49,7 +64,7 @@ function Read-Vault([string]$Path) {
         foreach ($name in @('AMAZON_PROXY_USER','AMAZON_PROXY_PASS','AMAZON_US_POSTGRES_DSN','AMAZON_COLLECTION_API_KEY')) {
             if ([string]::IsNullOrWhiteSpace([string]$values.$name)) { throw 'vault_payload_incomplete' }
         }
-        return [pscustomobject]@{ Values = $values }
+        return [pscustomobject]@{ Values = $values; Generation = $generation }
     }
     finally {
         if ($null -ne $plain) { [Array]::Clear($plain, 0, $plain.Length) }
@@ -96,6 +111,7 @@ $postgresDsn = $null
 $apiKey = $null
 $payload = $null
 $verification = $null
+$credentialGeneration = $null
 $script:CredentialStage = 'start'
 try {
     if ($Mode -eq 'Verify') {
@@ -160,11 +176,13 @@ try {
         $plain, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
 
     $ownerSid = Get-CurrentUserSid
+    $credentialGeneration = [guid]::NewGuid().ToString('N')
     $envelope = [ordered]@{
         schema = 'amazon-us-dpapi-envelope-v1'
         scope = 'CurrentUser'
         owner_sid = $ownerSid
         created_at_utc = [DateTimeOffset]::UtcNow.ToString('o')
+        credential_generation = $credentialGeneration
         ciphertext = [Convert]::ToBase64String($cipher)
     } | ConvertTo-Json -Compress
 
@@ -188,7 +206,7 @@ try {
 catch {
     $reason = [string]$_.Exception.Message
     if ($reason -notin @('vault_not_found','vault_envelope_invalid','vault_owner_mismatch','vault_payload_invalid',
-            'vault_payload_incomplete','postgres_credential_missing','proxy_credential_missing','proxy_country_not_us')) {
+            'vault_payload_incomplete','vault_generation_invalid','postgres_credential_missing','proxy_credential_missing','proxy_country_not_us')) {
         $errorType = $_.Exception.GetType().Name
         $errorCode = ('0x{0:X8}' -f ($_.Exception.HResult -band 0xffffffffL))
         $reason = 'credential_operation_failed:{0}:{1}:{2}' -f $script:CredentialStage, $errorType, $errorCode
@@ -211,4 +229,5 @@ finally {
     $payload = $null
     $existing = $null
     $verification = $null
+    $credentialGeneration = $null
 }

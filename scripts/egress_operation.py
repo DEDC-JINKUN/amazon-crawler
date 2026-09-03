@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 
 ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_CANARY_URL = "https://api.ipify.org?format=json"
 
 
 def _load_module(name: str, path: Path):
@@ -25,7 +26,7 @@ def _load_module(name: str, path: Path):
 def run_egress_check(
     config_path: Path,
     *,
-    target_url: str = "https://www.amazon.com/robots.txt",
+    target_url: str = DEFAULT_CANARY_URL,
     probe: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     worker = _load_module("egress_operation_worker", ROOT / "scripts" / "amazon_us_worker.py")
@@ -62,7 +63,7 @@ def run_egress_check(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--target-url", default="https://www.amazon.com/robots.txt")
+    parser.add_argument("--target-url", default=DEFAULT_CANARY_URL)
     args = parser.parse_args(argv)
     try:
         result = run_egress_check(args.config, target_url=args.target_url)

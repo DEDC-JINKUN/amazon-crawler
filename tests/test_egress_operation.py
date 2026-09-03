@@ -74,3 +74,8 @@ def test_egress_unknown_response_bytes_remain_unknown_instead_of_zero(tmp_path, 
     )
 
     assert result["response_bytes"] is None
+
+
+def test_egress_health_default_is_strictly_non_amazon():
+    module = load_module()
+    assert module.run_egress_check.__kwdefaults__["target_url"] == "https://api.ipify.org?format=json"
