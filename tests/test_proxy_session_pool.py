@@ -408,8 +408,61 @@ def test_breadth_products_rotate_per_asin_while_same_asin_review_pages_stay_stic
     assert strategy["product_asins_per_session"] == 1
     assert strategy["review_session_scope"] == "same_asin_sticky"
     assert [item["asin_count"] for item in sessions] == [1, 1]
-    assert sessions[0]["health"] == "exhausted"
+    assert sessions[0]["health"] == "healthy"
     assert sessions[1]["request_count"] == 3
+
+
+def test_interleaved_review_returns_to_the_original_asin_sticky_session():
+    module = load_pool()
+    adapters = []
+
+    def factory(slot_config):
+        adapter = FakeAdapter(slot_config, [("ok", 200, 10)] * 3)
+        adapters.append(adapter)
+        return adapter
+
+    pool = module.ProxySessionPool(
+        config(proxy_product_session_scope="per_asin"), factory, classifier,
+    )
+    pool.begin_run("run-interleaved", "tenant-a", "worker-a")
+    pool.fetch("https://www.amazon.com/dp/B000000001")
+    pool.fetch("https://www.amazon.com/dp/B000000002")
+    pool.fetch("https://www.amazon.com/product-reviews/B000000001?pageNumber=2")
+
+    assert len(adapters) == 2
+    sessions = pool.evidence_context()["sessions"]
+    assert sessions[0]["request_count"] == 2
+    assert sessions[1]["request_count"] == 1
+    assert pool.evidence_context()["current_session_id"] == "session-01"
+
+
+def test_firefox_exception_after_http_challenge_opens_circuit_before_next_claim():
+    worker = load_worker()
+    pool_module = load_pool()
+
+    class BrokenFirefoxAdapter(FakeAdapter):
+        def fetch_browser(self, _url, **_kwargs):
+            raise worker.AdapterFetchError("browser challenge verification failed")
+
+    pool = pool_module.ProxySessionPool(
+        config(proxy_session_retry_per_asin=0, proxy_session_consecutive_block_limit=5),
+        lambda slot_config: BrokenFirefoxAdapter(slot_config, [("captcha", 200, 25)]),
+        worker.classify_block,
+    )
+    storage = ProductStorage(count=2)
+    worker_config = {
+        **worker.DEFAULTS, "max_actions_per_run": 2, "raw_html_dir": None, "context": {},
+        "proxy_firefox_verify_on_access_block": True,
+    }
+
+    assert worker._run_postgres_actions_impl(
+        storage, pool, worker_config, limit=2, run_id="run-firefox-error", worker_id="worker-a"
+    ) == -1
+    assert len(storage.saved) == 1
+    context = storage.saved[0]["evidence"]["context_json"]["proxy_session_pool"]
+    assert context["sessions"][0]["firefox_verification"] == "failed"
+    assert context["circuit_open_reason"] == "firefox_verification_failed"
+    assert context["unrequested_count"] == 1
 
 
 def test_two_http_captchas_allow_one_stock_firefox_verification_on_last_proxy_session():
@@ -478,7 +531,7 @@ def test_firefox_challenge_after_two_http_captchas_keeps_circuit_open_and_stops(
     assert len(storage.saved) == 1
     context = storage.saved[0]["evidence"]["context_json"]["proxy_session_pool"]
     assert context["sessions"][1]["firefox_verification"] == "failed"
-    assert context["circuit_open_reason"] == "consecutive_new_sessions_blocked"
+    assert context["circuit_open_reason"] == "firefox_verification_failed"
     assert context["unrequested_count"] == 1
 
 

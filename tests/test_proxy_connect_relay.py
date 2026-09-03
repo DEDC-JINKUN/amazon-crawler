@@ -6,6 +6,7 @@ from pathlib import Path
 import socket
 import socketserver
 import threading
+import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -90,3 +91,69 @@ def test_relay_rejects_non_connect_and_non_amazon_targets_before_upstream():
         relay.close()
 
     assert relay.audit_summary()["rejected_connections"] == 3
+
+
+def test_relay_close_terminates_active_tunnel_waits_handlers_and_zeros_credentials():
+    relay_module = load_relay()
+    upstream_connected = threading.Event()
+
+    class Upstream(socketserver.BaseRequestHandler):
+        def handle(self):
+            read_headers(self.request)
+            self.request.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            upstream_connected.set()
+            while self.request.recv(4096):
+                pass
+
+    upstream = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Upstream)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True); upstream_thread.start()
+    relay = relay_module.ProxyConnectRelay(
+        f"http://127.0.0.1:{upstream.server_address[1]}", "fixture-user", "fixture-pass",
+        max_connections=1,
+    )
+    relay.start()
+    first = socket.create_connection(relay.address, timeout=2)
+    try:
+        first.sendall(b"CONNECT www.amazon.com:443 HTTP/1.1\r\nHost: www.amazon.com:443\r\n\r\n")
+        assert read_headers(first).startswith(b"HTTP/1.1 200")
+        assert upstream_connected.wait(2)
+        with socket.create_connection(relay.address, timeout=2) as second:
+            second.sendall(b"CONNECT www.amazon.com:443 HTTP/1.1\r\nHost: www.amazon.com:443\r\n\r\n")
+            assert read_headers(second).startswith(b"HTTP/1.1 503")
+
+        started = time.monotonic()
+        relay.close()
+        assert time.monotonic() - started < 3
+        try:
+            assert first.recv(1) == b""
+        except (ConnectionResetError, OSError):
+            pass
+    finally:
+        first.close(); relay.close(); upstream.shutdown(); upstream.server_close(); upstream_thread.join(timeout=2)
+
+    summary = relay.audit_summary()
+    assert summary["active_connections"] == 0
+    assert summary["rejected_connections"] == 1
+    assert all(value == 0 for value in relay._authorization)
+
+
+def test_relay_accepts_only_standard_200_connect_response():
+    relay_module = load_relay()
+
+    class Upstream(socketserver.BaseRequestHandler):
+        def handle(self):
+            read_headers(self.request)
+            self.request.sendall(b"HTTP/1.1 204 No Content\r\n\r\n")
+
+    upstream = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Upstream)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True); upstream_thread.start()
+    relay = relay_module.ProxyConnectRelay(
+        f"http://127.0.0.1:{upstream.server_address[1]}", "fixture-user", "fixture-pass",
+    )
+    relay.start()
+    try:
+        with socket.create_connection(relay.address, timeout=2) as client:
+            client.sendall(b"CONNECT www.amazon.com:443 HTTP/1.1\r\nHost: www.amazon.com:443\r\n\r\n")
+            assert read_headers(client).startswith(b"HTTP/1.1 502")
+    finally:
+        relay.close(); upstream.shutdown(); upstream.server_close(); upstream_thread.join(timeout=2)

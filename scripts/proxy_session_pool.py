@@ -93,6 +93,7 @@ class ProxySessionPool:
             raise ValueError("proxy_url must be an approved credential-free HTTP(S) endpoint")
         self._base_proxy = base
         self._slots: list[_Slot] = []
+        self._asin_slots: dict[str, _Slot] = {}
         self._current: _Slot | None = None
         self._run_scope: tuple[str, str, str] | None = None
         self._next_port = 0
@@ -161,6 +162,7 @@ class ProxySessionPool:
     def release_capacity_reservation(self) -> None:
         self.close()
         self._slots = []
+        self._asin_slots = {}
         self._current = None
         self._run_scope = None
         self._next_port = 0
@@ -206,6 +208,12 @@ class ProxySessionPool:
         return match.group(1).upper() if match else "unknown"
 
     def _select(self, asin: str, *, force_new: bool = False) -> _Slot:
+        if self.product_scope == "per_asin" and not force_new:
+            bound = self._asin_slots.get(asin)
+            if bound is not None and bound.health == "healthy":
+                self._current = bound
+                self._prepare(bound)
+                return bound
         slot = self._current
         different_asin = slot is not None and asin not in slot.asins
         if (
@@ -214,11 +222,18 @@ class ProxySessionPool:
             or (different_asin and len(slot.asins) >= self.max_asins)
         ):
             if slot is not None:
-                if slot.health == "healthy" and not force_new:
+                preserve_other_asin = (
+                    self.product_scope == "per_asin" and slot.health == "healthy"
+                    and asin not in slot.asins and not force_new
+                )
+                if slot.health == "healthy" and not force_new and not preserve_other_asin:
                     slot.health = "exhausted"
-                slot.adapter.close()
+                if not preserve_other_asin:
+                    slot.adapter.close()
             slot = self._new_slot()
         slot.asins.add(asin)
+        if self.product_scope == "per_asin":
+            self._asin_slots[asin] = slot
         self._prepare(slot)
         return slot
 
@@ -297,6 +312,10 @@ class ProxySessionPool:
             return
         self._current.firefox_verification = "succeeded" if succeeded else "failed"
         if not succeeded:
+            self._current.health = "quarantined"
+            self._current.quarantine_reason = self._current.quarantine_reason or "firefox_verification_failed"
+            self.circuit_open_reason = "firefox_verification_failed"
+            self._current.adapter.close()
             return
         self._current.health = "healthy"
         self._current.quarantine_reason = None

@@ -21,7 +21,8 @@ MAX_HEADER_BYTES = 16 * 1024
 
 class _RelayServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = False
-    daemon_threads = True
+    daemon_threads = False
+    block_on_close = True
 
 
 class ProxyConnectRelay:
@@ -35,6 +36,7 @@ class ProxyConnectRelay:
         *,
         allowed_hosts: Iterable[str] = ("amazon.com", "media-amazon.com", "ssl-images-amazon.com"),
         connect_timeout_seconds: float = 15.0,
+        max_connections: int = 32,
     ) -> None:
         upstream = urlsplit(str(upstream_proxy_url or "").strip())
         if (
@@ -52,6 +54,9 @@ class ProxyConnectRelay:
         self._upstream = (upstream.hostname, upstream.port or 80)
         self._allowed_hosts = normalized_hosts
         self._timeout = max(1.0, min(float(connect_timeout_seconds), 120.0))
+        self._max_connections = int(max_connections)
+        if self._max_connections < 1 or self._max_connections > 64:
+            raise ValueError("proxy relay max_connections must be between 1 and 64")
         encoded = base64.b64encode(f"{username}:{password}".encode("utf-8"))
         self._authorization = bytearray(b"Basic " + encoded)
         self._server: _RelayServer | None = None
@@ -61,6 +66,8 @@ class ProxyConnectRelay:
         self._rejected = 0
         self._active = 0
         self._status = "created"
+        self._client_sockets: set[socket.socket] = set()
+        self._upstream_sockets: set[socket.socket] = set()
 
     @property
     def address(self) -> tuple[str, int]:
@@ -120,6 +127,19 @@ class ProxyConnectRelay:
         client.settimeout(self._timeout)
         upstream: socket.socket | None = None
         counted_active = False
+        with self._lock:
+            rejected = self._status != "running" or len(self._client_sockets) >= self._max_connections
+            if rejected:
+                self._rejected += 1
+            else:
+                self._client_sockets.add(client)
+        if rejected:
+            try:
+                self._read_headers(client)
+                self._reply(client, 503, "Service Unavailable")
+            except OSError:
+                pass
+            return
         try:
             request = self._read_headers(client)
             try:
@@ -135,6 +155,10 @@ class ProxyConnectRelay:
                 self._reply(client, 403, "Forbidden")
                 return
             upstream = socket.create_connection(self._upstream, timeout=self._timeout)
+            with self._lock:
+                if self._status != "running":
+                    raise OSError("proxy relay is closing")
+                self._upstream_sockets.add(upstream)
             authorization = bytes(self._authorization)
             upstream.sendall(
                 f"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n".encode("ascii")
@@ -142,7 +166,7 @@ class ProxyConnectRelay:
             )
             response = self._read_headers(upstream)
             status_line = response.split(b"\r\n", 1)[0]
-            if not re.match(br"HTTP/1\.[01] 2\d\d(?: |$)", status_line):
+            if not re.match(br"HTTP/1\.[01] 200(?: |$)", status_line):
                 self._reply(client, 502, "Bad Gateway")
                 return
             with self._lock:
@@ -163,6 +187,9 @@ class ProxyConnectRelay:
                 except OSError:
                     pass
             with self._lock:
+                self._client_sockets.discard(client)
+                if upstream is not None:
+                    self._upstream_sockets.discard(upstream)
                 if counted_active:
                     self._active -= 1
 
@@ -182,16 +209,33 @@ class ProxyConnectRelay:
 
     def close(self) -> None:
         server, thread = self._server, self._thread
-        self._server = None
-        self._thread = None
+        with self._lock:
+            self._status = "closing"
+            sockets = tuple(self._client_sockets | self._upstream_sockets)
         if server is not None:
             server.shutdown()
+        for connection in sockets:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                connection.close()
+            except OSError:
+                pass
+        if server is not None:
             server.server_close()
         if thread is not None:
             thread.join(timeout=2)
+        self._server = None
+        self._thread = None
         for index in range(len(self._authorization)):
             self._authorization[index] = 0
-        self._status = "closed"
+        with self._lock:
+            self._active = 0
+            self._client_sockets.clear()
+            self._upstream_sockets.clear()
+            self._status = "closed"
 
     def audit_summary(self) -> dict[str, int | str]:
         with self._lock:

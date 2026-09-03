@@ -3088,6 +3088,9 @@ def _run_postgres_actions_impl(
                     run_id=run_id, asin=task["asin"], ledger=fallback_ledger,
                 )
             except AdapterFetchError:
+                browser_verification = getattr(adapter, "record_browser_verification", None)
+                if callable(browser_verification):
+                    browser_verification(False)
                 browser_result = None
             if browser_result is not None:
                 browser_body, browser_status = browser_result
