@@ -265,7 +265,7 @@ def test_agent_health_separates_processed_success_failed_and_blocked_actions():
     assert status["completed_actions"] == 0
 
 
-def test_agent_health_counts_access_control_as_blocked_not_successful():
+def test_agent_health_counts_one_blocked_asin_without_stopping_service():
     service = load("agent_collection_service")
     worker_module = load("amazon_us_worker")
 
@@ -279,10 +279,36 @@ def test_agent_health_counts_access_control_as_blocked_not_successful():
             state_fields={"block_reason": "captcha"},
         )
         storage.finish_refresh_request("job-1", "failed")
-        return -1
+        return 1
 
     background = service.AgentRefreshWorker(
         storage=OnePendingStorage(), adapter_factory=Adapter,
+        config=dict(worker_module.DEFAULTS), poll_seconds=0.01, lease_seconds=120,
+    )
+    with patch.object(service, "run_postgres_actions", side_effect=fake_run):
+        background.start()
+        deadline = time.monotonic() + 2
+        while background.status()["processed_actions"] < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        status = background.status()
+        background.stop()
+
+    assert status["state"] == "running"
+    assert status["processed_actions"] == 1
+    assert status["succeeded_actions"] == 0
+    assert status["failed_actions"] == 0
+    assert status["blocked_actions"] == 1
+    assert status["completed_actions"] == 0
+
+
+def test_agent_stops_only_when_runner_reports_global_access_circuit():
+    service = load("agent_collection_service")
+    worker_module = load("amazon_us_worker")
+
+    def fake_run(*_args, **_kwargs): return -1
+
+    background = service.AgentRefreshWorker(
+        storage=RefreshStorage(), adapter_factory=Adapter,
         config=dict(worker_module.DEFAULTS), poll_seconds=0.01, lease_seconds=120,
     )
     with patch.object(service, "run_postgres_actions", side_effect=fake_run):
@@ -293,11 +319,8 @@ def test_agent_health_counts_access_control_as_blocked_not_successful():
         status = background.status()
         background.stop()
 
-    assert status["processed_actions"] == 1
-    assert status["succeeded_actions"] == 0
-    assert status["failed_actions"] == 0
-    assert status["blocked_actions"] == 1
-    assert status["completed_actions"] == 0
+    assert status["state"] == "blocked"
+    assert status["last_error"] == "access_blocked"
 
 
 def test_agent_capacity_denial_claims_nothing_and_recovers_after_fresh_canary():

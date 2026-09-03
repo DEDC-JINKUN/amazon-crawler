@@ -851,6 +851,10 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             $outcome = 'quality_failed'
             $controllerExitCode = 4
         }
+        elseif ($Mode -eq 'run' -and $null -ne $quality.blocked_actions -and [int]$quality.blocked_actions -gt 0) {
+            $outcome = 'blocked'
+            $controllerExitCode = 3
+        }
         elseif ($Mode -eq 'run' -and $workerExitCode -eq 0 -and -not $completionGateOk) {
             $outcome = 'failed'
             $controllerExitCode = 4

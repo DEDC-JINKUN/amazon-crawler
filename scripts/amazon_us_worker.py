@@ -3190,8 +3190,6 @@ def _run_postgres_actions_impl(
         source_type = getattr(adapter, "source_type", "http_html")
         transfer_bytes = getattr(adapter, "last_transfer_bytes", None)
         error_code = "context_mismatch:" + ",".join(context_errors) if context_errors else None
-        if reason and _proxy_circuit_reason(adapter):
-            _note_proxy_unrequested(adapter, max_actions - actions - 1)
         pending_missing = [key for key in ("asin", "canonical_url", "title") if not str(data.get(key) or "").strip()]
         if reason:
             _record_proxy_outcome(adapter, "blocked")
@@ -3203,6 +3201,8 @@ def _run_postgres_actions_impl(
             )
         else:
             _record_proxy_outcome(adapter, "completed")
+        if reason and _proxy_circuit_reason(adapter):
+            _note_proxy_unrequested(adapter, max_actions - actions - 1)
         evidence = _postgres_evidence(
             run_id, task, body, response_status, source_type, raw_html_dir,
             _product_evidence_context(config.get("context"), adapter, data, task["asin"]), transfer_bytes,
@@ -3309,7 +3309,8 @@ def _run_postgres_actions_impl(
         if refresh_job_id:
             storage.finish_refresh_request(refresh_job_id, "completed")
         actions += 1
-    return -1 if blocked else actions
+    pooled = callable(getattr(adapter, "evidence_context", None))
+    return -1 if _proxy_circuit_reason(adapter) or (blocked and not pooled) else actions
 
 
 def run_postgres_actions(
