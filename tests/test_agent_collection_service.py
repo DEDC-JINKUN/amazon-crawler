@@ -34,6 +34,10 @@ class RefreshStorage:
     def has_pending_refresh_task(self):
         return not self.claimed
 
+    def count_pending_refresh_tasks(self, limit):
+        assert limit == 5
+        return 0 if self.claimed else 1
+
     def load_latest_proxy_capacity(self, *, max_age_seconds):
         assert max_age_seconds == 3600
         return {
@@ -55,8 +59,8 @@ class RefreshStorage:
             "capacity_config_hash": kwargs["capacity_config_hash"],
             "credential_generation": kwargs["credential_generation"],
             "requested_capacity": kwargs["requested_capacity"], "required_slots": kwargs["required_slots"],
-            "reserved_slots": kwargs["required_slots"],
-            "slot_ids": [f"session-{index + 1:02d}" for index in range(kwargs["required_slots"])],
+            "reserved_slots": kwargs["reservation_slots"],
+            "slot_ids": [f"session-{index + 1:02d}" for index in range(kwargs["reservation_slots"])],
             "fact_finished_at": "2026-09-03T01:00:00+00:00",
             "fact_expires_at": "2026-09-03T02:00:00+00:00",
             "reservation_expires_at": "2026-09-03T01:10:00+00:00",
@@ -144,7 +148,7 @@ def test_background_service_executes_only_refresh_jobs_and_reports_health():
         "raw_html_dir": None,
         "context": {},
         "proxy_url": "http://proxy.example:10000",
-        "proxy_session_ports": [10000],
+        "proxy_session_ports": [10000, 10001],
         "proxy_session_max_asins": 5,
         "proxy_credential_generation": "test-generation-1",
     })
@@ -165,6 +169,8 @@ def test_background_service_executes_only_refresh_jobs_and_reports_health():
     background.stop()
 
     assert storage.finished == [("refresh-1", "completed")]
+    assert storage.capacity_reservation["reserved_slots"] == 2
+    assert storage.capacity_reservation["slot_ids"] == ["session-01", "session-02"]
     assert storage.saved[0]["product"]["title"] == "Agent refreshed product"
     status = background.status()
     assert status["state"] == "stopped"
@@ -181,12 +187,17 @@ def test_background_service_gives_one_agent_batch_to_one_bounded_pool_run():
     worker_module = load("amazon_us_worker")
     calls = []
 
+    class FivePendingStorage(RefreshStorage):
+        def count_pending_refresh_tasks(self, limit):
+            assert limit == 5
+            return 5
+
     def fake_run(*args, **kwargs):
         calls.append(kwargs)
         return 0
 
     background = service.AgentRefreshWorker(
-        storage=RefreshStorage(),
+        storage=FivePendingStorage(),
         adapter_factory=Adapter,
         config=dict(worker_module.DEFAULTS),
         poll_seconds=0.01,
@@ -333,7 +344,7 @@ def test_agent_capacity_denial_claims_nothing_and_recovers_after_fresh_canary():
         "raw_html_dir": None,
         "context": {},
         "proxy_url": "http://proxy.example:10000",
-        "proxy_session_ports": [10000],
+        "proxy_session_ports": [10000, 10001],
         "proxy_session_max_asins": 5,
         "proxy_credential_generation": "test-generation-1",
     })
@@ -452,7 +463,7 @@ def test_unexpected_worker_error_terminalizes_claimed_refresh_without_detail_lea
         "raw_html_dir": None,
         "context": {},
         "proxy_url": "http://proxy.example:10000",
-        "proxy_session_ports": [10000],
+        "proxy_session_ports": [10000, 10001],
         "proxy_session_max_asins": 5,
         "proxy_credential_generation": "test-generation-1",
     })

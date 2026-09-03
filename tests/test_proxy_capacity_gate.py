@@ -315,6 +315,108 @@ def test_fixed_three_reserves_bounded_replacement_slots_for_runtime_quarantine()
     assert reservation["reserved_slots"] == 3
 
 
+def test_per_asin_single_action_with_one_retry_reserves_one_replacement_slot():
+    module = load("proxy_capacity_gate")
+    cfg = config(
+        proxy_product_session_scope="per_asin",
+        proxy_session_retry_per_asin=1,
+        proxy_session_ports=[10000, 10001, 10002],
+    )
+
+    assert module.reservation_slots_for(cfg, 1) == 2
+
+
+def test_per_asin_single_action_without_retry_reserves_only_productive_slot():
+    module = load("proxy_capacity_gate")
+    cfg = config(
+        proxy_product_session_scope="per_asin",
+        proxy_session_retry_per_asin=0,
+        proxy_session_ports=[10000, 10001, 10002],
+    )
+
+    assert module.reservation_slots_for(cfg, 1) == 1
+
+
+def test_per_asin_single_action_retry_fails_closed_when_replacement_capacity_is_absent():
+    module = load("proxy_capacity_gate")
+    cfg = config(
+        proxy_product_session_scope="per_asin",
+        proxy_session_retry_per_asin=1,
+        proxy_session_ports=[10000],
+    )
+
+    class Storage:
+        called = False
+
+        def reserve_proxy_capacity(self, **_kwargs):
+            self.called = True
+            raise AssertionError("insufficient configured replacement capacity must fail before storage")
+
+    storage = Storage()
+    with pytest.raises(module.ProxyCapacityGateDenied, match="replacement_capacity_insufficient"):
+        module.acquire_capacity_reservation(
+            storage, cfg, requested_actions=1, owner_id="worker-a", lease_seconds=600,
+        )
+    assert storage.called is False
+
+
+def test_per_asin_three_actions_keep_two_slot_replacement_buffer_cap():
+    module = load("proxy_capacity_gate")
+    cfg = config(
+        proxy_product_session_scope="per_asin",
+        proxy_session_retry_per_asin=1,
+        proxy_session_ports=list(range(10000, 10034)),
+        proxy_session_consecutive_block_limit=2,
+    )
+
+    assert module.reservation_slots_for(cfg, 3) == 5
+
+
+def test_controller_reserve_entry_uses_same_single_action_replacement_contract(tmp_path, monkeypatch):
+    module = load("proxy_capacity_gate")
+    config_path = tmp_path / "worker.toml"
+    config_path.write_text(
+        """[worker]
+egress_profile = "proxy_sessions"
+proxy_url = "http://proxy.example:10000"
+proxy_username_env = "PROXY_USER"
+proxy_password_env = "PROXY_PASS"
+proxy_session_ports = [10000, 10001]
+proxy_session_max_asins = 1
+proxy_product_session_scope = "per_asin"
+proxy_session_retry_per_asin = 1
+proxy_session_consecutive_block_limit = 2
+proxy_canary_url = "https://api.ipify.org?format=json"
+proxy_canary_max_age_seconds = 3600
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AMAZON_PROXY_CREDENTIAL_GENERATION", "test-generation-controller")
+    calls = []
+
+    class Storage:
+        def reserve_proxy_capacity(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "status": "active", "reason": "capacity_reserved",
+                "reservation_id": kwargs["reservation_id"], "owner_id": kwargs["owner_id"],
+                "canary_operation_id": "op-canary-controller",
+                "capacity_config_hash": kwargs["capacity_config_hash"],
+                "credential_generation": kwargs["credential_generation"],
+                "requested_capacity": 1, "required_slots": 1, "reserved_slots": 2,
+                "slot_ids": ["session-01", "session-02"],
+            }
+
+    result = module.reserve_capacity(
+        config_path, storage=Storage(), requested_actions=1,
+        owner_id="controller-run", lease_seconds=600, reservation_id="reservation-controller",
+    )
+
+    assert calls[0]["reservation_slots"] == 2
+    assert result["reserved_slots"] == 2
+    assert result["slot_ids"] == ["session-01", "session-02"]
+
+
 def test_atomic_reservation_denial_raises_only_the_stable_reason():
     module = load("proxy_capacity_gate")
 

@@ -42,7 +42,13 @@ def reservation_slots_for(config: dict[str, Any], requested_actions: int) -> int
         max(0, requested_actions - 1),
         max(0, min(int(config.get("proxy_session_consecutive_block_limit") or 2), 5)),
     )
-    return min(planned_slots, required_slots + replacement_buffer)
+    retry_value = config.get("proxy_session_retry_per_asin")
+    per_asin_retry = (
+        str(config.get("proxy_product_session_scope") or "bounded") == "per_asin"
+        and int(1 if retry_value is None else retry_value) == 1
+    )
+    bounded_slots = min(planned_slots, required_slots + replacement_buffer)
+    return max(required_slots + 1, bounded_slots) if per_asin_retry else bounded_slots
 
 
 def _decision(
@@ -194,6 +200,8 @@ def acquire_capacity_reservation(
         raise ProxyCapacityGateDenied("capacity_configuration_invalid")
     required_slots = math.ceil(requested_actions / slot_budget) if slot_budget > 0 else requested_actions
     reservation_slots = reservation_slots_for(config, requested_actions)
+    if reservation_slots > len(list(config.get("proxy_session_ports") or [])):
+        raise ProxyCapacityGateDenied("replacement_capacity_insufficient")
     max_age_seconds = int(config.get("proxy_canary_max_age_seconds") or 3600)
     if max_age_seconds < 1 or max_age_seconds > 86400:
         raise ProxyCapacityGateDenied("capacity_configuration_invalid")
