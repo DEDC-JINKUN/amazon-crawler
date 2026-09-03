@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('egress', 'probe', 'run', 'reviews', 'status', 'console', 'stop', 'help')]
+    [ValidateSet('egress', 'canary', 'probe', 'run', 'reviews', 'status', 'console', 'stop', 'help')]
     [string]$Command = 'help',
     [int]$Limit = 0,
     [string]$TenantId = 'real_batch_20260828_500_04',
@@ -24,6 +24,9 @@ $runLedgerScript = Join-Path $projectRoot 'scripts\postgres_run_ledger.py'
 $identityBackfillScript = Join-Path $projectRoot 'scripts\backfill_identity_evidence.py'
 $operationLedgerScript = Join-Path $projectRoot 'scripts\operation_ledger.py'
 $egressOperationScript = Join-Path $projectRoot 'scripts\egress_operation.py'
+$proxyCanaryScript = Join-Path $projectRoot 'scripts\proxy_canary.py'
+$proxyCapacityGateScript = Join-Path $projectRoot 'scripts\proxy_capacity_gate.py'
+$nonAmazonCanaryUrl = 'https://api.ipify.org?format=json'
 $consoleUrl = "http://127.0.0.1:${Port}"
 $script:promptedForPassword = $false
 $script:setDefaultDsn = $false
@@ -34,6 +37,7 @@ $script:PendingRunId = $null
 $script:PendingOperationStarted = $false
 $script:PendingOperationFinished = $false
 $script:PendingOperationStage = $null
+$script:PendingCapacityGateReason = $null
 
 function Get-WorkerMutexName {
     $sha = [Security.Cryptography.SHA256]::Create()
@@ -519,6 +523,41 @@ function Start-EgressOperation([string]$ConfigValue) {
     }
 }
 
+function Start-ProxyCanary([string]$ConfigValue, [int]$RequestedActions) {
+    if ($RequestedActions -lt 1 -or $RequestedActions -gt 500) { throw 'canary limit must be between 1 and 500' }
+    Ensure-Credentials
+    $resolvedConfig = Resolve-ProjectPath $ConfigValue
+    $stamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
+    $entropy = [Guid]::NewGuid().ToString('N').Substring(0, 10)
+    $operationId = "op-canary-${stamp}-${PID}-${entropy}"
+    $output = & $python $proxyCanaryScript --config $resolvedConfig --tenant-id $TenantId `
+        --requested-actions $RequestedActions --operation-id $operationId
+    $canaryExit = $LASTEXITCODE
+    try { $result = ($output | Out-String) | ConvertFrom-Json }
+    catch { throw 'Proxy canary returned invalid output.' }
+    Write-Host ("Proxy canary: operation_id={0} status={1} planned/tested/available/unique={2}/{3}/{4}/{5} capacity={6}/{7} gate={8}:{9} p95_ms={10}" -f `
+        $operationId,$result.canary_status,$result.planned_slots,$result.tested_slots,$result.available_slots,
+        $result.unique_egress_count,$result.slot_capacity,$result.requested_capacity,
+        $result.capacity_gate_status,$result.capacity_gate_reason,$result.p95_latency_ms)
+    return $canaryExit
+}
+
+function Invoke-CapacityGate([string]$ResolvedConfig, [int]$RequestedActions) {
+    $output = & $python $proxyCapacityGateScript --config $ResolvedConfig --tenant-id $TenantId `
+        --requested-actions $RequestedActions
+    $gateExit = $LASTEXITCODE
+    try { $result = ($output | Out-String) | ConvertFrom-Json }
+    catch { throw 'Capacity gate returned invalid output.' }
+    if ($gateExit -ne 0 -or $result.status -ne 'allowed') {
+        $reason = if ($result.reason) { [string]$result.reason } else { 'capacity_gate_error' }
+        $script:PendingCapacityGateReason = $reason
+        throw "Capacity gate denied: $reason"
+    }
+    Write-Host ("Capacity gate: allowed reason={0} required_slots={1} available_unique_slots={2} capacity={3}/{4}" -f `
+        $result.reason,$result.required_slots,$result.available_unique_slots,$result.slot_capacity,$result.requested_capacity)
+    return $result
+}
+
 function Initialize-CrawlOperation([string]$Mode) {
     $stamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
     $entropy = [Guid]::NewGuid().ToString('N').Substring(0, 10)
@@ -589,7 +628,7 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
         Mark-OperationPreflight $operationId 'running' 0 $null
         $preflightStarted = [DateTime]::UtcNow
         $preflightOutput = & $python $preflightScript --manifest $ResolvedManifest --config $ResolvedConfig `
-            --backend postgres --dsn-env AMAZON_US_POSTGRES_DSN --require-live
+            --backend postgres --dsn-env AMAZON_US_POSTGRES_DSN --require-live --probe-target-url $nonAmazonCanaryUrl
         $preflightExit = $LASTEXITCODE
         $preflightDurationMs = [Math]::Round(([DateTime]::UtcNow - $preflightStarted).TotalMilliseconds, 1)
         $preflightOutput | Out-String | Set-Content -LiteralPath $preflightLog -Encoding UTF8
@@ -600,6 +639,8 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
         $preflightStatus = if ($preflightExit -eq 0) { 'succeeded' } else { 'failed' }
         Mark-OperationPreflight $operationId $preflightStatus $preflightDurationMs $preflightErrorClass
         if ($preflightExit -ne 0) { throw "Preflight failed with exit code $preflightExit" }
+        $operationStage = 'capacity_gate'
+        $null = Invoke-CapacityGate $ResolvedConfig $ActionLimit
         $operationStage = 'collection_ledger'
         Start-RunLedger $runId $Mode $ActionLimit $workerId
         $runLedgerStarted = $true
@@ -797,6 +838,7 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             $operationErrorClass = if ($isInterrupted) { 'controller_interrupted' } else { switch ($operationStage) {
                 'console' { 'console_unavailable' }
                 'preflight' { if ($preflightErrorClass) { $preflightErrorClass } else { 'preflight_failed' } }
+                'capacity_gate' { if ($script:PendingCapacityGateReason) { $script:PendingCapacityGateReason } else { 'capacity_gate_denied' } }
                 'collection_ledger' { 'collection_ledger_error' }
                 'worker' { 'worker_failed' }
                 default { 'controller_error' }
@@ -857,6 +899,7 @@ function Show-Help {
 Amazon crawler control
 
   .\crawler.ps1 egress
+  .\crawler.ps1 canary -Limit 3
   .\crawler.ps1 probe
   .\crawler.ps1 run -Limit 10
   .\crawler.ps1 reviews -Limit 3
@@ -865,7 +908,8 @@ Amazon crawler control
   .\crawler.ps1 stop
   .\crawler.ps1 stop -All
 
-egress records an independent audited proxy health operation. probe defaults to 3 product actions.
+egress records the legacy independent proxy health operation. canary tests every planned session against a non-Amazon HTTPS endpoint.
+probe defaults to 3 product actions and requires a fresh matching canary with sufficient unique capacity.
 run defaults to 10. reviews defaults to 3 review actions.
 Limits above 100 require -ConfirmLargeBatch.
 Blocked tasks are never requeued automatically.
@@ -889,6 +933,11 @@ try {
     elseif ($Command -eq 'egress') {
         if (-not (Test-Path -LiteralPath $python)) { throw 'Run setup_windows.bat first.' }
         $exitCode = Start-EgressOperation $ConfigPath
+    }
+    elseif ($Command -eq 'canary') {
+        if (-not (Test-Path -LiteralPath $python)) { throw 'Run setup_windows.bat first.' }
+        $actualLimit = if ($Limit -gt 0) { $Limit } else { 3 }
+        $exitCode = Start-ProxyCanary $ConfigPath $actualLimit
     }
     else {
         if ($Command -in @('probe','run','reviews')) { Initialize-CrawlOperation $Command }

@@ -694,7 +694,10 @@ class PostgresConsoleRepository:
                 """
                 SELECT operation_id,tenant_id,operation_type,status,preflight_status,preflight_duration_ms,
                        failure_stage,error_class,egress_id,collection_run_id,http_status,response_bytes,
-                       probe_elapsed_ms,started_at,finished_at,duration_ms
+                       probe_elapsed_ms,started_at,finished_at,duration_ms,
+                       canary_status,planned_slots,tested_slots,available_slots,unique_egress_count,
+                       duplicate_egress_count,requested_capacity,required_slots,slot_capacity,
+                       capacity_gate_status,capacity_gate_reason,canary_p95_latency_ms,capacity_detail_json
                 FROM amazon_us.operation_run
                 WHERE tenant_id=%s ORDER BY started_at DESC LIMIT %s
                 """,

@@ -358,6 +358,8 @@ def test_agent_api_refresh_is_consumed_and_returned_from_real_postgres():
     api = load_script("collection_api")
     client_module = load_script("amazon_collection_client")
     worker_module = load_script("amazon_us_worker")
+    canary_module = load_script("proxy_canary")
+    operation_module = load_script("operation_ledger")
     storage_module = load_storage()
     tenant_id = f"agent-e2e-{uuid.uuid4().hex}"
     schema = (ROOT / "schema" / "postgres_schema.sql").read_text(encoding="utf-8")
@@ -387,7 +389,46 @@ def test_agent_api_refresh_is_consumed_and_returned_from_real_postgres():
         def close(self): return None
 
     config = dict(worker_module.DEFAULTS)
-    config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}})
+    config.update({
+        "max_actions_per_run": 5,
+        "raw_html_dir": None,
+        "context": {},
+        "proxy_url": "http://proxy.example:10000",
+        "proxy_session_ports": [10000],
+        "proxy_session_max_asins": 5,
+    })
+    capacity_fact = {
+        "schema_version": "amazon-us-proxy-canary-v1",
+        "canary_status": "succeeded",
+        "planned_slots": 1,
+        "tested_slots": 1,
+        "available_slots": 1,
+        "unique_egress_count": 1,
+        "duplicate_egress_count": 0,
+        "requested_capacity": 5,
+        "required_slots": 1,
+        "slot_capacity": 5,
+        "capacity_gate_status": "allowed",
+        "capacity_gate_reason": "capacity_sufficient",
+        "p95_latency_ms": 10.0,
+        "config_hash": canary_module.capacity_config_hash(config),
+        "sessions": [{
+            "session_id": "session-01",
+            "status": "available",
+            "auth_status": "succeeded",
+            "connect_tls_status": "succeeded",
+            "error_class": None,
+            "http_status": 200,
+            "latency_ms": 10.0,
+        }],
+    }
+    connect = lambda: psycopg.connect(DSN)
+    operation_id = f"op-canary-{uuid.uuid4().hex}"
+    operation_module.ensure_schema(connect)
+    operation_module.start_operation(operation_id, tenant_id, "canary", "dataimpulse-us", None, connect=connect)
+    operation_module.finish_operation(
+        operation_id, tenant_id, "succeeded", None, None, capacity_fact=capacity_fact, connect=connect
+    )
     background = service.AgentRefreshWorker(
         storage=storage, adapter_factory=Adapter, config=config, poll_seconds=0.01, lease_seconds=120
     )

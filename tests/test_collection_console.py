@@ -383,6 +383,67 @@ def test_operation_runs_api_is_tenant_scoped_and_separate_from_collection_runs()
     assert "operation_run" not in run_method
 
 
+def test_canary_operation_projection_preserves_unknown_and_safe_capacity_details():
+    module = load_module()
+    operation = {
+        "operation_id": "op-canary-1",
+        "tenant_id": "tenant-a",
+        "operation_type": "canary",
+        "status": "failed",
+        "preflight_status": "not_applicable",
+        "preflight_duration_ms": None,
+        "failure_stage": "capacity_gate",
+        "error_class": "credentials_missing",
+        "egress_id": "dataimpulse-us",
+        "collection_run_id": None,
+        "http_status": None,
+        "response_bytes": None,
+        "probe_elapsed_ms": None,
+        "started_at": None,
+        "finished_at": None,
+        "duration_ms": None,
+        "canary_status": "unknown",
+        "planned_slots": 3,
+        "tested_slots": 0,
+        "available_slots": None,
+        "unique_egress_count": None,
+        "duplicate_egress_count": None,
+        "requested_capacity": 3,
+        "required_slots": 1,
+        "slot_capacity": None,
+        "capacity_gate_status": "denied",
+        "capacity_gate_reason": "credentials_missing",
+        "canary_p95_latency_ms": None,
+        "capacity_detail_json": {"sessions": []},
+    }
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def execute(self, sql, _params=()):
+            self.rows = [{"relation": "amazon_us.operation_run"}] if "to_regclass" in sql else [operation]
+        def fetchone(self): return self.rows[0]
+        def fetchall(self): return self.rows
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def cursor(self): return Cursor()
+
+    repository = module.PostgresConsoleRepository("postgresql://fixture", "tenant-a")
+    repository._connect = lambda: Connection()
+    result = repository.list_operations()
+
+    assert result[0]["canary_status"] == "unknown"
+    assert result[0]["available_slots"] is None
+    assert result[0]["unique_egress_count"] is None
+    assert result[0]["slot_capacity"] is None
+    assert result[0]["capacity_gate_reason"] == "credentials_missing"
+    app = (ROOT / "console" / "app.js").read_text(encoding="utf-8")
+    assert "canarySummary" in app
+    assert "unknown" in app
+
+
 def test_console_tooltips_explain_all_operational_terms_accessibly():
     html = (ROOT / "console" / "index.html").read_text(encoding="utf-8")
     for term in (

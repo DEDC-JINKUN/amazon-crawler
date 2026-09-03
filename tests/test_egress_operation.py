@@ -49,3 +49,28 @@ def test_egress_result_is_safe_and_independent_of_asin_collection(tmp_path, monk
     assert "secret-user" not in encoded
     assert "secret-pass" not in encoded
     assert "requested_actions" not in encoded and "recorded_actions" not in encoded
+
+
+def test_egress_unknown_response_bytes_remain_unknown_instead_of_zero(tmp_path, monkeypatch):
+    module = load_module()
+    config = tmp_path / "worker.toml"
+    config.write_text(
+        "[worker]\nproxy_url='http://proxy.example:823'\n"
+        "proxy_username_env='PROXY_USER'\nproxy_password_env='PROXY_PASS'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PROXY_USER", "secret-user")
+    monkeypatch.setenv("PROXY_PASS", "secret-pass")
+
+    result = module.run_egress_check(
+        config,
+        probe=lambda *_args, **_kwargs: {
+            "ok": False,
+            "status": None,
+            "block_reason": "network_error",
+            "elapsed_ms": 100.0,
+            "response_bytes": None,
+        },
+    )
+
+    assert result["response_bytes"] is None

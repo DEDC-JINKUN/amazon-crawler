@@ -193,6 +193,7 @@ function renderOperations(data) {
       taskCell(operation.error_class),
       taskCell(operation.egress_id),
       taskCell(operation.http_status),
+      taskCell(canarySummary(operation), 'product-cell'),
       taskCell(operation.duration_seconds == null ? '—' : `${number(operation.duration_seconds)}s`),
       taskCell(`${dateTime(operation.started_at)} / ${dateTime(operation.finished_at)}`),
       taskCell(operation.collection_run_id),
@@ -200,8 +201,16 @@ function renderOperations(data) {
     body.append(row);
   }
   if (!state.operations.length) {
-    const row = document.createElement('tr'); const cell = taskCell('暂无操作记录', 'muted'); cell.colSpan = 11; row.append(cell); body.append(row);
+    const row = document.createElement('tr'); const cell = taskCell('暂无操作记录', 'muted'); cell.colSpan = 12; row.append(cell); body.append(row);
   }
+}
+
+function knownNumber(value) { return value === null || value === undefined ? 'unknown' : number(value); }
+function canarySummary(operation) {
+  if (operation.operation_type !== 'canary') return '—';
+  const p95 = operation.canary_p95_latency_ms === null || operation.canary_p95_latency_ms === undefined
+    ? 'unknown' : `${number(operation.canary_p95_latency_ms)}ms`;
+  return `status ${operation.canary_status || 'unknown'} · planned/tested/available/unique ${knownNumber(operation.planned_slots)}/${knownNumber(operation.tested_slots)}/${knownNumber(operation.available_slots)}/${knownNumber(operation.unique_egress_count)} · capacity ${knownNumber(operation.slot_capacity)}/${knownNumber(operation.requested_capacity)} · required slots ${knownNumber(operation.required_slots)} · duplicates ${knownNumber(operation.duplicate_egress_count)} · gate ${operation.capacity_gate_status || 'unknown'}:${operation.capacity_gate_reason || 'unknown'} · p95 ${p95}`;
 }
 
 async function loadOperations() {

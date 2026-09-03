@@ -55,7 +55,7 @@ def run_egress_check(
         "status": result.get("status"),
         "error_class": result.get("block_reason"),
         "elapsed_ms": result.get("elapsed_ms"),
-        "response_bytes": int(result.get("response_bytes") or 0),
+        "response_bytes": int(result["response_bytes"]) if result.get("response_bytes") is not None else None,
     }
 
 
@@ -72,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
             "status": None,
             "error_class": "configuration_error",
             "elapsed_ms": None,
-            "response_bytes": 0,
+            "response_bytes": None,
         }
         print(json.dumps(result, ensure_ascii=False))
         print(f"egress check failed ({type(exc).__name__})", file=sys.stderr)

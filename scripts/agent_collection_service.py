@@ -15,7 +15,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
-from amazon_us_worker import DEFAULT_CONFIG, _build_http_adapter, load_config, run_postgres_actions  # noqa: E402
+from amazon_us_worker import (  # noqa: E402
+    DEFAULT_CONFIG,
+    ProxyCapacityGateDenied,
+    _build_http_adapter,
+    load_config,
+    run_postgres_actions,
+)
 from collection_api import CollectionServer, LOOPBACK_HOSTS  # noqa: E402
 from collection_storage import PostgresCollectionRepository  # noqa: E402
 from postgres_worker_storage import PostgresWorkerStorage  # noqa: E402
@@ -101,15 +107,28 @@ class AgentRefreshWorker:
                 self._state = "running"
             while not self._stop.is_set():
                 run_id = f"agent-refresh-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}-{uuid.uuid4().hex[:8]}"
-                result = run_postgres_actions(
-                    self._refresh_storage,
-                    adapter,
-                    self.config,
-                    limit=MAX_AGENT_REFRESH_BATCH,
-                    run_id=run_id,
-                    worker_id=worker_id,
-                    lease_seconds=self.lease_seconds,
-                )
+                try:
+                    result = run_postgres_actions(
+                        self._refresh_storage,
+                        adapter,
+                        self.config,
+                        limit=MAX_AGENT_REFRESH_BATCH,
+                        run_id=run_id,
+                        worker_id=worker_id,
+                        lease_seconds=self.lease_seconds,
+                        enforce_capacity_gate=True,
+                    )
+                except ProxyCapacityGateDenied as exc:
+                    with self._lock:
+                        self._state = "blocked"
+                        self._last_error = exc.reason
+                    self._event.wait(self.poll_seconds)
+                    self._event.clear()
+                    continue
+                with self._lock:
+                    if self._state == "blocked":
+                        self._state = "running"
+                        self._last_error = None
                 if result == -1:
                     with self._lock:
                         self._state = "blocked"

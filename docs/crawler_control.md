@@ -5,6 +5,7 @@
 ## 最常用命令
 
 ```powershell
+.\crawler.ps1 canary -Limit 3
 .\crawler.ps1 probe
 .\crawler.ps1 run -Limit 10
 .\crawler.ps1 status
@@ -13,7 +14,8 @@
 .\crawler.ps1 stop -All
 ```
 
-- `probe`：默认3个纯商品action，只用于出口恢复或上线前验证，可用 `-Limit 1..5` 覆盖；
+- `canary`：测试全部计划会话的非Amazon HTTPS认证、CONNECT/TLS、延迟和运行内出口去重；`-Limit`表示下一阶段计划action数；
+- `probe`：默认3个纯商品action，只用于出口恢复或上线前验证，可用 `-Limit 1..5` 覆盖；缺少同配置、未过期且容量足够的canary时不领取任务；
 - `run`：默认10个纯商品action，可用 `-Limit 1..500`；
 - `status`：不需要数据库密码，读取已运行的本机Console，显示任务和最近run；
 - `console`：复用已有Console；未运行时隐藏输入数据库密码并启动；
@@ -47,12 +49,13 @@ console      http://127.0.0.1:8770
 1. 获取按项目和tenant命名的Windows named mutex，原子保证单控制器；
 2. 隐藏输入PostgreSQL密码；
 3. 复用或启动loopback-only只读Console；
-4. 执行live preflight；
-5. 生成唯一run_id和worker_id；
-6. 启动Windows Job Object宿主；宿主先等待gate，控制器登记真实宿主PID后才允许启动Worker；
-7. 当前控制台每5秒显示run进度；
-8. Worker结束后写receipt，打印stdout/stderr尾部并清除Worker锁；
-9. 控制脚本清除自己创建的密码环境变量。
+4. 使用非Amazon端点执行live preflight；
+5. 读取PostgreSQL最新canary operation，验证配置指纹、新鲜度、计划规模和唯一槽容量；拒绝时不创建collection run、不领取任务、不访问Amazon；
+6. 生成唯一run_id和worker_id；
+7. 启动Windows Job Object宿主；宿主先等待gate，控制器登记真实宿主PID后才允许启动Worker；
+8. 当前控制台每5秒显示run进度；
+9. Worker结束后写receipt，打印stdout/stderr尾部并清除Worker锁；
+10. 控制脚本清除自己创建的密码环境变量。
 
 所有任务固定使用 `--product-only`、`--once` 和PostgreSQL事实源。遇CAPTCHA/403/429/WAF时，Worker仍按配置立即停止；控制脚本不会自动换IP、重排blocked或继续剩余任务。
 
@@ -88,6 +91,6 @@ preflight完整输出保存为每个run目录的 `preflight.log`，receipt同时
 
 - `0`：命令完成；
 - `2`：参数、路径、preflight、凭据或启动失败；
-- `3`：Worker遇到blocked并按设计停止。
+- `3`：canary/容量Gate拒绝，或Worker遇到blocked并按设计停止；
 
 实际run结果以Console的“本次运行结果”和对应receipt为准，不能只看总任务状态。

@@ -38,6 +38,7 @@
 - 原始 evidence 新写入改为 UTF-8 明文 SHA-256 内容寻址的 `.html.gz`；数据库只保留相对路径、hash 与 metadata。相同 ASIN 的相同 body 跨 run 复用同一 raw 文件；旧 `.html` 保留且离线健康检查、覆盖率、回填和基准解析兼容两种格式。
 - `scripts/secure_dpapi_launcher.ps1` 只在短生命周期子进程环境中解密 Windows CurrentUser DPAPI 仓；不会把值放入命令行、stdout/stderr、数据库或 Git。新密钥仓在明文外层只保存非秘密的 scope、owner SID、创建时间和 DPAPI ciphertext；启动器先比对当前 Windows SID，账号不匹配时在解密前以 `vault-owner-mismatch` 失败。Collection API 可从同一密钥派生只读/refresh Agent 的不同 scoped key；API 将 `requested_by` 固定派生为认证 Agent，并将无凭据、越权和接受的 refresh 写入无秘密审计记录。
 - **真实出口阻塞，尚未开始 3→20→100→剩余 1,093 商品阶梯：** 当日 DataImpulse 配置 `gw.dataimpulse.com:823`、已确认的 `__cr.us` 用户名和 DPAPI 凭据在 live preflight 返回 `network_error`；本机随后对该 host:port 的 TCP 连通性为 `False`。未发生 403/429/CAPTCHA/WAF/login，也没有代理轮换、替代出口、Cookie/登录或 CAPTCHA 绕过。恢复条件是让此 Windows 主机可达已批准的 DataImpulse `gw.dataimpulse.com:823`（或由供应商确认并授权的新已批准 endpoint）；恢复后必须从 3-ASIN product gate 重新开始，不能把本次初始化当作真实采集。
+- **2026-09-03 新鲜诊断替代“当前端口不可达”结论，但不等于Amazon已恢复：** 26份既有raw离线重放全部通过内容哈希，明确分出3份HTTP 200 CAPTCHA、4份同Parent兄弟变体跳转和19份同ASIN商品页；其中一个曾CAPTCHA的ASIN另有后续正常商品页，说明阻断具有会话/时段不稳定性，不能把商品问题或“换IP”当统一根因。同日经DPAPI执行34个计划粘滞端口的非Amazon HTTPS canary：34/34认证与CONNECT/TLS成功、运行内34个唯一出口、0重复，按3 ASIN/槽证明102条容量，P95 2356.1ms。该事实已进入PostgreSQL operation并由3条容量Gate读回；尚未获得本阶段真实Amazon 3→20授权，因此“大目标：解决真实爬取失败”仍为未完成。
 
 ## 2. 系统架构
 
@@ -74,8 +75,10 @@ flowchart LR
 | `scripts/postgres_worker_storage.py` | claim/lease、事务写商品/评论/evidence、状态历史 | 网络访问 |
 | `scripts/collection_console.py` | PostgreSQL tenant枚举、显式tenant-scoped只读查询、批次/run/ASIN领域投影与流量汇总 | 触发采集、修改状态 |
 | `scripts/postgres_run_ledger.py` | 幂等创建`collection_run`，写run请求数、终态与receipt JSON | 商品/evidence事实写入 |
-| `scripts/operation_ledger.py` | 独立记录egress、preflight、probe/run/reviews控制操作及失败阶段、真实耗时和安全egress_id | ASIN requested/recorded、代理URL或凭据 |
+| `scripts/operation_ledger.py` | 独立记录egress、canary、preflight、probe/run/reviews控制操作及失败阶段、真实耗时、安全egress_id和脱敏容量事实 | ASIN requested/recorded、代理URL、凭据或出口IP |
 | `scripts/egress_operation.py` | 由正式控制器执行批准出口健康检查，只输出HTTP状态、分类、耗时和字节 | 保存响应正文、代理URL、用户名或密码 |
+| `scripts/proxy_canary.py` | 对全部计划槽执行非Amazon HTTPS认证/CONNECT/TLS、延迟与运行内出口去重，写operation事实 | 输出或持久化出口IP、端口映射、凭据或正文 |
+| `scripts/proxy_capacity_gate.py` | 读取最新同tenant canary，按配置指纹、新鲜度和计划action容量决定允许/拒绝 | 领取任务、访问Amazon或修改商品状态 |
 | `scripts/backfill_identity_evidence.py` | 幂等把旧`asin_mismatch` raw中的严格Parent/Child身份元数据补入既有evidence context | 写兄弟商品快照、改变原始error_code |
 | `scripts/collection_metrics.py` | SQLite 历史 evidence 的离线指标 | PostgreSQL 生产写入 |
 
@@ -212,11 +215,16 @@ proxy_session_retry_per_asin = 1            # 0..1，默认1
 proxy_session_consecutive_block_limit = 2   # 1..5，默认2
 proxy_session_window_size = 20              # 1..100，默认20
 proxy_session_window_block_limit = 3        # 1..20且不大于窗口
+proxy_canary_url = "https://api.ipify.org?format=json" # 必须为非Amazon HTTPS
+proxy_canary_timeout_seconds = 15
+proxy_canary_max_age_seconds = 3600
 ```
 
 健康会话达到 ASIN 配额后主动关闭并切下一槽。CAPTCHA、WAF、403、429 立即隔离当前槽；同一 ASIN 只允许在一个新槽重试一次。连续两个新会话阻断，或滚动20次会话响应累计三个阻断时，打开全局熔断并记录未请求数；槽耗尽同样 fail closed。Transport/network error 仍由单会话 HTTP adapter 的有限重试处理，不计访问控制熔断。
 
 Evidence 继续使用现有 `context_json.proxy_session_pool`，不新增 schema。只保存 `session-01` 形式的脱敏ID、sticky模式、ASIN/请求数、completed/variant/failed/blocked/network_error、响应字节、延迟、隔离原因、熔断原因和未请求数。跨会话重试的先前阻断正文写入原 raw store，context 仅保留content hash、raw指针和状态归因；不保存真实代理IP、端口映射、用户名、密码、Cookie、Authorization或响应正文。Console run/详情与receipt读取同一对象。
+
+所有PostgreSQL live入口还必须通过启动前容量Gate：最新canary必须与当前代理host/端口集合、凭据环境名、每槽预算、目标和超时的非秘密哈希一致，必须在有效期内，并且canary的计划规模与唯一出口容量覆盖本次action上限。Controller在创建`collection_run`前检查；Worker在`begin_run`和`claim_task`前再次检查；Agent refresh使用同一Worker门。任一层拒绝均不访问Amazon。
 
 ## 5. Firefox 与 WebDriver BiDi
 
@@ -604,13 +612,14 @@ if (-not $env:AMAZON_US_POSTGRES_DSN) { throw 'AMAZON_US_POSTGRES_DSN is require
 
 ```powershell
 .\crawler.ps1 egress
+.\crawler.ps1 canary -Limit 3
 .\crawler.ps1 probe -Limit 3
 .\crawler.ps1 run -Limit 10
 .\crawler.ps1 run -Limit 20
 .\crawler.ps1 console
 ```
 
-每一级必须使用新的 `run_id`。只有上一级无 403/429/CAPTCHA/WAF/login、上下文正确且字段质量稳定时才扩大。出现阻断立即停止，不自动换代理或重排 blocked。
+`canary -Limit N`先测试全部计划会话，但只访问非Amazon HTTPS目标；`N`表示随后阶段的计划action数。每一级必须使用新的 `run_id`。只有容量Gate允许，且上一级无 403/429/CAPTCHA/WAF/login、上下文正确、字段质量稳定时才扩大。出现阻断立即停止，不自动换代理或重排 blocked。
 
 Console 是常驻 Python 进程，代码更新后必须重启旧 Console 才会加载新的分类与汇总逻辑：先执行 `.\crawler.ps1 stop -All`，再由下一次 `probe/run` 自动启动，或单独执行 `.\crawler.ps1 console`。新版 Console 的唯一受控锁固定在 `data/console_control/.console.lock.json`，不再随 tenant 输出目录复制；`console` 命令本身也不解析或要求某个批次的 `OutputDir`。页面用 `?tenant=` 显式选择，后端每条overview/items/runs/detail查询仍带tenant条件，跨tenant run/ASIN不可见。
 
@@ -723,6 +732,23 @@ DPAPI `CurrentUser` 密钥仓必须由将来启动爬虫的同一 Windows 账号
 
 2026-09-02重新基线后关闭三个整合缺口：Agent不再绕过会话池、业务命令不再要求人工预启动、blocked Worker不再阻断只读查询；运行时组合指纹和受控旧进程替换已接入。会话池允许最多40个批准端口，并通过34槽×3 ASIN的100商品离线模拟。权威 `tests/` 全量为347 passed、2 skipped，另通过Python compileall、Node语法、PowerShell AST与diff-check；隔离tenant在8775完成真实本机启动/status/stop且未领取任务、未访问Amazon。
 
+### 11.11 非Amazon多会话canary与容量启动Gate
+
+2026-09-03新增`crawler.ps1 canary -Limit N`和DPAPI包装入口。每个计划端口只发一次非Amazon HTTPS请求；成功同时证明该次认证、CONNECT和TLS，真实出口IP仅在进程内用`ipaddress`规范化并比较，公开结果、operation、Console和日志只保存`session-NN`、状态/原因、HTTP状态、延迟及聚合计数。未测试（如凭据缺失）使用`unknown/null`；全部实际探测失败才允许记录已知0。
+
+`amazon_us.operation_run`新增canary聚合字段和经过字段白名单验证的`capacity_detail_json`。Console/API显示planned/tested/available/unique、duplicates、requested capacity、required slots、slot capacity、Gate状态/原因和P95。配置缺失、事实缺失/过期、指纹不匹配、canary计划规模不足、容量unknown或唯一容量不足都以稳定原因拒绝。
+
+生产入口一致性：`crawler.ps1`在`collection_run`之前检查；`run_postgres_actions`在adapter begin和任何lease claim之前复核；Agent refresh强制启用同一门；旧`run_once_windows.bat`与`run_scheduled_windows.bat`不再直接启动live Worker，而是进入controller。live preflight改用同一个非Amazon目标，避免容量证明前访问Amazon。
+
+新鲜实机事实为34/34可用、34唯一、0重复、102 action容量、P95 2356.1ms；PostgreSQL读回对3 action返回`allowed/capacity_sufficient`。它只排除了“当前计划端口整体不可达/容量不足”这一层根因，未排除Amazon目标侧CAPTCHA/WAF、会话声誉、Cookie/地区上下文、HTTP/Firefox或解析问题。下一步仍必须由用户明确授权固定cohort的Amazon 3条，再依据证据决定是否进入20条。
+
+为防止失败后替换样本，下一次真实验收固定复用既有事实中的以下顺序（UTF-8、每行一个ASIN并保留末尾换行）：
+
+- Gate 3：`B0CC2FRY3J`、`B0CC2JBW2H`、`B0CJFNJCNV`；SHA-256 `117ae0753d074291e44ff4cb1ea6a6298683b0cdc9e40c1b31bb816aa7538038`。上一轮分别是1个真实`sibling_variant_redirect`与2个`completed/partial`，3/3均有raw/hash/evidence，无blocked。
+- Gate 20：`B01FSJD0ZO`、`B01LWJ0JIC`、`B06VWMP73S`、`B0774G18QS`、`B07CRHSTSL`、`B07FMMYMQQ`、`B07RY2JNFK`、`B07VK5XSRP`、`B07X2S6J1W`、`B08Q82X8ZL`、`B09V7LZ4F4`、`B0B3RNWG7R`、`B0B7WX481S`、`B0B9XQYGM2`、`B0B9XSRZNB`、`B0B9XT6GX1`、`B0B9XTD4LN`、`B0B9ZFDZNJ`、`B0BB1HFRZ1`、`B0BHSF13TZ`；SHA-256 `89054e06d4189131ed0a3f6aa0762c5197d84990c1e795f0f75e53cb70296ece`。上一轮为16 completed、3 sibling variant、1 context/currency采集失败、0 blocked。
+
+Gate 3通过后必须再执行`canary -Limit 20`；当前`canary -Limit 3`事实即使物理容量为102，也因计划规模合同不能直接授权20。真实运行要使用隔离tenant/manifest只包含上述cohort，并以新run_id执行；不得从1093任务队列的“下一个pending”近似替代。
+
 ## 12. 测试矩阵
 
 | 行为 | 主要测试 |
@@ -742,6 +768,7 @@ DPAPI `CurrentUser` 密钥仓必须由将来启动爬虫的同一 Windows 账号
 | 活跃耗时、墙钟跨度、run耗时来源与可访问tooltip | `tests/test_collection_console.py` |
 | Windows控制入口、owner退出和heartbeat停更的Worker终止 | `tests/test_crawler_control.py`, `tests/test_windows_entrypoints.py` |
 | HTTPS CONNECT代理认证与origin header隔离 | `tests/test_check_egress.py`, `tests/test_http_adapter.py` |
+| 非Amazon多会话canary、出口内存去重、容量Gate、隐私与入口一致性 | `tests/test_proxy_canary.py`, `tests/test_proxy_capacity_gate.py`, `tests/test_operation_ledger.py`, `tests/test_windows_entrypoints.py` |
 | Agent scoped key、1–5刷新、refresh-only Worker、终态结果与真实PostgreSQL闭环 | `tests/test_collection_api.py`, `tests/test_agent_collection_service.py`, `tests/test_postgres_worker_entrypoint.py`, `tests/test_postgres_worker_integration.py`, `tests/test_windows_entrypoints.py` |
 
 ## 13. 可观测指标与操作门
@@ -800,6 +827,7 @@ DPAPI `CurrentUser` 密钥仓必须由将来启动爬虫的同一 Windows 账号
 | 未验证 | VOC.AI/Helium 10/Jungle Scout同cohort覆盖和新鲜度 | 需20至50 ASIN、1,000至2,000评论试点 |
 | 未验证 | 评论主题/情感/摘要的人工金标准确性 | 验收阈值待业务与技术共同确认 |
 | 未验证 | 测试账户独立评论Worker与Amazon Agent Policy合规 | 仅有设计；未获账户负责人/合规批准、未开发、未实测 |
+| 未验证 | 2026-09-03修复后的固定cohort Amazon 3→20真实商品灰度 | 当前授权明确禁止Amazon访问；canary通过不能替代真实验收 |
 
 ## 15. 术语
 

@@ -62,11 +62,11 @@
     </section>
 
     <section class="panel operation-panel">
-      <div class="panel-title"><div><p class="eyebrow">OPERATION RUNS</p><h2>操作记录</h2></div><span class="muted">egress / preflight / probe / run / reviews</span></div>
+      <div class="panel-title"><div><p class="eyebrow">OPERATION RUNS</p><h2>操作记录</h2></div><span class="muted">egress / canary / preflight / probe / run / reviews</span></div>
       <div class="table-wrap compact-table">
         <table>
-          <thead><tr><th>Operation</th><th>类型</th><th>状态</th><th>Preflight</th><th>失败阶段</th><th>错误分类</th><th>Egress</th><th>HTTP</th><th>真实耗时</th><th>开始 / 结束</th><th>Collection run</th></tr></thead>
-          <tbody id="operationRows"><tr><td colspan="11" class="muted">暂无操作记录</td></tr></tbody>
+          <thead><tr><th>Operation</th><th>类型</th><th>状态</th><th>Preflight</th><th>失败阶段</th><th>错误分类</th><th>Egress</th><th>HTTP</th><th title="unknown表示尚未测试或证据不足，不等于0。" aria-label="Canary容量：unknown不等于零或成功。">Canary / 容量</th><th>真实耗时</th><th>开始 / 结束</th><th>Collection run</th></tr></thead>
+          <tbody id="operationRows"><tr><td colspan="12" class="muted">暂无操作记录</td></tr></tbody>
         </table>
       </div>
     </section>

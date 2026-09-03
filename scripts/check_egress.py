@@ -95,7 +95,7 @@ def probe(
             "block_reason": "network_error",
             "error_type": type(exc).__name__,
             "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
-            "response_bytes": 0,
+            "response_bytes": None,
         }
     block_reason = _classify_body(status, body)
     return {

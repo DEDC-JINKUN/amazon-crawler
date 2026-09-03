@@ -25,7 +25,7 @@ def load_host():
 
 def test_control_script_exposes_small_safe_command_surface():
     text = SCRIPT.read_text(encoding="utf-8")
-    assert "ValidateSet('egress', 'probe', 'run', 'reviews', 'status', 'console', 'stop', 'help')" in text
+    assert "ValidateSet('egress', 'canary', 'probe', 'run', 'reviews', 'status', 'console', 'stop', 'help')" in text
     assert "Read-Host" in text and "-AsSecureString" in text
     assert "--product-only" in text
     assert "--reviews-only" in text
@@ -34,6 +34,8 @@ def test_control_script_exposes_small_safe_command_surface():
     assert "include-blocked" not in text.lower()
     assert "egress_operation.py" in text
     assert "operation_ledger.py" in text
+    assert "proxy_canary.py" in text
+    assert "proxy_capacity_gate.py" in text
 
 
 def test_collection_operations_are_registered_before_console_and_preflight():

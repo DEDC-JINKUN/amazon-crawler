@@ -29,6 +29,18 @@ class RefreshStorage:
     def reclaim_expired_leases(self):
         return 0
 
+    def load_latest_proxy_capacity(self, *, max_age_seconds):
+        assert max_age_seconds == 3600
+        return {
+            "canary_status": "succeeded",
+            "unique_egress_count": 1,
+            "slot_capacity": 5,
+            "requested_capacity": 5,
+            "capacity_config_hash": self.capacity_config_hash,
+            "capacity_gate_reason": "capacity_sufficient",
+            "is_fresh": True,
+        }
+
     def claim_refresh_task(self, worker_id, lease_seconds=None):
         if self.claimed:
             return None
@@ -89,7 +101,15 @@ def test_background_service_executes_only_refresh_jobs_and_reports_health():
     worker_module = load("amazon_us_worker")
     storage = RefreshStorage()
     config = dict(worker_module.DEFAULTS)
-    config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}})
+    config.update({
+        "max_actions_per_run": 5,
+        "raw_html_dir": None,
+        "context": {},
+        "proxy_url": "http://proxy.example:10000",
+        "proxy_session_ports": [10000],
+        "proxy_session_max_asins": 5,
+    })
+    storage.capacity_config_hash = load("proxy_canary").capacity_config_hash(config)
     background = service.AgentRefreshWorker(
         storage=storage,
         adapter_factory=Adapter,
@@ -116,10 +136,10 @@ def test_background_service_executes_only_refresh_jobs_and_reports_health():
 def test_background_service_gives_one_agent_batch_to_one_bounded_pool_run():
     service = load("agent_collection_service")
     worker_module = load("amazon_us_worker")
-    limits = []
+    calls = []
 
     def fake_run(*args, **kwargs):
-        limits.append(kwargs["limit"])
+        calls.append(kwargs)
         return 0
 
     background = service.AgentRefreshWorker(
@@ -132,12 +152,61 @@ def test_background_service_gives_one_agent_batch_to_one_bounded_pool_run():
     with patch.object(service, "run_postgres_actions", side_effect=fake_run):
         background.start()
         deadline = time.monotonic() + 2
-        while not limits and time.monotonic() < deadline:
+        while not calls and time.monotonic() < deadline:
             time.sleep(0.01)
         background.stop()
 
-    assert limits
-    assert limits[0] == 5
+    assert calls
+    assert calls[0]["limit"] == 5
+    assert calls[0]["enforce_capacity_gate"] is True
+
+
+def test_agent_capacity_denial_claims_nothing_and_recovers_after_fresh_canary():
+    service = load("agent_collection_service")
+    worker_module = load("amazon_us_worker")
+    storage = RefreshStorage()
+    config = dict(worker_module.DEFAULTS)
+    config.update({
+        "max_actions_per_run": 5,
+        "raw_html_dir": None,
+        "context": {},
+        "proxy_url": "http://proxy.example:10000",
+        "proxy_session_ports": [10000],
+        "proxy_session_max_asins": 5,
+    })
+    storage.capacity_config_hash = load("proxy_canary").capacity_config_hash(config)
+    fresh = False
+    original_reader = storage.load_latest_proxy_capacity
+
+    def capacity(*, max_age_seconds):
+        value = original_reader(max_age_seconds=max_age_seconds)
+        value["is_fresh"] = fresh
+        return value
+
+    storage.load_latest_proxy_capacity = capacity
+    background = service.AgentRefreshWorker(
+        storage=storage,
+        adapter_factory=Adapter,
+        config=config,
+        poll_seconds=0.01,
+        lease_seconds=120,
+    )
+
+    background.start()
+    deadline = time.monotonic() + 2
+    while background.status()["state"] != "blocked" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert background.status()["last_error"] == "capacity_evidence_stale"
+    assert storage.claimed is False
+
+    fresh = True
+    background.notify()
+    deadline = time.monotonic() + 2
+    while not storage.finished and time.monotonic() < deadline:
+        time.sleep(0.01)
+    background.stop()
+
+    assert storage.finished == [("refresh-1", "completed")]
 
 
 def test_service_cli_is_postgres_only_and_loopback_only():
@@ -222,7 +291,15 @@ def test_unexpected_worker_error_terminalizes_claimed_refresh_without_detail_lea
     worker_module = load("amazon_us_worker")
     storage = FailingRefreshStorage()
     config = dict(worker_module.DEFAULTS)
-    config.update({"max_actions_per_run": 1, "raw_html_dir": None, "context": {}})
+    config.update({
+        "max_actions_per_run": 5,
+        "raw_html_dir": None,
+        "context": {},
+        "proxy_url": "http://proxy.example:10000",
+        "proxy_session_ports": [10000],
+        "proxy_session_max_asins": 5,
+    })
+    storage.capacity_config_hash = load("proxy_canary").capacity_config_hash(config)
     background = service.AgentRefreshWorker(
         storage=storage, adapter_factory=ExplodingAdapter, config=config, poll_seconds=0.01, lease_seconds=120
     )

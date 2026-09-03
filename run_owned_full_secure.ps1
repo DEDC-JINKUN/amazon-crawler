@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('egress','probe','run','reviews','status','console','stop','configure','verify-secrets','rotate',
+    [ValidateSet('egress','canary','probe','run','reviews','status','console','stop','configure','verify-secrets','rotate',
         'agent-service','agent-status','agent-health','agent-stop','agent-get','agent-batch','agent-refresh','agent-job')]
     [string]$Mode = 'status',
     [int]$Limit = 0,

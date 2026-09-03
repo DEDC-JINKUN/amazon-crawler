@@ -192,6 +192,28 @@ class PostgresWorkerStorage:
                 raise
         return task
 
+    def load_latest_proxy_capacity(self, *, max_age_seconds: int = 3600) -> dict[str, Any] | None:
+        """Read the newest tenant-scoped canary fact without claiming collection work."""
+        seconds = int(max_age_seconds)
+        if seconds < 1 or seconds > 86400:
+            raise ValueError("max_age_seconds must be between 1 and 86400")
+        with self._connect_factory() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT canary_status,planned_slots,tested_slots,available_slots,
+                           unique_egress_count,duplicate_egress_count,requested_capacity,
+                           required_slots,slot_capacity,capacity_gate_status,capacity_gate_reason,
+                           capacity_config_hash,canary_p95_latency_ms,finished_at,
+                           finished_at >= CURRENT_TIMESTAMP - (%s * INTERVAL '1 second') AS is_fresh
+                    FROM amazon_us.operation_run
+                    WHERE tenant_id=%s AND operation_type='canary' AND finished_at IS NOT NULL
+                    ORDER BY started_at DESC LIMIT 1
+                    """,
+                    (seconds, self.tenant_id),
+                )
+                return self._as_dict(cursor.fetchone())
+
     def update_task(
         self,
         asin: str,

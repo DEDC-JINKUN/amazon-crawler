@@ -78,3 +78,44 @@ def test_interrupted_operation_cannot_be_overwritten_as_failed():
 
     assert connection.commits == 1
     assert "status='running'" in connection.cursor_instance.executed[0][0]
+
+
+def test_canary_capacity_fact_is_persisted_without_egress_identity_or_unknown_zero():
+    module = load_module()
+    connection = Connection()
+    connect = lambda: connection
+    fact = {
+        "schema_version": "amazon-us-proxy-canary-v1",
+        "canary_status": "unknown",
+        "planned_slots": 3,
+        "tested_slots": 0,
+        "available_slots": None,
+        "unique_egress_count": None,
+        "duplicate_egress_count": None,
+        "requested_capacity": 3,
+        "required_slots": 1,
+        "slot_capacity": None,
+        "capacity_gate_status": "denied",
+        "capacity_gate_reason": "credentials_missing",
+        "p95_latency_ms": None,
+        "config_hash": "a" * 64,
+        "sessions": [],
+    }
+
+    module.ensure_schema(connect)
+    module.start_operation("op-canary-1", "tenant-a", "canary", "dataimpulse-us", None, connect=connect)
+    module.finish_operation(
+        "op-canary-1", "tenant-a", "failed", "capacity_gate", "credentials_missing",
+        capacity_fact=fact, connect=connect,
+    )
+
+    sql = "\n".join(statement for statement, _ in connection.cursor_instance.executed)
+    assert "canary_status" in sql
+    assert "capacity_gate_status" in sql
+    assert "capacity_detail_json" in sql
+    finish_params = connection.cursor_instance.executed[-1][1]
+    assert None in finish_params
+    rendered = repr(finish_params)
+    assert "203.0.113" not in rendered
+    assert "proxy.example" not in rendered
+    assert "secret" not in rendered

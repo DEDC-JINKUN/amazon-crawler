@@ -130,6 +130,31 @@ def test_claim_task_is_atomic_and_returns_lease():
     assert "attempts=s.attempts+1" not in sql.replace(" ", "")
 
 
+def test_latest_proxy_capacity_fact_is_tenant_scoped_and_reports_freshness():
+    storage = load_storage()
+    row = {
+        "canary_status": "partial",
+        "unique_egress_count": 7,
+        "slot_capacity": 21,
+        "requested_capacity": 20,
+        "capacity_config_hash": "a" * 64,
+        "is_fresh": True,
+    }
+    connection = ScriptedConnection([[row]])
+    repository = storage.PostgresWorkerStorage(
+        "postgresql://example", tenant_id="tenant-a", subject_type="own", connect=lambda: connection
+    )
+
+    result = repository.load_latest_proxy_capacity(max_age_seconds=3600)
+
+    assert result == row
+    sql, params = connection.cursor_instance.executed[0]
+    assert "FROM amazon_us.operation_run" in sql
+    assert "operation_type='canary'" in sql.replace(" ", "")
+    assert "tenant-a" in params
+    assert 3600 in params
+
+
 def test_claim_task_can_filter_to_product_stage():
     storage = load_storage()
     connection = ScriptedConnection([[{"asin": "B00RCPDCQU", "status": "running", "lease_token": "token-1"}]])

@@ -26,7 +26,7 @@ def test_windows_entrypoints_reference_existing_python_scripts():
             assert (ROOT / "scripts" / script).exists(), f"{name} references missing scripts/{script}"
     for name in ("run_once_windows.bat", "run_scheduled_windows.bat"):
         text = (ROOT / name).read_text(encoding="utf-8")
-        assert "--backend postgres" in text
+        assert "crawler.ps1" in text
         assert "AMAZON_US_POSTGRES_DSN" in text
         assert "state\\amazon_us.sqlite3" not in text
 
@@ -246,6 +246,8 @@ def test_agent_service_runtime_fingerprint_covers_worker_pool_api_storage_and_co
         "agent_collection_service.py",
         "amazon_us_worker.py",
         "proxy_session_pool.py",
+        "proxy_canary.py",
+        "proxy_capacity_gate.py",
         "collection_api.py",
         "collection_storage.py",
         "postgres_worker_storage.py",
@@ -278,3 +280,23 @@ def test_agent_status_uses_liveness_so_reads_survive_a_blocked_refresh_worker():
     assert "Get-Ready" in health_block
     assert "Get-Live" in status_block
     assert "Get-Ready" not in status_block
+
+
+def test_all_windows_production_entries_share_non_amazon_canary_and_preclaim_capacity_gate():
+    controller = (ROOT / "crawler.ps1").read_text(encoding="utf-8")
+    wrapper = (ROOT / "run_owned_full_secure.ps1").read_text(encoding="utf-8")
+    run_once = (ROOT / "run_once_windows.bat").read_text(encoding="utf-8")
+    scheduled = (ROOT / "run_scheduled_windows.bat").read_text(encoding="utf-8")
+
+    assert "'canary'" in controller
+    assert "proxy_canary.py" in controller
+    assert "proxy_capacity_gate.py" in controller
+    assert "--probe-target-url" in controller
+    assert "api.ipify.org" in controller
+    crawl = controller.split("function Start-Crawl", 1)[1].split("function Stop-Locked", 1)[0]
+    assert crawl.index("Invoke-CapacityGate") < crawl.index("Start-RunLedger")
+    assert "'canary'" in wrapper
+    assert "amazon_us_worker.py --config" not in run_once
+    assert "amazon_us_worker.py --config" not in scheduled
+    assert "crawler.ps1" in run_once
+    assert "crawler.ps1" in scheduled

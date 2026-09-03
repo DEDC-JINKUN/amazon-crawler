@@ -15,6 +15,8 @@ $hostScript = Join-Path $PSScriptRoot 'crawler_process_host.py'
 $serviceScript = Join-Path $PSScriptRoot 'agent_collection_service.py'
 $workerScript = Join-Path $PSScriptRoot 'amazon_us_worker.py'
 $proxyPoolScript = Join-Path $PSScriptRoot 'proxy_session_pool.py'
+$proxyCanaryScript = Join-Path $PSScriptRoot 'proxy_canary.py'
+$proxyCapacityGateScript = Join-Path $PSScriptRoot 'proxy_capacity_gate.py'
 $collectionApiScript = Join-Path $PSScriptRoot 'collection_api.py'
 $collectionStorageScript = Join-Path $PSScriptRoot 'collection_storage.py'
 $postgresStorageScript = Join-Path $PSScriptRoot 'postgres_worker_storage.py'
@@ -42,6 +44,8 @@ function Get-AgentRuntimeFingerprint {
         $serviceScript,
         $workerScript,
         $proxyPoolScript,
+        $proxyCanaryScript,
+        $proxyCapacityGateScript,
         $collectionApiScript,
         $collectionStorageScript,
         $postgresStorageScript,
@@ -183,7 +187,7 @@ if ((Get-Live).Ok) { throw 'agent_service_port_has_unmanaged_listener' }
 Remove-ControlFiles
 $resolvedConfig = Resolve-ProjectPath $ConfigPath
 $resolvedOutput = Resolve-ProjectPath $OutputDir
-foreach ($required in @($python,$hostScript,$serviceScript,$workerScript,$proxyPoolScript,$collectionApiScript,$collectionStorageScript,$postgresStorageScript,$resolvedConfig)) {
+foreach ($required in @($python,$hostScript,$serviceScript,$workerScript,$proxyPoolScript,$proxyCanaryScript,$proxyCapacityGateScript,$collectionApiScript,$collectionStorageScript,$postgresStorageScript,$resolvedConfig)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "agent_service_file_missing:$required" }
 }
 [IO.Directory]::CreateDirectory($resolvedOutput) | Out-Null

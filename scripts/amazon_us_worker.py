@@ -50,6 +50,12 @@ except ModuleNotFoundError:
     sys.path.insert(0, str(ROOT / "scripts"))
     from proxy_tunnel_auth import ProxyTunnelAuthHTTPSHandler
 
+try:
+    from proxy_capacity_gate import ProxyCapacityGateDenied, enforce_capacity_gate as enforce_proxy_capacity_gate
+except ModuleNotFoundError:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from proxy_capacity_gate import ProxyCapacityGateDenied, enforce_capacity_gate as enforce_proxy_capacity_gate
+
 DEFAULT_CONFIG = ROOT / "config" / "amazon_us.example.toml"
 DEFAULT_MANIFEST = ROOT / "amazon_us_asin_manifest.csv"
 DEFAULT_DB = ROOT / "state" / "amazon_us.sqlite3"
@@ -111,6 +117,9 @@ DEFAULTS: dict[str, Any] = {
     "proxy_session_consecutive_block_limit": 2,
     "proxy_session_window_size": 20,
     "proxy_session_window_block_limit": 3,
+    "proxy_canary_url": "https://api.ipify.org?format=json",
+    "proxy_canary_timeout_seconds": 15,
+    "proxy_canary_max_age_seconds": 3600,
     "global_requests_per_second": 0.0,
     "egress_requests_per_second": 0.0,
     "rate_burst": 1,
@@ -2765,15 +2774,18 @@ def run_postgres_actions(
     lease_seconds: int = 600,
     product_only: bool = False,
     reviews_only: bool = False,
+    enforce_capacity_gate: bool = False,
 ) -> int:
     """Run a bounded production batch using PostgreSQL task leases."""
     if product_only and reviews_only:
         raise ValueError("product_only and reviews_only are mutually exclusive")
     run_id = run_id or f"run-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
+    max_actions = min(limit, int(config["max_actions_per_run"])) if limit else int(config["max_actions_per_run"])
+    if enforce_capacity_gate:
+        enforce_proxy_capacity_gate(storage, config, requested_actions=max_actions)
     fallback_ledger = BrowserFallbackLedger()
     if hasattr(adapter, "begin_run"):
         adapter.begin_run(run_id, str(getattr(storage, "tenant_id", "postgres-local")), worker_id)
-    max_actions = min(limit, int(config["max_actions_per_run"])) if limit else int(config["max_actions_per_run"])
     raw_value = config.get("raw_html_dir")
     raw_html_dir = Path(raw_value) if raw_value else None
     actions = 0
@@ -3251,6 +3263,7 @@ def run(args: argparse.Namespace) -> int:
                 storage, adapter, config, limit=args.limit, worker_id=args.worker_id,
                 lease_seconds=args.lease_seconds, product_only=args.product_only,
                 reviews_only=args.reviews_only, run_id=args.run_id,
+                enforce_capacity_gate=True,
             )
             return 3 if action_result == -1 else 0
         finally:

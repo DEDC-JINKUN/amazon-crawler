@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-09-03
+
+- Added a DPAPI-compatible multi-session non-Amazon proxy canary, PostgreSQL capacity facts, and Console/API projection without persisting credentials, proxy endpoints, or egress IPs.
+- Added a fresh/config-matched/size-scoped capacity gate before controller collection-run creation and before every PostgreSQL worker or Agent task claim.
+- Routed legacy Windows one-shot and scheduled entries through the controller, changed production preflight to a non-Amazon endpoint, and preserved unknown egress bytes as null.
+
 ## Unreleased
 
 - Agent 业务命令现在自动确保本机受控服务已启动；Agent refresh Worker 与普通 Worker 统一通过同一 adapter factory，配置时均使用有界 `ProxySessionPool`，同一5-ASIN批量在一个 runner run 内执行。运行时组合指纹覆盖 Worker、代理池、API、存储和配置，受控旧版本可安全替换且未知监听器保持 fail closed；liveness/readiness 分离后，采集熔断不再阻断历史快照和 job 查询。

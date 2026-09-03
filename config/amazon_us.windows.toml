@@ -16,6 +16,18 @@ proxy_url = ""
 # Optional: names of environment variables containing proxy credentials.
 proxy_username_env = ""
 proxy_password_env = ""
+# Production live collection remains denied until approved session ports are
+# configured and a matching non-Amazon canary operation is fresh.
+proxy_session_ports = []
+proxy_session_mode = "sticky"
+proxy_session_max_asins = 3
+proxy_session_retry_per_asin = 1
+proxy_session_consecutive_block_limit = 2
+proxy_session_window_size = 20
+proxy_session_window_block_limit = 3
+proxy_canary_url = "https://api.ipify.org?format=json"
+proxy_canary_timeout_seconds = 15
+proxy_canary_max_age_seconds = 3600
 # Set these only after an approved live-collection budget is agreed.
 global_requests_per_second = 0
 egress_requests_per_second = 0
