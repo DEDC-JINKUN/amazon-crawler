@@ -27,7 +27,7 @@ def _is_variant_resolution(evidence: dict[str, Any] | None) -> bool:
     if (evidence or {}).get("error_code") != "asin_mismatch":
         return False
     identity = _context_dict(evidence).get("identity") or {}
-    if not isinstance(identity, dict) or identity.get("canonical_valid_amazon") is False:
+    if not isinstance(identity, dict) or identity.get("canonical_valid_amazon") is not True:
         return False
     requested = str(identity.get("requested_asin") or "").upper()
     observed = str(identity.get("observed_asin") or "").upper()

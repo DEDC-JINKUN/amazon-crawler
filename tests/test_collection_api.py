@@ -512,6 +512,9 @@ class CollectionApiTests(unittest.TestCase):
         }
 
         self.assertEqual(storage._quality_status("succeeded", None, evidence), "variant_redirect")
+        missing_proof = json.loads(json.dumps(evidence))
+        missing_proof["context_json"]["identity"].pop("canonical_valid_amazon")
+        self.assertEqual(storage._quality_status("failed", None, missing_proof), "failed")
         self.assertEqual(storage._quality_status("succeeded", {"asin": "B0B9ZFDZNJ"}, {}), "valid")
         self.assertEqual(storage._quality_status("failed", None, {"error_code": "asin_mismatch"}), "failed")
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import gzip
+import hashlib
 import importlib.util
 import json
 import re
@@ -269,7 +271,7 @@ def test_console_context_quality_counts_partial_without_marking_it_failed():
     assert module.summarize_context_quality(rows) == {"full": 1, "partial": 1, "invalid": 1, "unknown": 1}
 
 
-def test_variant_redirect_requires_explicit_same_parent_sibling_evidence():
+def test_variant_redirect_requires_explicit_canonical_validity_proof():
     module = load_module()
     explicit = {
         "error_code": "asin_mismatch",
@@ -278,15 +280,67 @@ def test_variant_redirect_requires_explicit_same_parent_sibling_evidence():
                 "requested_asin": "B0B9ZFDZNJ",
                 "observed_asin": "B0B9ZFZZZZ",
                 "canonical_asin": "B0B9ZFZZZZ",
+                "canonical_valid_amazon": True,
                 "parent_asin": "B0PARENT01",
                 "child_asins": ["B0B9ZFDZNJ", "B0B9ZFZZZZ"],
             }
         },
     }
     ambiguous = {"error_code": "asin_mismatch", "context_json": {}}
+    missing_proof = {
+        **explicit,
+        "context_json": {"identity": {
+            key: value for key, value in explicit["context_json"]["identity"].items()
+            if key != "canonical_valid_amazon"
+        }},
+    }
+    rejected_proof = {
+        **explicit,
+        "context_json": {"identity": {
+            **explicit["context_json"]["identity"], "canonical_valid_amazon": False,
+        }},
+    }
 
     assert module.classify_evidence_outcome(explicit) == "variant_redirect"
     assert module.classify_evidence_outcome(ambiguous) == "failed"
+    assert module.classify_evidence_outcome(missing_proof) == "failed"
+    assert module.classify_evidence_outcome(rejected_proof) == "failed"
+
+
+@pytest.mark.parametrize(
+    ("canonical_url", "hash_matches", "expected"),
+    [
+        ("https://www.amazon.com/dp/B0B9ZFZZZZ", True, "variant_redirect"),
+        ("https://example.com/dp/B0B9ZFZZZZ", True, "failed"),
+        ("https://www.amazon.com/dp/B0B9ZFZZZZ", False, "failed"),
+    ],
+)
+def test_legacy_variant_projection_requires_hash_verified_raw_canonical(
+    tmp_path, canonical_url, hash_matches, expected,
+):
+    module = load_module()
+    body = f"<html><head><link rel='canonical' href='{canonical_url}'></head><body>Sibling</body></html>"
+    raw_bytes = body.encode("utf-8")
+    relative = Path("US") / "B0B9ZFDZNJ" / "evidence.html.gz"
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True)
+    with gzip.open(path, "wb") as handle:
+        handle.write(raw_bytes)
+    row = {
+        "asin": "B0B9ZFDZNJ", "error_code": "asin_mismatch",
+        "raw_html_path": relative.as_posix(),
+        "content_hash": hashlib.sha256(raw_bytes if hash_matches else b"different").hexdigest(),
+        "context_json": {"identity": {
+            "requested_asin": "B0B9ZFDZNJ", "observed_asin": "B0B9ZFZZZZ",
+            "canonical_asin": "B0B9ZFZZZZ", "parent_asin": "B0PARENT01",
+            "child_asins": ["B0B9ZFDZNJ", "B0B9ZFZZZZ"],
+        }},
+    }
+
+    reconciled = module.reconcile_legacy_variant_canonical(row, tmp_path)
+
+    assert module.classify_evidence_outcome(reconciled) == expected
+    assert "canonical_valid_amazon" not in row["context_json"]["identity"]
 
 
 def test_price_status_distinguishes_unavailable_without_buy_box_from_missing():
@@ -587,6 +641,7 @@ def test_variant_redirect_requires_explicit_same_parent_sibling_evidence():
                 "requested_asin": "B0B9ZFDZNJ",
                 "observed_asin": "B0B9ZFZZZZ",
                 "canonical_asin": "B0B9ZFZZZZ",
+                "canonical_valid_amazon": True,
                 "parent_asin": "B0PARENT01",
                 "child_asins": ["B0B9ZFDZNJ", "B0B9ZFZZZZ"],
             }

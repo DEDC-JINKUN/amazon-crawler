@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import hmac
 import json
@@ -12,6 +13,7 @@ import re
 from datetime import date, datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -151,8 +153,67 @@ def _explicit_sibling_identity(row: dict[str, Any]) -> bool:
         and canonical == observed
         and requested in children
         and observed in children
-        and identity.get("canonical_valid_amazon") is not False
+        and identity.get("canonical_valid_amazon") is True
     )
+
+
+class _CanonicalLinkParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.href: str | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "link" or self.href is not None:
+            return
+        values = {str(name).lower(): value for name, value in attrs}
+        if "canonical" in str(values.get("rel") or "").lower().split():
+            self.href = str(values.get("href") or "") or None
+
+
+def reconcile_legacy_variant_canonical(
+    row: dict[str, Any], raw_html_dir: Path | None,
+) -> dict[str, Any]:
+    """Derive missing canonical validity from hash-verified raw evidence in memory only."""
+    context = _context_value(row)
+    identity = context.get("identity") or {}
+    if not isinstance(identity, dict) or "canonical_valid_amazon" in identity:
+        return row
+    updated = dict(row)
+    updated_context = dict(context)
+    updated_identity = dict(identity)
+    updated_identity["canonical_valid_amazon"] = False
+    updated_context["identity"] = updated_identity
+    updated["context_json"] = updated_context
+    if raw_html_dir is None or not row.get("raw_html_path") or not row.get("content_hash"):
+        return updated
+    root = raw_html_dir.resolve()
+    candidate = (root / str(row["raw_html_path"])).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return updated
+    try:
+        if candidate.name.endswith(".gz"):
+            with gzip.open(candidate, "rb") as handle:
+                raw_bytes = handle.read()
+        else:
+            raw_bytes = candidate.read_bytes()
+    except OSError:
+        return updated
+    if hashlib.sha256(raw_bytes).hexdigest() != str(row.get("content_hash") or ""):
+        return updated
+    parser = _CanonicalLinkParser()
+    parser.feed(raw_bytes.decode("utf-8", errors="replace"))
+    parts = urlsplit(parser.href or "")
+    match = re.search(r"/(?:dp|clp)/([A-Za-z0-9]{10})(?:/|$|[?#])", parts.path)
+    observed = str(updated_identity.get("observed_asin") or "").upper()
+    updated_identity["canonical_valid_amazon"] = bool(
+        parts.scheme == "https"
+        and (parts.hostname or "").lower().removeprefix("www.") == "amazon.com"
+        and match
+        and match.group(1).upper() == observed
+    )
+    return updated
 
 
 def classify_evidence_outcome(row: dict[str, Any]) -> str:
@@ -362,6 +423,7 @@ class PostgresConsoleRepository:
                     AND context_json->'identity'->>'requested_asin'=asin
                     AND context_json->'identity'->>'observed_asin'<>asin
                     AND context_json->'identity'->>'canonical_asin'=context_json->'identity'->>'observed_asin'
+                    AND context_json->'identity'->'canonical_valid_amazon'='true'::jsonb
                     AND COALESCE(context_json->'identity'->>'parent_asin','')<>''
                     AND jsonb_typeof(context_json->'identity'->'child_asins')='array'
                     AND (context_json->'identity'->'child_asins') ? (context_json->'identity'->>'requested_asin')
@@ -849,7 +911,7 @@ class PostgresConsoleRepository:
         rows.sort(key=lambda row: row.get("started_at") or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
         return rows[:limit]
 
-    def load_run(self, run_id: str) -> dict[str, Any] | None:
+    def load_run(self, run_id: str, raw_html_dir: Path | None = None) -> dict[str, Any] | None:
         tenant_id = self._require_tenant()
         with self._connect() as conn, conn.cursor() as cursor:
             cursor.execute(
@@ -867,7 +929,10 @@ class PostgresConsoleRepository:
                 """,
                 (tenant_id, run_id),
             )
-            evidence_rows = [dict(row) for row in cursor.fetchall()]
+            evidence_rows = [
+                reconcile_legacy_variant_canonical(dict(row), raw_html_dir)
+                for row in cursor.fetchall()
+            ]
             cursor.execute("SELECT to_regclass('amazon_us.collection_run') AS relation")
             ledger = None
             if cursor.fetchone()["relation"] is not None:
@@ -1180,7 +1245,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             run_match = RUN_PATH.fullmatch(path)
             if run_match:
                 run_id = run_match.group(1)
-                payload = repository.load_run(run_id)
+                payload = (
+                    repository.load_run(run_id, self.server.raw_html_dir)
+                    if isinstance(repository, PostgresConsoleRepository)
+                    else repository.load_run(run_id)
+                )
                 if payload is None:
                     self._send_json(HTTPStatus.NOT_FOUND, {"error": "run_not_found", "run_id": run_id})
                     return
