@@ -54,4 +54,5 @@ save_media = "url_and_metadata_only"
 [context]
 expected_country = "US"
 expected_currency = "USD"
+# Optional: leave empty to observe the US marketplace without changing delivery ZIP.
 postal_code = ""

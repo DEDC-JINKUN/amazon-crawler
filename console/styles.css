@@ -68,6 +68,17 @@ main { padding: 24px 32px 42px; }
 .run-panel { margin-top: 14px; }
 .run-panel select { min-width: 330px; height: 36px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: #0b1726; padding: 0 10px; }
 .run-summary { margin-bottom: 12px; }
+.run-summary { font-size: 15px; line-height: 1.8; color: var(--text); }
+details > summary { cursor: pointer; color: var(--text); padding: 4px 0; }
+details:not([open]) > .panel-title { margin-bottom: 0; }
+details[open] > summary { margin-bottom: 14px; }
+.run-diagnostics { margin: 12px 0; color: var(--muted); font-size: 12px; }
+.run-diagnostics pre { max-height: 340px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+#runIssues { margin-bottom: 10px; }
+.statistics-panel { margin: 14px 0; }
+summary.panel-title { display: list-item; }
+summary.panel-title h2 { display: inline; margin-right: 12px; }
+@media (max-width: 700px) { .run-panel select { min-width: 0; max-width: 100%; width: 100%; } }
 .compact-table .status-badge.inferred { color: #ffe1a5; background: #4b3619; }
 .responsive-title { align-items: center; }
 .filters input, .filters select { height: 36px; border: 1px solid var(--border); border-radius: 8px; outline: none; color: var(--text); background: #0b1726; padding: 0 10px; }

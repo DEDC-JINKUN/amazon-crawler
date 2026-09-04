@@ -712,8 +712,8 @@ def test_console_operations_include_bound_run_capacity_and_agent_reservation_den
 def test_console_tooltips_explain_all_operational_terms_accessibly():
     html = (ROOT / "console" / "index.html").read_text(encoding="utf-8")
     for term in (
-        "Requested / Recorded", "商品成功", "Variant Redirect", "Failed", "Blocked",
-        "Pending / Running", "流量", "活跃耗时", "墙钟跨度", "HTTP", "Firefox", "代理账单unknown",
+        "已处理 / 总数", "商品成功", "同族变体", "采集失败", "访问未完成",
+        "待处理 / 进行中", "流量", "活跃耗时", "总历时", "HTTP", "Firefox", "供应商计费",
     ):
         assert term in html
     assert html.count("title=") >= 12
@@ -807,7 +807,7 @@ def test_console_serves_static_ui_with_security_headers():
         with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/", timeout=2) as response:
             body = response.read().decode("utf-8")
             assert response.status == 200
-            assert "Amazon Collection Console" in body
+            assert "Amazon 采集控制台" in body
             assert 'id="httpTrafficMetric"' in body
             assert 'id="firefoxMainMetric"' in body
             assert 'id="firefoxSubresourceMetric"' in body

@@ -2721,15 +2721,16 @@ def _assess_product_context(
     postal_confirmed = bool(
         not browser_context_failed
         and (not expected_postal or browser_confirmed or expected_postal in observed_postals)
-    )
+    ) if expected_postal else None
     observed_postal = expected_postal if expected_postal in observed_postals else (observed_postals[0] if observed_postals else None)
     context_quality = (
         "invalid" if hard_errors
-        else "partial" if browser_context_failed or not postal_confirmed
+        else "partial" if expected_postal and (browser_context_failed or not postal_confirmed)
         else "full"
     )
     quality: dict[str, Any] = {
         "context_quality": context_quality,
+        "postal_required": bool(expected_postal),
         "postal_confirmed": postal_confirmed,
         "expected_postal": expected_postal or None,
         "observed_postal": observed_postal,
@@ -2926,10 +2927,9 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
         except AdapterFetchError as exc:
             _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, row["asin"])
             # A truncated/timeout HTTP response can still be recoverable by
-            # the browser layer when a delivery context is configured. Keep
+            # the browser layer independently of optional fixed-ZIP settings. Keep
             # the normal HTTP-first route, but do not discard the fallback.
-            postal_code = str((config.get("context") or {}).get("postal_code") or "").strip()
-            if not postal_code or not hasattr(adapter, "fetch_browser"):
+            if not callable(getattr(adapter, "fetch_browser", None)):
                 _write_fetch_failure_action(conn, run_id, row, str(exc), adapter, config.get("context"))
                 if refresh_job_id and row["asin"] == refresh_asin:
                     _finish_refresh_request(conn, refresh_job_id, "failed")
@@ -3010,7 +3010,7 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
         context_errors, context_quality = (
             _assess_product_context(data, config.get("context"), adapter) if not reason else ([], {})
         )
-        if not reason and (context_errors or not context_quality.get("postal_confirmed", True)):
+        if not reason and (context_errors or (context_quality.get("postal_required") and not context_quality.get("postal_confirmed"))):
             try:
                 browser_result = _fetch_browser_once(
                     adapter, row["url"], fallback_reason=FallbackReason.CONTEXT_MISMATCH,
@@ -3028,7 +3028,7 @@ def run_actions(conn: sqlite3.Connection, adapter: Any, config: dict[str, Any], 
                 )
                 if browser_reason:
                     body, response_status, data, reason = browser_body, browser_status, {"asin": "", "canonical_url": ""}, browser_reason
-                elif browser_result is not None and not browser_context_errors and browser_context_quality.get("postal_confirmed"):
+                elif browser_result is not None and not browser_context_errors and browser_context_quality.get("context_quality") == "full":
                     body, response_status, data, reason = browser_body, browser_status, browser_data, browser_reason
         if not reason:
             context_errors, context_quality = _assess_product_context(data, config.get("context"), adapter)
@@ -3309,8 +3309,7 @@ def _run_postgres_actions_impl(
                     exc = retry_exc
                     _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, task["asin"])
             elif not callable(rotate_transport):
-                postal_code = str((config.get("context") or {}).get("postal_code") or "").strip()
-                if postal_code:
+                if callable(getattr(adapter, "fetch_browser", None)):
                     try:
                         browser_result = _fetch_browser_once(
                             adapter, task["url"], fallback_reason=FallbackReason.HTTP_TRANSPORT_ERROR,
@@ -3482,7 +3481,7 @@ def _run_postgres_actions_impl(
         context_errors, context_quality = (
             _assess_product_context(data, config.get("context"), adapter) if not reason else ([], {})
         )
-        if not reason and (context_errors or not context_quality.get("postal_confirmed", True)):
+        if not reason and (context_errors or (context_quality.get("postal_required") and not context_quality.get("postal_confirmed"))):
             try:
                 browser_result = _fetch_browser_once(
                     adapter, task["url"], fallback_reason=FallbackReason.CONTEXT_MISMATCH,
@@ -3500,7 +3499,7 @@ def _run_postgres_actions_impl(
                 )
                 if browser_reason:
                     body, response_status, data, reason = browser_body, browser_status, {"asin": "", "canonical_url": ""}, browser_reason
-                elif browser_result is not None and not browser_context_errors and browser_context_quality.get("postal_confirmed"):
+                elif browser_result is not None and not browser_context_errors and browser_context_quality.get("context_quality") == "full":
                     body, response_status, data, reason = browser_body, browser_status, browser_data, browser_reason
         if not reason:
             context_errors, context_quality = _assess_product_context(data, config.get("context"), adapter)

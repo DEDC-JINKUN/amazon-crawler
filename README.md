@@ -4,6 +4,9 @@
 
 当前版本：`0.3.0`（PostgreSQL 正式 Worker）。
 
+`develop`待发布更新：[美国站采集与简明控制台](docs/develop_us_marketplace_20260904.md)。
+`main`保持正式运行版本；本开发分支不自动更新现有服务、生产配置或数据库。
+
 本地测试结果可用 `scripts/evidence_health.py` 检查源 HTML 存在性和哈希；用 `scripts/collection_metrics.py` 按 `run_id` 查看请求数、流量和有效吞吐。
 代理流量和成本实测见 [`docs/traffic_cost_validation.md`](docs/traffic_cost_validation.md)，并用 `scripts/traffic_cost_report.py` 结合代理商后台的用量差值出具报告。
 付费出口批量前探针见 [`docs/egress_probe.md`](docs/egress_probe.md)。

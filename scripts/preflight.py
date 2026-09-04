@@ -116,9 +116,10 @@ def run_preflight(manifest: Path, config: Path, db: Path, *, require_live: bool 
                         checks.append(_check("proxy_probe", False, str(exc)))
             context = loaded.get("context", {})
             postal_code = str(context.get("postal_code") or "").strip()
-            is_us = str(context.get("expected_country") or "").upper() == "US"
             postal_valid = bool(re.fullmatch(r"\d{5}(?:-\d{4})?", postal_code))
-            checks.append(_check("us_postal_code", postal_valid or not (require_live and is_us), "configured" if postal_valid else "must be a 5-digit US ZIP (or ZIP+4) for live US collection"))
+            checks.append(_check("us_postal_code", not postal_code or postal_valid,
+                                 "fixed ZIP configured" if postal_valid else "US marketplace; ZIP observation only" if not postal_code
+                                 else "optional fixed ZIP must be 5 digits (or ZIP+4)"))
         except (OSError, ValueError, KeyError) as exc:
             checks.append(_check("config_parse", False, str(exc)))
     selenium_available = importlib.util.find_spec("selenium") is not None

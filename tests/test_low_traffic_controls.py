@@ -1270,6 +1270,58 @@ def test_postgres_postal_only_mismatch_saves_partial_product_without_cookie_brid
     assert context["location_sensitive_fields_unverified"] == ["price", "availability", "buy_box", "delivery"]
 
 
+def test_us_marketplace_observation_does_not_launch_browser_for_another_zip():
+    worker = load_worker()
+    storage = OneProductStorage()
+    adapter = PostalPartialAdapter(worker)
+    config = {**worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None,
+              "context": {"expected_country": "US", "expected_currency": "USD"}}
+    assert worker._run_postgres_actions_impl(storage, adapter, config, limit=1,
+                                             run_id="marketplace", worker_id="fixture") == 1
+    assert adapter.browser_calls == adapter.commit_calls == 0
+    context = storage.saved[0]["evidence"]["context_json"]
+    assert context["context_quality"] == "full"
+    assert context["postal_required"] is False and context["postal_confirmed"] is None
+    assert context["expected_postal"] is None and context["observed_postal"] == "97230"
+
+
+def test_us_marketplace_transport_recovery_does_not_require_fixed_zip():
+    worker = load_worker()
+    storage = OneProductStorage()
+    class Adapter(PostalPartialAdapter):
+        def fetch(self, url):
+            raise worker.AdapterFetchError("fixture timeout")
+        def fetch_browser(self, *args, **kwargs):
+            self.browser_calls += 1
+            return _portland_usd_product_html(), 200
+    adapter = Adapter(worker)
+    config = {**worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None,
+              "context": {"expected_country": "US", "expected_currency": "USD"}}
+    assert worker._run_postgres_actions_impl(storage, adapter, config, limit=1,
+                                             run_id="marketplace-recovery", worker_id="fixture") == 1
+    assert adapter.browser_calls == 1
+    assert "product" in storage.saved[0]
+    assert storage.saved[0]["evidence"]["context_json"]["context_quality"] == "full"
+
+
+def test_us_marketplace_recovers_foreign_context_without_requiring_postal_confirmation():
+    worker = load_worker()
+    storage = OneProductStorage()
+    class Adapter(PostalPartialAdapter):
+        def fetch(self, url):
+            return _portland_usd_product_html().replace('$19.99', 'HKD155.00').replace('Portland 97230', 'Hong Kong'), 200
+        def fetch_browser(self, *args, **kwargs):
+            self.browser_calls += 1
+            return _portland_usd_product_html(), 200
+    adapter = Adapter(worker)
+    config = {**worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None,
+              "context": {"expected_country": "US", "expected_currency": "USD"}}
+    worker._run_postgres_actions_impl(storage, adapter, config, limit=1, run_id="marketplace-context", worker_id="fixture")
+    assert adapter.browser_calls == 1
+    assert storage.saved[0]['product']['price'] == '$19.99'
+    assert storage.saved[0]['evidence']['context_json']['context_quality'] == 'full'
+
+
 def test_sqlite_postal_only_mismatch_saves_partial_product_without_cookie_bridge():
     worker = load_worker()
     adapter = PostalPartialAdapter(worker)

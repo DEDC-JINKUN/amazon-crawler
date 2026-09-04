@@ -3,18 +3,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Amazon Collection Console</title>
+  <title>Amazon 采集控制台</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <header class="topbar">
     <div>
-      <p class="eyebrow">READ-ONLY · LOCAL POSTGRESQL</p>
-      <h1>Amazon Collection Console</h1>
+      <h1>Amazon 采集控制台</h1>
       <p id="tenantLabel" class="muted">正在连接指定批次…</p>
     </div>
     <div class="topbar-actions">
-      <label class="tenant-picker">Tenant / 批次 <select id="tenantSelector" aria-label="选择tenant或批次"><option value="">正在读取…</option></select></label>
+      <label class="tenant-picker">批次 <select id="tenantSelector" aria-label="选择批次"><option value="">正在读取…</option></select></label>
       <span id="liveBadge" class="live-badge"><i></i> 实时</span>
       <button id="apiKeyButton" class="ghost-button" type="button">API Key</button>
       <button id="refreshButton" class="primary-button" type="button">立即刷新</button>
@@ -23,96 +22,102 @@
 
   <main>
     <div id="errorBanner" class="error-banner" hidden></div>
-    <section class="panel"><p id="recoverySummary">持久化恢复：unknown</p></section>
-
-    <section class="panel batch-panel">
-      <div class="panel-title"><div><p class="eyebrow">POSTGRESQL BATCHES</p><h2>可见批次</h2></div><span class="muted">每批次一行 · 点击切换</span></div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr>
-            <th title="PostgreSQL租户，也是批次隔离边界。" aria-label="Tenant / 批次：PostgreSQL租户，也是批次隔离边界。">Tenant / 批次</th>
-            <th title="Requested是批次任务总数；Recorded是已有采集evidence的唯一ASIN数，网络探针不计入。" aria-label="Requested / Recorded：任务总数与已记录ASIN数，网络探针不计入。">Requested / Recorded</th>
-            <th title="通过身份和质量门并保存商品快照的ASIN数。" aria-label="商品成功：通过质量门并保存商品快照的ASIN数。">商品成功</th>
-            <th title="原ASIN明确跳到同一Parent下Sibling Child；仅作领域分类，不写回兄弟商品数据。" aria-label="Variant Redirect：同Parent兄弟变体跳转。">Variant Redirect</th>
-            <th title="排除Variant Redirect和Blocked后的普通采集失败数。" aria-label="Failed：普通采集失败数。">Failed</th>
-            <th title="CAPTCHA、WAF、403、429或登录墙等访问控制事件。" aria-label="Blocked：访问控制事件数。">Blocked</th>
-            <th title="尚无evidence的任务数，以及当前持有租约正在处理的任务数。" aria-label="Pending / Running：待处理与正在处理的任务数。">Pending / Running</th>
-            <th title="HTTP压缩响应已知字节；unknown表示存在无法可靠计量的记录，不是零。" aria-label="流量：HTTP压缩响应字节及unknown记录。">流量</th>
-            <th title="各collection run实际处理时长之和，排除run之间的人工等待。" aria-label="活跃耗时：各run处理时长之和，排除人工等待。">活跃耗时</th>
-            <th title="最早run开始到最晚run结束的跨度，明确包含run间人工等待。" aria-label="墙钟跨度：包含run间人工等待的整体跨度。">墙钟跨度</th>
-            <th title="批次当前或最终状态。" aria-label="终态：批次当前或最终状态。">终态</th>
-          </tr></thead>
-          <tbody id="batchRows"><tr><td colspan="11" class="muted">正在读取PostgreSQL可见批次…</td></tr></tbody>
-        </table>
-      </div>
-    </section>
-
-    <section class="metric-grid" aria-label="批次指标">
-      <article class="metric-card"><span>进度</span><strong id="progressMetric">—</strong><small id="progressSub">—</small></article>
-      <article class="metric-card success"><span>有效商品</span><strong id="productsMetric">—</strong><small>通过商品质量门</small></article>
-      <article class="metric-card warning"><span>Partial 上下文</span><strong id="partialMetric">—</strong><small>ZIP 未确认；位置敏感字段不可验证</small></article>
-      <article class="metric-card danger" title="CAPTCHA、WAF、403、429或登录墙等访问控制事件。" aria-label="Blocked：访问控制事件。"><span>Blocked</span><strong id="blockedMetric">—</strong><small>访问控制事件</small></article>
-      <article class="metric-card warning" title="排除变体跳转和访问控制后的普通采集失败。" aria-label="Failed：普通商品或评论失败。"><span>Failed</span><strong id="failedMetric">—</strong><small>商品或评论失败</small></article>
-      <article class="metric-card"><span>页面 Action</span><strong id="actionsMetric">—</strong><small>evidence记录</small></article>
-      <article class="metric-card"><span>数据库记录</span><strong id="rowsMetric">—</strong><small>当前标准化记录</small></article>
-      <article class="metric-card"><span>Raw HTML</span><strong id="rawMetric">—</strong><small id="rawSub">—</small></article>
-      <article class="metric-card" title="HTTP表示urllib取得的压缩响应体字节，不等于代理计费。" aria-label="HTTP：压缩响应体流量。"><span>HTTP 压缩响应</span><strong id="httpTrafficMetric">—</strong><small id="httpTrafficSub">—</small></article>
-      <article class="metric-card" title="Firefox主文档的WebDriver BiDi计量；unknown表示证据不足。" aria-label="Firefox主文档：浏览器主文档流量。"><span>Firefox 主文档</span><strong id="firefoxMainMetric">—</strong><small id="firefoxMainSub">—</small></article>
-      <article class="metric-card" title="Firefox脚本、样式和XHR等子资源的BiDi计量。" aria-label="Firefox子资源：浏览器子资源流量。"><span>Firefox 子资源</span><strong id="firefoxSubresourceMetric">—</strong><small id="firefoxSubresourceSub">—</small></article>
-      <article class="metric-card" title="代理账单unknown表示尚无供应商U1-U0或账单API证据，不能用本地字节替代。" aria-label="代理账单unknown：没有供应商账单证据，不代表零。"><span>代理账单unknown</span><strong id="proxyBillMetric">—</strong><small id="proxyBillSub">需录入供应商 U1-U0</small></article>
-    </section>
-
-    <section class="panel operation-panel">
-      <div class="panel-title"><div><p class="eyebrow">OPERATION RUNS</p><h2>操作记录</h2></div><span class="muted">egress / canary / preflight / probe / run / reviews</span></div>
-      <div class="table-wrap compact-table">
-        <table>
-          <thead><tr><th>Operation</th><th>类型</th><th>状态</th><th>Preflight</th><th>失败阶段</th><th>错误分类</th><th>Egress</th><th>HTTP</th><th title="unknown表示尚未测试或证据不足，不等于0。" aria-label="Canary容量：unknown不等于零或成功。">Canary / 容量</th><th>真实耗时</th><th>开始 / 结束</th><th>Collection run</th></tr></thead>
-          <tbody id="operationRows"><tr><td colspan="12" class="muted">暂无操作记录</td></tr></tbody>
-        </table>
-      </div>
-    </section>
-
-    <section class="overview-grid">
-      <article class="panel">
-        <div class="panel-title"><div><p class="eyebrow">STATE</p><h2>任务状态</h2></div><span id="observedAt" class="muted">—</span></div>
-        <div id="statusList" class="status-list"></div>
-      </article>
-      <article class="panel">
-        <div class="panel-title"><div><p class="eyebrow">SIGNALS</p><h2>错误与阻断</h2></div></div>
-        <div class="signal-columns">
-          <div><h3>错误</h3><div id="errorList" class="chip-list"></div></div>
-          <div><h3>阻断</h3><div id="blockList" class="chip-list"></div></div>
-          <div><h3>来源</h3><div id="sourceList" class="chip-list"></div></div>
-        </div>
-      </article>
-      <article class="panel">
-        <div class="panel-title"><div><p class="eyebrow">RUNS</p><h2>最近运行</h2></div></div>
-        <div id="runList" class="run-list"></div>
-      </article>
-    </section>
+    <p id="recoverySummary" class="muted recovery-summary">正在读取调度状态…</p>
 
     <section class="panel run-panel">
       <div class="panel-title responsive-title">
-        <div><p class="eyebrow">RUN RESULT</p><h2>本次运行结果</h2></div>
-        <select id="runSelector" aria-label="选择一次运行"><option value="">选择 run_id</option></select>
+        <div><h2>本次运行结果</h2></div>
+        <select id="runSelector" aria-label="选择一次运行"><option value="">选择采集任务</option></select>
       </div>
-      <div id="runSummary" class="run-summary muted">选择一个run即可区分本次处理结果；同一ASIN可在不同run中重复出现。</div>
+      <div id="runSummary" class="run-summary" aria-live="polite">选择任务查看本次采集结果。</div>
+      <div id="runIssues" class="chip-list"></div>
+      <details class="run-diagnostics"><summary>技术详情</summary><div id="runTechnical"></div></details>
       <div class="table-wrap compact-table">
         <table>
-          <thead><tr><th>ASIN</th><th>结果</th><th>商品</th><th>价格状态</th><th>来源</th><th>HTTP</th><th>错误/阻断</th><th>归属依据</th><th>时间</th></tr></thead>
+          <thead><tr><th>ASIN</th><th>结果</th><th>商品</th><th>价格状态</th><th>来源</th><th>HTTP</th><th>具体问题</th><th>归属依据</th><th>时间</th></tr></thead>
           <tbody id="runRows"><tr><td colspan="9" class="muted">暂无已选运行</td></tr></tbody>
         </table>
       </div>
       <p id="runWarning" class="muted table-summary"></p>
     </section>
 
+
+    <details class="panel batch-panel">
+      <summary class="panel-title"><h2>全部批次</h2><span class="muted">展开切换与查看累计结果</span></summary>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th title="PostgreSQL租户，也是批次隔离边界。" aria-label="Tenant / 批次：PostgreSQL租户，也是批次隔离边界。">Tenant / 批次</th>
+            <th title="已处理是留存采集证据的唯一ASIN数；总数是整个批次商品数，不包含网络检查。" aria-label="已处理 / 总数：已记录ASIN数与批次商品总数。">已处理 / 总数</th>
+            <th title="通过身份和质量门并保存商品快照的ASIN数。" aria-label="商品成功：通过质量门并保存商品快照的ASIN数。">商品成功</th>
+            <th title="原ASIN明确跳到同一Parent下Sibling Child；仅作领域分类，不写回兄弟商品数据。" aria-label="同族变体：同Parent兄弟变体跳转。">同族变体</th>
+            <th title="排除Variant Redirect和Blocked后的普通采集失败数。" aria-label="采集失败：普通采集失败数。">采集失败</th>
+            <th title="CAPTCHA、WAF、403、429或登录墙等访问控制事件。" aria-label="访问未完成：访问控制事件数。">访问未完成</th>
+            <th title="尚无evidence的任务数，以及当前持有租约正在处理的任务数。" aria-label="待处理 / 进行中：待处理与正在处理的任务数。">待处理 / 进行中</th>
+            <th title="HTTP压缩响应已知字节；unknown表示存在无法可靠计量的记录，不是零。" aria-label="流量：HTTP压缩响应字节及unknown记录。">流量</th>
+            <th title="各collection run实际处理时长之和，排除run之间的人工等待。" aria-label="活跃耗时：各run处理时长之和，排除人工等待。">活跃耗时</th>
+            <th title="最早run开始到最晚run结束的跨度，明确包含run间人工等待。" aria-label="总历时：包含run间人工等待的整体跨度。">总历时</th>
+            <th title="批次当前或最终状态。" aria-label="终态：批次当前或最终状态。">终态</th>
+          </tr></thead>
+          <tbody id="batchRows"><tr><td colspan="11" class="muted">正在读取PostgreSQL可见批次…</td></tr></tbody>
+        </table>
+      </div>
+    </details>
+
+    <details class="panel statistics-panel"><summary>批次统计与流量</summary>
+    <section class="metric-grid" aria-label="批次指标">
+      <article class="metric-card"><span>进度</span><strong id="progressMetric">—</strong><small id="progressSub">—</small></article>
+      <article class="metric-card success"><span>有效商品</span><strong id="productsMetric">—</strong><small>通过商品质量门</small></article>
+      <article class="metric-card warning"><span>指定地区待确认</span><strong id="partialMetric">—</strong><small>仅针对要求固定ZIP的任务或历史结果</small></article>
+      <article class="metric-card danger" title="CAPTCHA、WAF、403、429或登录墙等访问控制事件。" aria-label="访问未完成：访问控制事件。"><span>访问未完成</span><strong id="blockedMetric">—</strong><small>访问控制事件</small></article>
+      <article class="metric-card warning" title="排除变体跳转和访问控制后的普通采集失败。" aria-label="采集失败：普通商品或评论失败。"><span>采集失败</span><strong id="failedMetric">—</strong><small>商品或评论失败</small></article>
+      <article class="metric-card"><span>采集记录</span><strong id="actionsMetric">—</strong><small>evidence记录</small></article>
+      <article class="metric-card"><span>数据库记录</span><strong id="rowsMetric">—</strong><small>当前标准化记录</small></article>
+      <article class="metric-card"><span>原始页面</span><strong id="rawMetric">—</strong><small id="rawSub">—</small></article>
+      <article class="metric-card" title="HTTP表示urllib取得的压缩响应体字节，不等于代理计费。" aria-label="HTTP：压缩响应体流量。"><span>HTTP 压缩响应</span><strong id="httpTrafficMetric">—</strong><small id="httpTrafficSub">—</small></article>
+      <article class="metric-card" title="Firefox主文档的WebDriver BiDi计量；unknown表示证据不足。" aria-label="Firefox主文档：浏览器主文档流量。"><span>Firefox 主文档</span><strong id="firefoxMainMetric">—</strong><small id="firefoxMainSub">—</small></article>
+      <article class="metric-card" title="Firefox脚本、样式和XHR等子资源的BiDi计量。" aria-label="Firefox子资源：浏览器子资源流量。"><span>Firefox 子资源</span><strong id="firefoxSubresourceMetric">—</strong><small id="firefoxSubresourceSub">—</small></article>
+      <article class="metric-card" title="代理账单unknown表示尚无供应商U1-U0或账单API证据，不能用本地字节替代。" aria-label="代理账单unknown：没有供应商账单证据，不代表零。"><span>供应商计费</span><strong id="proxyBillMetric">—</strong><small id="proxyBillSub">未接入时不推算费用</small></article>
+    </section>
+    </details>
+
+    <details class="panel operation-panel" id="operationPanel">
+      <summary class="panel-title"><h2>操作记录</h2><span id="operationCount" class="muted">展开查看</span></summary>
+      <div class="table-wrap compact-table">
+        <table>
+          <thead><tr><th>时间</th><th>类型</th><th>状态</th><th>Preflight</th><th>失败阶段</th><th>错误分类</th><th>Egress</th><th>HTTP</th><th title="unknown表示尚未测试或证据不足，不等于0。" aria-label="Canary容量：unknown不等于零或成功。">Canary / 容量</th><th>真实耗时</th><th>开始 / 结束</th><th>Collection run</th></tr></thead>
+          <tbody id="operationRows"><tr><td colspan="12" class="muted">暂无操作记录</td></tr></tbody>
+        </table>
+      </div>
+    </details>
+
+    <section class="overview-grid">
+      <article class="panel">
+        <div class="panel-title"><div><h2>任务状态</h2></div><span id="observedAt" class="muted">—</span></div>
+        <div id="statusList" class="status-list"></div>
+      </article>
+      <article class="panel">
+        <div class="panel-title"><div><h2>问题汇总</h2></div></div>
+        <div class="signal-columns">
+          <div><h3>错误</h3><div id="errorList" class="chip-list"></div></div>
+          <div><h3>访问问题</h3><div id="blockList" class="chip-list"></div></div>
+          <div><h3>来源</h3><div id="sourceList" class="chip-list"></div></div>
+        </div>
+      </article>
+      <article class="panel">
+        <div class="panel-title"><div><h2>最近运行</h2></div></div>
+        <div id="runList" class="run-list"></div>
+      </article>
+    </section>
+
+
     <section class="panel tasks-panel">
       <div class="panel-title responsive-title">
-        <div><p class="eyebrow">OPERATIONS</p><h2>任务与异常</h2></div>
+        <div><h2>任务与异常</h2></div>
         <form id="filterForm" class="filters">
           <input id="queryInput" type="search" placeholder="ASIN、标题或错误">
-          <select id="statusFilter"><option value="">全部状态</option><option>blocked</option><option>failed</option><option>running</option><option>pending</option><option>reviews_pending</option><option>succeeded</option></select>
-          <select id="stageFilter"><option value="">全部阶段</option><option value="product">product</option><option value="reviews">reviews</option><option value="complete">complete</option></select>
+          <select id="statusFilter" aria-label="按任务状态筛选"><option value="">全部状态</option><option value="blocked">验证码 / 访问受限</option><option value="failed">采集失败</option><option value="running">进行中</option><option value="pending">待处理</option><option value="reviews_pending">评论待采集</option><option value="succeeded">已采集</option></select>
+          <select id="stageFilter" aria-label="按采集阶段筛选"><option value="">全部阶段</option><option value="product">商品</option><option value="reviews">评论</option><option value="complete">完成</option></select>
           <button class="ghost-button" type="submit">筛选</button>
         </form>
       </div>
@@ -127,12 +132,12 @@
   </main>
 
   <aside id="detailDrawer" class="drawer" aria-hidden="true">
-    <div class="drawer-head"><div><p class="eyebrow">ASIN DETAIL</p><h2 id="detailTitle">—</h2></div><button id="closeDrawer" type="button" class="icon-button" aria-label="关闭">×</button></div>
+    <div class="drawer-head"><div><h2 id="detailTitle">—</h2></div><button id="closeDrawer" type="button" class="icon-button" aria-label="关闭">×</button></div>
     <div id="detailBody" class="drawer-body"></div>
   </aside>
   <div id="drawerBackdrop" class="backdrop" hidden></div>
 
-  <footer>只读控制台 · 5秒轮询PostgreSQL · 不访问Amazon · 历史run不依赖浏览器缓存或单一输出目录</footer>
+  <footer>只读控制台 · 每5秒刷新</footer>
   <script src="/app.js" defer></script>
 </body>
 </html>

@@ -1081,6 +1081,7 @@ class PostgresConsoleRepository:
             "tenant_id": tenant_id,
             "run_id": run_id,
             "started_at": effective_started_at,
+            "command": (ledger or {}).get("command") or "legacy",
             "ended_at": effective_finished_at,
             "requested_actions": requested_actions,
             "recorded_actions": recorded_actions,

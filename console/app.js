@@ -1,5 +1,5 @@
 const initialTenant = new URL(window.location.href).searchParams.get('tenant') || '';
-const state = { overview: null, batches: [], operations: [], items: [], tenant: initialTenant, selectedRun: '', timer: null, loading: false, apiKey: '', authCancelled: false };
+const state = { overview: null, batches: [], operations: [], items: [], tenant: initialTenant, selectedRun: '', runRequest: 0, runSelectionCleared: false, timer: null, loading: false, apiKey: '', authCancelled: false };
 const $ = (id) => document.getElementById(id);
 const number = (value) => new Intl.NumberFormat('zh-CN').format(Number(value || 0));
 const dateTime = (value) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
@@ -19,6 +19,70 @@ const text = (tag, value, className = '') => {
   return node;
 };
 const clear = (node) => { while (node.firstChild) node.removeChild(node.firstChild); };
+
+function statusLabel(value) {
+  return ({running:'进行中',starting:'启动中',completed:'已结束',succeeded:'已采集',
+    failed:'未完成',blocked:'访问未完成',quality_failed:'已结束，有未完成项',
+    interrupted:'已中止',pending:'待处理',reviews_pending:'评论待采集',
+    product_done:'商品已采集',partial:'部分完成',full:'符合本次要求',
+    invalid:'不符合要求',unknown:'待确认',legacy_complete:'历史已结束',
+    legacy_blocked:'历史访问未完成',queued:'待执行',claimed:'处理中',
+    not_started:'未启动',skipped:'未执行'})[value] || '待确认';
+}
+function issueLabel(value) {
+  const code = String(value || '');
+  if (!code || code === 'none' || code === '—') return '—';
+  if (/captcha|robot_check/i.test(code)) return '验证码';
+  if (/429|too_many_requests|rate_limit/i.test(code)) return '请求过频';
+  if (/403|access_denied|waf/i.test(code)) return '访问被拒绝';
+  if (/login|sign_in/i.test(code)) return '需要登录';
+  if (/asin_mismatch|identity_terminal/i.test(code)) return '商品身份不符';
+  if (/variant/i.test(code)) return '同族变体';
+  if (/currency/i.test(code)) return '币种不符或未确认';
+  if (/postal|delivery_context/i.test(code)) return '配送地区待确认';
+  if (/country/i.test(code)) return '站点地区不符或未确认';
+  if (/missing_core/i.test(code)) return '关键商品字段缺失';
+  if (/job_budget_exhausted|browser_budget|http_body_budget/i.test(code)) return '该商品达到请求上限';
+  if (/budget_or_lease/i.test(code)) return '请求额度或任务租约异常';
+  if (/timeout|browser_navigation/i.test(code)) return '页面打开超时';
+  if (/transport|fetch_error|network/i.test(code)) return '网络或页面读取失败';
+  if (/deadline|expired/i.test(code)) return '处理期限已到';
+  return '其他问题（查看详情）';
+}
+function resultLabel(item) {
+  const outcome = item.outcome || item.status;
+  if (outcome === 'variant_redirect') return '同族变体';
+  if (['completed','succeeded','product_done'].includes(outcome))
+    return item.context_quality === 'partial' ? '已采集 · 地区待确认' : '已采集';
+  const reason = item.error_code || item.block_reason || item.last_error || item.evidence_error || item.evidence_block;
+  return ['failed','blocked'].includes(outcome) && reason ? issueLabel(reason) : statusLabel(outcome);
+}
+function runName(run) {
+  const start = run.started_at || run.ended_at;
+  const when = start && Number.isFinite(new Date(start).getTime())
+    ? new Date(start).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})
+    : '时间未记录';
+  return `${when} · ${({reviews:'评论采集',run:'商品采集',probe:'小批商品采集'})[run.command] || '采集任务'}`;
+}
+function runOption(run) {
+  return `${runName(run)} · ${knownNumber(run.recorded_actions)}/${knownNumber(run.requested_actions)} · ${statusLabel(run.terminal_status)}`;
+}
+function durationLabel(value) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '—';
+  const seconds = Math.max(0, Math.round(Number(value)));
+  return seconds < 60 ? `${seconds}秒` : `${Math.floor(seconds / 60)}分${seconds % 60}秒`;
+}
+function sourceLabel(value) { return ({http_html:'HTTP',selenium_dom:'浏览器',selenium:'浏览器'})[value] || '未记录'; }
+function priceLabel(value) { return ({available:'有报价',unavailable:'页面未报价',missing:'未解析',unknown:'待确认'})[value] || '待确认'; }
+function renderIssues(items) {
+  const root = $('runIssues'); clear(root);
+  const counts = {};
+  for (const item of items || []) {
+    if (['completed','variant_redirect'].includes(item.outcome)) continue;
+    const label = resultLabel(item); counts[label] = (counts[label] || 0) + 1;
+  }
+  for (const [label,count] of Object.entries(counts)) root.append(text('span',`${label} ${count}`,'chip alert'));
+}
 
 function apiKey() { return state.apiKey; }
 function consoleRequestError(code, message) { const error = new Error(message); error.code = code; return error; }
@@ -54,6 +118,8 @@ async function request(path) {
 function selectTenant(tenantId, refreshNow = true) {
   state.tenant = tenantId;
   state.selectedRun = '';
+  state.runRequest += 1;
+  state.runSelectionCleared = false;
   const url = new URL(window.location.href);
   if (tenantId) url.searchParams.set('tenant', tenantId); else url.searchParams.delete('tenant');
   window.history.replaceState({}, '', url);
@@ -73,7 +139,7 @@ function renderBatches(data) {
     if (batch.tenant_id === state.tenant) row.classList.add('selected');
     row.append(
       taskCell(batch.tenant_id, 'asin'),
-      taskCell(`${number(batch.requested)} / ${number(batch.recorded)}`),
+      taskCell(`${number(batch.recorded)} / ${number(batch.requested)}`),
       taskCell(number(batch.product_succeeded)),
       taskCell(number(batch.variant_redirect)),
       taskCell(number(batch.failed)),
@@ -82,7 +148,7 @@ function renderBatches(data) {
       taskCell(`${bytes(batch.known_transfer_bytes)}${batch.unknown_transfer_records ? ` · ${number(batch.unknown_transfer_records)} unknown` : ''}`),
       taskCell(batch.active_duration_seconds === null ? '—' : `${number(batch.active_duration_seconds)}s`),
       taskCell(batch.wall_span_seconds === null ? '—' : `${number(batch.wall_span_seconds)}s（含等待）`),
-      taskCell(batch.terminal_status),
+      taskCell(statusLabel(batch.terminal_status)),
     );
     row.addEventListener('click', () => selectTenant(batch.tenant_id));
     body.append(row);
@@ -102,7 +168,7 @@ function renderChips(id, values, alert = false) {
   const root = $(id); clear(root);
   const entries = Object.entries(values || {}).sort((a, b) => b[1] - a[1]);
   if (!entries.length) root.append(text('span', '无', 'muted'));
-  for (const [key, value] of entries) root.append(text('span', `${key} · ${number(value)}`, `chip${alert && key !== 'none' ? ' alert' : ''}`));
+  for (const [key, value] of entries) root.append(text('span', `${id === 'sourceList' ? sourceLabel(key) : issueLabel(key)} · ${number(value)}`, `chip${alert && key !== 'none' ? ' alert' : ''}`));
 }
 
 function renderOverview(data) {
@@ -131,7 +197,7 @@ function renderOverview(data) {
   const total = Math.max(1, Object.values(data.status_counts).reduce((sum, value) => sum + value, 0));
   for (const [key, value] of Object.entries(data.status_counts)) {
     const row = text('div', '', 'status-row');
-    row.append(text('span', key));
+    row.append(text('span', statusLabel(key)));
     const track = text('div', '', 'status-track');
     const fill = text('div', '', 'status-fill'); fill.style.width = `${Math.max(1, value / total * 100)}%`; track.append(fill);
     row.append(track, text('strong', number(value))); statusRoot.append(row);
@@ -142,7 +208,8 @@ function renderOverview(data) {
   const runs = $('runList'); clear(runs);
   for (const run of data.recent_runs || []) {
     const node = text('div', '', 'run-item');
-    node.append(text('strong', run.run_id), text('small', `${number(run.actions)} actions · ${dateTime(run.ended_at)} · blocked ${number(run.blocked)} · partial ${number(run.partial)}`));
+    node.title = run.run_id;
+    node.append(text('strong', runName(run)), text('small', `已记录 ${number(run.actions)} 条`));
     node.tabIndex = 0; node.addEventListener('click', () => selectRun(run.run_id));
     runs.append(node);
   }
@@ -157,18 +224,29 @@ function renderRun(data) {
   const capacity = data.capacity_authorization || {};
   const connectivity = data.proxy_connectivity || {};
   const business = data.amazon_business || {};
-  $('runSummary').textContent = `${data.run_id} · 代理连通 canary ${connectivity.canary_status || 'unknown'} · available/unique ${knownNumber(connectivity.available_slots)}/${knownNumber(connectivity.unique_egress_count)} · gate ${connectivity.gate_status || 'unknown'}:${connectivity.gate_reason || 'unknown'} · Amazon业务 requested/recorded ${knownNumber(business.requested_actions ?? data.requested_actions)}/${knownNumber(business.recorded_actions ?? data.recorded_actions)} · completed/variant/failed/blocked ${knownNumber(business.completed_actions ?? outcomes.completed)}/${knownNumber(business.variant_redirect_actions ?? outcomes.variant_redirect)}/${knownNumber(business.failed_actions ?? outcomes.failed)}/${knownNumber(business.blocked_actions ?? outcomes.blocked)} · access-control ${business.access_control_rate == null ? 'unknown' : `${(Number(business.access_control_rate) * 100).toFixed(1)}%`} · canary ${capacity.canary_operation_id || 'unknown'} · reservation ${capacity.reservation_id || 'unknown'} · reserved slots ${knownNumber(capacity.reserved_slots)} · fact expiry ${dateTime(capacity.fact_expires_at)} · proxy sessions ${number(proxySessions.length)} ${proxyPool.mode || '—'} · product ${proxyPool.product_session_scope || 'unknown'} / reviews ${proxyPool.review_session_scope || 'unknown'} · requests ${number(proxyTotals.request_count)} · session completed/variant/blocked ${number(proxyTotals.completed)}/${number(proxyTotals.variant_redirect)}/${number(proxyTotals.blocked)} · bytes ${bytes(proxyTotals.bytes)} · latency ${number(proxyTotals.latency_ms)}ms · unrequested ${knownNumber(business.unrequested_actions ?? proxyPool.unrequested_count)} · circuit ${proxyPool.circuit_open_reason || '—'} · 终态 ${data.terminal_status || '—'} · 活跃处理 ${data.worker_duration_seconds == null ? '—' : `${number(data.worker_duration_seconds)}s`}（${data.duration_source || 'unknown'}）· controller ${data.controller_duration_seconds == null ? '—' : `${number(data.controller_duration_seconds)}s`} · ${dateTime(data.started_at)} → ${dateTime(data.ended_at)} · HTTP ${trafficBytes(data.traffic?.http_compressed_response)} · Firefox主文档 ${trafficBytes(data.traffic?.firefox_main_document)} · Firefox子资源 ${trafficBytes(data.traffic?.firefox_subresources)}`;
-  $('runWarning').textContent = data.context_quality_counts?.partial ? '⚠ 本run含ZIP未确认的partial商品；price、availability、buy_box/配送等位置敏感字段不可视为90001结果。' : data.inferred_actions ? '⚠ 历史网络失败没有run evidence；黄色归属为按本run时间窗口推断。新运行已永久修复。' : '全部结果均有不可变run evidence。';
-  if (data.recovery_batch) $('runSummary').textContent += ` · 冻结cohort ${number(data.recovery_batch.asins?.length)} · 尝试 ${number(data.attempt_actions)} · consumer ${data.recovery_batch.status} · deadline ${dateTime(data.recovery_batch.deadline)}`;
+  const processed = business.recorded_actions ?? data.recorded_actions;
+  const requested = business.requested_actions ?? data.requested_actions;
+  $('runSummary').textContent = `${statusLabel(data.terminal_status)} · 已处理 ${knownNumber(processed)}/${knownNumber(requested)} · 已采集 ${knownNumber(outcomes.completed)} · 同族变体 ${knownNumber(outcomes.variant_redirect)} · 运行时长 ${durationLabel(data.worker_duration_seconds)}（含本次等待）`;
+  // Replace the selected option using this same response, not the older list query.
+  for (const option of Array.from($('runSelector').options || []))
+    if (option.value === data.run_id) option.text = runOption({...data,recorded_actions:processed,requested_actions:requested});
+  const technical = $('runTechnical'); clear(technical);
+  technical.append(jsonBlock({run_id:data.run_id,started_at:data.started_at,ended_at:data.ended_at,
+    duration_source:data.duration_source,controller_duration_seconds:data.controller_duration_seconds,
+    capacity_authorization:capacity,proxy_connectivity:connectivity,proxy_session_pool:proxyPool,
+    proxy_totals:proxyTotals,traffic:data.traffic,recovery_batch:data.recovery_batch,attempt_actions:data.attempt_actions}));
+  renderIssues(data.items);
+  $('runWarning').textContent = data.context_quality_counts?.partial ? '部分结果未确认任务指定的配送地区，价格与库存需结合该标记使用。' : data.inferred_actions ? '部分历史记录按时间推断归属，详情可查看依据。' : '';
+  $('runWarning').hidden = !$('runWarning').textContent;
   const body = $('runRows'); clear(body);
   for (const item of data.items || []) {
     const row = document.createElement('tr'); row.dataset.asin = item.asin;
     row.append(taskCell(item.asin, 'asin'));
-    const outcome = document.createElement('td'); const outcomeLabel = item.context_quality === 'partial' && item.outcome === 'completed' ? 'completed · partial' : item.outcome; outcome.append(text('span', outcomeLabel, `status-badge ${item.context_quality === 'partial' ? 'partial' : item.outcome}`)); row.append(outcome);
-    row.append(taskCell(item.title || '—', 'product-cell'), taskCell(item.price_status), taskCell(item.source_type), taskCell(item.http_status));
+    const outcome = document.createElement('td'); const outcomeLabel = resultLabel(item); outcome.append(text('span', outcomeLabel, `status-badge ${item.context_quality === 'partial' ? 'partial' : item.outcome}`)); row.append(outcome);
+    row.append(taskCell(item.title || '—', 'product-cell'), taskCell(priceLabel(item.price_status)), taskCell(sourceLabel(item.source_type)), taskCell(item.http_status));
     const runReason = item.error_code || item.block_reason || (item.attribution === 'evidence' ? '' : item.last_error) || '—';
-    row.append(taskCell(runReason, 'product-cell'));
-    const attribution = document.createElement('td'); attribution.append(text('span', item.attribution === 'evidence' ? 'evidence' : '时间推断', `status-badge ${item.attribution === 'evidence' ? '' : 'inferred'}`)); row.append(attribution);
+    row.append(taskCell(issueLabel(runReason), 'product-cell'));
+    const attribution = document.createElement('td'); attribution.append(text('span', item.attribution === 'evidence' ? '已留存证据' : '时间推断', `status-badge ${item.attribution === 'evidence' ? '' : 'inferred'}`)); row.append(attribution);
     row.append(taskCell(dateTime(item.retrieved_at || item.updated_at)));
     row.addEventListener('click', () => openDetail(item.asin)); body.append(row);
   }
@@ -176,46 +254,59 @@ function renderRun(data) {
 
 async function loadRun(runId) {
   if (!runId) return;
-  renderRun(await request(`/api/runs/${encodeURIComponent(runId)}`));
+  const requestId = ++state.runRequest;
+  const data = await request(`/api/runs/${encodeURIComponent(runId)}`);
+  if (requestId !== state.runRequest || state.selectedRun !== runId) return;
+  renderRun(data);
 }
 
 async function selectRun(runId) {
   state.selectedRun = runId;
+  state.runSelectionCleared = !runId;
   $('runSelector').value = runId;
+  if (!runId) {
+    state.runRequest += 1;
+    $('runSummary').textContent = '选择任务查看本次采集结果。';
+    for (const id of ['runRows','runIssues','runTechnical']) clear($(id));
+    $('runWarning').textContent = ''; $('runWarning').hidden = true;
+    return;
+  }
   try { await loadRun(runId); }
-  catch (error) { $('runWarning').textContent = `运行详情读取失败：${error.message}`; }
+  catch (error) { if (state.selectedRun === runId) { $('runWarning').textContent = `运行详情读取失败：${error.message}`; $('runWarning').hidden = false; } }
 }
 
 async function loadRuns() {
   const data = await request('/api/runs?limit=20');
   const selector = $('runSelector');
-  const desired = state.selectedRun || selector.value || data.items?.[0]?.run_id || '';
-  clear(selector); selector.append(new Option('选择 run_id', ''));
-  for (const run of data.items || []) selector.append(new Option(`${run.run_id} · ${run.requested_actions}/${run.recorded_actions} · ${run.terminal_status}`, run.run_id));
+  const desired = state.runSelectionCleared ? '' : state.selectedRun || selector.value || data.items?.[0]?.run_id || '';
+  clear(selector); selector.append(new Option('选择采集任务', ''));
+  for (const run of data.items || []) selector.append(new Option(runOption(run), run.run_id));
   if (desired && (data.items || []).some((run) => run.run_id === desired)) {
-    selector.value = desired; await loadRun(desired);
+    state.selectedRun = desired; selector.value = desired; await loadRun(desired);
   }
 }
 
 function renderOperations(data) {
   state.operations = data.items || [];
+  $('operationCount').textContent = `最近 ${number(state.operations.length)} 条`;
   const body = $('operationRows'); clear(body);
   for (const operation of state.operations) {
     const row = document.createElement('tr');
     row.append(
-      taskCell(operation.operation_id, 'asin'),
-      taskCell(operation.operation_type),
-      taskCell(operation.status),
+      taskCell(dateTime(operation.started_at)),
+      taskCell(({egress:'出口检查',canary:'容量检查',probe:'小批采集',run:'商品采集',reviews:'评论采集',capacity_reservation:'容量预约'})[operation.operation_type] || '操作'),
+      taskCell(statusLabel(operation.status)),
       taskCell(operation.preflight_status),
       taskCell(operation.failure_stage),
-      taskCell(operation.error_class),
+      taskCell(issueLabel(operation.error_class)),
       taskCell(operation.egress_id),
       taskCell(operation.http_status),
       taskCell(canarySummary(operation), 'product-cell'),
       taskCell(operation.duration_seconds == null ? '—' : `${number(operation.duration_seconds)}s`),
       taskCell(`${dateTime(operation.started_at)} / ${dateTime(operation.finished_at)}`),
-      taskCell(operation.collection_run_id),
+      taskCell(operation.collection_run_id ? '关联采集任务' : '—'),
     );
+    row.title = `操作ID：${operation.operation_id}；采集ID：${operation.collection_run_id || '—'}`;
     body.append(row);
   }
   if (!state.operations.length) {
@@ -242,9 +333,9 @@ function renderItems(data) {
   for (const item of state.items) {
     const row = document.createElement('tr'); row.dataset.asin = item.asin;
     row.append(taskCell(item.asin, 'asin'), taskCell(item.title || '—', 'product-cell'));
-    const statusCell = document.createElement('td'); statusCell.append(text('span', item.status, `status-badge ${item.status}`)); row.append(statusCell);
-    row.append(taskCell(item.task_stage), taskCell(item.price_status), taskCell(item.source_type), taskCell(item.http_status));
-    row.append(taskCell(item.last_error || item.evidence_error || item.block_reason || item.evidence_block || '—', 'product-cell'));
+    const statusCell = document.createElement('td'); statusCell.append(text('span', resultLabel(item), `status-badge ${item.status}`)); row.append(statusCell);
+    row.append(taskCell(({product:'商品',reviews:'评论',complete:'完成'})[item.task_stage] || '—'), taskCell(priceLabel(item.price_status)), taskCell(sourceLabel(item.source_type)), taskCell(item.http_status));
+    row.append(taskCell(issueLabel(item.last_error || item.evidence_error || item.block_reason || item.evidence_block), 'product-cell'));
     row.append(taskCell(dateTime(item.updated_at)));
     row.addEventListener('click', () => openDetail(item.asin)); body.append(row);
   }
@@ -254,13 +345,17 @@ function renderItems(data) {
   $('taskSummary').textContent = `显示 ${number(state.items.length)} / ${number(data.total)} 条`;
 }
 
-function detailSection(titleValue) {
-  const section = text('section', '', 'detail-section'); section.append(text('h3', titleValue)); return section;
+function detailSection(titleValue, collapsed = false) {
+  const section = text(collapsed ? 'details' : 'section', '', 'detail-section');
+  section.append(text(collapsed ? 'summary' : 'h3', titleValue)); return section;
 }
 function fieldGrid(values) {
   const grid = text('div', '', 'detail-grid');
   for (const [key, value] of Object.entries(values)) {
-    const node = text('div', '', 'detail-field'); node.append(text('span', key), text('strong', value ?? '—')); grid.append(node);
+    const label = ({title:'商品名称',brand:'品牌',price:'价格',price_status:'价格状态',availability:'库存状态',
+      rating:'评分',reviews:'评论数',status:'状态',stage:'阶段',attempts:'尝试次数',last_error:'具体问题',
+      block_reason:'访问问题',updated_at:'更新时间'})[key] || key;
+    const node = text('div', '', 'detail-field'); node.append(text('span', label), text('strong', value ?? '—')); grid.append(node);
   }
   return grid;
 }
@@ -277,14 +372,16 @@ async function openDetail(asin) {
   $('detailTitle').textContent = asin; const root = $('detailBody'); clear(root); root.append(text('p', '正在读取详情…', 'muted'));
   try {
     const data = await request(`/api/items/${encodeURIComponent(asin)}`); clear(root);
-    const task = detailSection('任务状态'); task.append(fieldGrid({ status: data.task.status, stage: data.task.task_stage, attempts: `${data.task.attempts}/${data.task.max_attempts}`, last_error: data.task.last_error, block_reason: data.task.block_reason, updated_at: dateTime(data.task.updated_at) })); root.append(task);
+    const task = detailSection('任务状态'); task.append(fieldGrid({ status: resultLabel(data.task), stage: ({product:'商品',reviews:'评论',complete:'完成'})[data.task.task_stage] || '—', attempts: `${data.task.attempts}/${data.task.max_attempts}`, last_error: issueLabel(data.task.last_error), block_reason: issueLabel(data.task.block_reason), updated_at: dateTime(data.task.updated_at) })); root.append(task);
     const product = detailSection('商品快照');
-    const partialContext = (data.evidence || []).find((value) => value.context_json?.context_quality === 'partial')?.context_json; if (partialContext) product.append(text('p', `⚠ ZIP ${partialContext.expected_postal || '目标值'} 未确认（观测 ${partialContext.observed_postal || 'unknown'}）；${(partialContext.location_sensitive_fields_unverified || []).join(', ')} 不可视为目标ZIP结果。`, 'table-summary'));
-    if (data.product) product.append(fieldGrid({ title: data.product.title, brand: data.product.brand, price: data.product.price, price_status: data.product.price_status, availability: data.product.availability, rating: data.product.rating, reviews: data.product.reported_review_count }), jsonBlock({ bullets: data.product.bullets, specs: data.product.specs, buy_box: data.product.buy_box }));
+    const productContext = (data.evidence || []).find((value) => value.outcome === 'completed' && value.context_json?.context_quality)?.context_json;
+    if (productContext?.context_quality === 'partial') product.append(text('p', `配送地区待确认：当前 ${productContext.observed_postal || '未记录'}，目标 ${productContext.expected_postal || '未记录'}。价格、库存和配送信息不可用于目标地区分析。`, 'table-summary'));
+    else if (productContext?.observed_postal) product.append(text('p', `当次配送地区：${productContext.observed_postal}。价格与库存代表当次页面观察值。`, 'muted'));
+    if (data.product) product.append(fieldGrid({ title: data.product.title, brand: data.product.brand, price: data.product.price, price_status: priceLabel(data.product.price_status), availability: data.product.availability, rating: data.product.rating, reviews: data.product.reported_review_count }), jsonBlock({ bullets: data.product.bullets, specs: data.product.specs, buy_box: data.product.buy_box }));
     else product.append(text('p', '尚无有效商品快照', 'muted')); root.append(product);
     const media = detailSection(`媒体 URL · ${(data.media || []).length}`); const mediaList = text('div', '', 'detail-list'); for (const value of data.media || []) mediaList.append(linkItem(value.display_url || value.asset_url || value.thumbnail_url, `${value.placement || 'media'} · ${value.entry_type || ''}`)); media.append(mediaList); root.append(media);
     const topReviews = detailSection(`商品页 Top Reviews · ${(data.top_reviews || []).length}`); for (const review of data.top_reviews || []) { const item = text('div', '', 'detail-item'); item.append(text('strong', review.title || review.rating || 'Review'), text('p', review.body || review.text || JSON.stringify(review))); topReviews.append(item); } if (!(data.top_reviews || []).length) topReviews.append(text('p', '无商品页评论摘要', 'muted')); root.append(topReviews);
-    const evidence = detailSection(`Evidence · ${(data.evidence || []).length}`); for (const value of data.evidence || []) { const traffic = value.context_json?.traffic || {}; const bridge = value.context_json?.cookie_bridge || {}; const proxyPool = value.context_json?.proxy_session_pool || {}; const proxySessions = proxyPool.sessions || []; const proxyTotals = proxySessions.reduce((sum, item) => { for (const key of ['request_count', 'completed', 'variant_redirect', 'failed', 'blocked', 'bytes', 'latency_ms']) sum[key] = (sum[key] || 0) + Number(item[key] || 0); return sum; }, {}); evidence.append(fieldGrid({ outcome: value.outcome, source: value.source_type, proxy_session: proxyPool.current_session_id, proxy_mode: proxyPool.mode, proxy_requests: proxyTotals.request_count, proxy_completed: proxyTotals.completed, proxy_variant: proxyTotals.variant_redirect, proxy_failed: proxyTotals.failed, proxy_blocked: proxyTotals.blocked, proxy_bytes: proxyTotals.bytes, proxy_latency_ms: proxyTotals.latency_ms, proxy_quarantines: proxySessions.filter((item) => item.quarantine_reason).map((item) => `${item.session_id}:${item.quarantine_reason}`).join(', '), proxy_circuit: proxyPool.circuit_open_reason, proxy_unrequested: proxyPool.unrequested_count, context_quality: value.context_json?.context_quality, identity_relation: value.context_json?.identity ? `${value.context_json.identity.requested_asin} → ${value.context_json.identity.observed_asin} · parent ${value.context_json.identity.parent_asin}` : null, postal_confirmed: value.context_json?.postal_confirmed, expected_postal: value.context_json?.expected_postal, observed_postal: value.context_json?.observed_postal, location_sensitive_fields_unverified: (value.context_json?.location_sensitive_fields_unverified || []).join(', '), fallback_reason: value.context_json?.fallback_reason, fallback_reasons: (value.context_json?.fallback_reasons || []).join(', '), cookie_bridge: bridge.status, cookie_bridge_error: bridge.error_code, http: value.http_status, error: value.error_code, block: value.block_reason, retrieved: dateTime(value.retrieved_at), raw_html_path: value.raw_html_path, http_compressed_bytes: traffic.http_compressed_response_bytes, firefox_main_bytes: traffic.firefox_main_document_bytes ?? 'unknown', firefox_subresource_bytes: traffic.firefox_subresource_bytes ?? 'unknown' })); } root.append(evidence);
+    const evidence = detailSection(`采集记录与技术详情 · ${(data.evidence || []).length}`, true); for (const value of data.evidence || []) { const traffic = value.context_json?.traffic || {}; const bridge = value.context_json?.cookie_bridge || {}; const proxyPool = value.context_json?.proxy_session_pool || {}; const proxySessions = proxyPool.sessions || []; const proxyTotals = proxySessions.reduce((sum, item) => { for (const key of ['request_count', 'completed', 'variant_redirect', 'failed', 'blocked', 'bytes', 'latency_ms']) sum[key] = (sum[key] || 0) + Number(item[key] || 0); return sum; }, {}); evidence.append(fieldGrid({ outcome: value.outcome, source: value.source_type, proxy_session: proxyPool.current_session_id, proxy_mode: proxyPool.mode, proxy_requests: proxyTotals.request_count, proxy_completed: proxyTotals.completed, proxy_variant: proxyTotals.variant_redirect, proxy_failed: proxyTotals.failed, proxy_blocked: proxyTotals.blocked, proxy_bytes: proxyTotals.bytes, proxy_latency_ms: proxyTotals.latency_ms, proxy_quarantines: proxySessions.filter((item) => item.quarantine_reason).map((item) => `${item.session_id}:${item.quarantine_reason}`).join(', '), proxy_circuit: proxyPool.circuit_open_reason, proxy_unrequested: proxyPool.unrequested_count, context_quality: value.context_json?.context_quality, identity_relation: value.context_json?.identity ? `${value.context_json.identity.requested_asin} → ${value.context_json.identity.observed_asin} · parent ${value.context_json.identity.parent_asin}` : null, postal_confirmed: value.context_json?.postal_confirmed, expected_postal: value.context_json?.expected_postal, observed_postal: value.context_json?.observed_postal, location_sensitive_fields_unverified: (value.context_json?.location_sensitive_fields_unverified || []).join(', '), fallback_reason: value.context_json?.fallback_reason, fallback_reasons: (value.context_json?.fallback_reasons || []).join(', '), cookie_bridge: bridge.status, cookie_bridge_error: bridge.error_code, http: value.http_status, error: value.error_code, block: value.block_reason, retrieved: dateTime(value.retrieved_at), raw_html_path: value.raw_html_path, http_compressed_bytes: traffic.http_compressed_response_bytes, firefox_main_bytes: traffic.firefox_main_document_bytes ?? 'unknown', firefox_subresource_bytes: traffic.firefox_subresource_bytes ?? 'unknown' })); } root.append(evidence);
     const content = detailSection(`内容模块 · ${(data.content_modules || []).length}`); content.append(jsonBlock(data.content_modules || [])); root.append(content);
     const reviews = detailSection('独立评论状态'); reviews.append(jsonBlock({ summary: data.review_summary, records: data.reviews || [] })); root.append(reviews);
   } catch (error) { clear(root); root.append(text('p', `详情读取失败：${error.message}`, 'error-banner')); }
@@ -301,11 +398,13 @@ async function loadItems() {
 }
 function renderRecovery(data) {
   const root = $('recoverySummary');
-  if (data?.availability !== 'available') { root.textContent = '持久化恢复：unknown（未部署或不可用），不得据此领取任务。'; return; }
+  if (data?.availability !== 'available') { root.hidden = false; root.textContent = '调度状态暂不可用（unknown），不能视为可执行。'; return; }
   const gates = data.egress || [];
   const paused = gates.some((gate) => gate.manually_paused || new Date(gate.paused_until).getTime() > Date.now());
-  const counts = Object.entries(data.counts || {}).map(([key,value]) => `${key}: ${value}`).join(' · ') || '尚无恢复job';
-  root.textContent = `持久化恢复：${paused ? '全局暂停' : gates.some((gate) => gate.half_open) ? '半开验证' : '串行许可'} · ${counts} · 跨run预算不重置；供应商计费 unknown；这是当前tenant状态，不改写历史run。`;
+  root.hidden = !paused && !gates.some((gate) => gate.half_open);
+  const due = (data.jobs || []).filter((job) => !job.terminal).length;
+  root.textContent = paused ? '请求暂停：正在冷却或等待人工恢复，任务保留。' : gates.some((gate) => gate.half_open) ? '正在少量试探恢复。' : '调度正常：单商品失败不会直接结束整个任务。';
+  root.title = `当前批次待恢复任务（最多显示100条）：${due}；具体时间与额度见技术详情。`;
 }
 
 async function refresh() {

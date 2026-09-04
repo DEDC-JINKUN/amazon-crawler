@@ -52,5 +52,5 @@ save_media = "url_and_metadata_only"
 [context]
 expected_country = "US"
 expected_currency = "USD"
-# Fill this before formal US collection; leave empty only for parser development.
-postal_code = "90001"
+# Empty means US marketplace observation. Set a ZIP only for a location-specific task.
+postal_code = ""
