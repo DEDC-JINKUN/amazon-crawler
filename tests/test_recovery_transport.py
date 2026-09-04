@@ -5,7 +5,7 @@ import urllib.error
 import pytest
 
 sys.path.insert(0,str(Path(__file__).parents[1] / 'scripts'))
-from amazon_us_worker import HttpFirstAdapter, DEFAULTS
+from amazon_us_worker import AdapterFetchError, HttpFirstAdapter, DEFAULTS
 from recovery_scheduler import RecoveryDenied
 
 
@@ -84,7 +84,7 @@ def test_recovery_http_response_has_a_finite_body_read_budget():
 
 @pytest.mark.parametrize('slow_part',['headers','body'])
 @pytest.mark.parametrize('late_binding',[False,True])
-def test_absolute_http_budget_stops_slow_trickle_headers_and_body(slow_part,late_binding):
+def test_absolute_http_deadline_is_a_transport_failure_not_a_global_budget_denial(slow_part,late_binding):
     import threading,time
     from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
     class Handler(BaseHTTPRequestHandler):
@@ -105,7 +105,7 @@ def test_absolute_http_budget_stops_slow_trickle_headers_and_body(slow_part,late
     if late_binding: adapter.config['_recovery_before_request']=lambda:1
     start=time.monotonic()
     try:
-        with pytest.raises(RecoveryDenied):
+        with pytest.raises(AdapterFetchError):
             adapter.fetch('http://fixture.invalid/probe')
         assert time.monotonic()-start < 1.3
     finally:
@@ -136,7 +136,7 @@ def test_production_pool_builds_slot_after_recovery_hooks_are_bound():
     pool.config['_recovery_before_request']=lambda:1
     start=time.monotonic()
     try:
-        with pytest.raises(RecoveryDenied): pool.fetch('http://fixture.invalid/dp/B0CC2FRY3J')
+        with pytest.raises(AdapterFetchError): pool.fetch('http://fixture.invalid/dp/B0CC2FRY3J')
         assert time.monotonic()-start < 1.3
     finally:
         pool.close(); server.shutdown(); server.server_close(); thread.join(2)

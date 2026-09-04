@@ -2144,6 +2144,7 @@ class HttpFirstAdapter:
         return body.decode(charset, errors="replace")
 
     def fetch(self, url: str) -> tuple[str, int | None]:
+        from recovery_scheduler import RecoveryDenied
         self.last_retry_after_seconds = None
         self.enable_recovery_deadline()
         self.last_transfer_bytes = 0
@@ -2151,7 +2152,9 @@ class HttpFirstAdapter:
         self.last_fallback_reason = None
         self.last_browser_context_confirmed = False
         self.source_type = "http_html"
-        max_attempts = max(1, min(int(self.config.get("http_max_attempts", 2)), 3))
+        # The session pool already supplies one bounded replacement IP. Avoid
+        # multiplying two inner retries by two proxy sessions for one ASIN.
+        max_attempts = 1 if self.config.get("proxy_session_ports") else max(1, min(int(self.config.get("http_max_attempts", 2)), 3))
         backoff = max(0.0, min(float(self.config.get("http_retry_backoff_seconds", 0.5)), 5.0))
         last_error: Exception | None = None
         for attempt in range(1, max_attempts + 1):
@@ -2199,6 +2202,14 @@ class HttpFirstAdapter:
                 self.last_transfer_bytes += len(exc.partial or b"")
                 self.action_http_transfer_bytes += len(exc.partial or b"")
                 last_error = exc
+                if attempt < max_attempts and backoff:
+                    time.sleep(backoff * attempt)
+            except RecoveryDenied as exc:
+                if str(exc) != "recovery_http_deadline_exceeded":
+                    raise
+                # A slow or disconnected socket is a bounded transport failure,
+                # not evidence that the whole cohort lost its budget or lease.
+                last_error = TimeoutError("HTTP request deadline exceeded")
                 if attempt < max_attempts and backoff:
                     time.sleep(backoff * attempt)
             except (urllib.error.URLError, ConnectionResetError, TimeoutError, OSError) as exc:
