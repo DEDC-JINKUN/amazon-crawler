@@ -21,48 +21,47 @@ const text = (tag, value, className = '') => {
 const clear = (node) => { while (node.firstChild) node.removeChild(node.firstChild); };
 
 function statusLabel(value) {
-  return ({running:'进行中',starting:'启动中',completed:'已结束',succeeded:'已采集',
-    failed:'未完成',blocked:'访问未完成',quality_failed:'已结束，有未完成项',
-    interrupted:'已中止',pending:'待处理',reviews_pending:'评论待采集',
-    product_done:'商品已采集',partial:'部分完成',full:'符合本次要求',
-    invalid:'不符合要求',unknown:'待确认',legacy_complete:'历史已结束',
-    legacy_blocked:'历史访问未完成',queued:'待执行',claimed:'处理中',
-    not_started:'未启动',skipped:'未执行'})[value] || '待确认';
+  return ({running:'Running',starting:'Starting',completed:'Complete',succeeded:'Collected',
+    failed:'Failed',blocked:'Needs attention',quality_failed:'Completed with issues',
+    interrupted:'Interrupted',pending:'Pending',reviews_pending:'Reviews pending',
+    product_done:'Collected',partial:'Partial',full:'Qualified',invalid:'Invalid',unknown:'Unknown',
+    legacy_complete:'Complete',legacy_blocked:'Needs attention',queued:'Queued',claimed:'Running',
+    not_started:'Not started',skipped:'Skipped'})[value] || 'Unknown';
 }
 function issueLabel(value) {
   const code = String(value || '');
   if (!code || code === 'none' || code === '—') return '—';
-  if (/captcha|robot_check/i.test(code)) return '验证码';
-  if (/429|too_many_requests|rate_limit/i.test(code)) return '请求过频';
-  if (/403|access_denied|waf/i.test(code)) return '访问被拒绝';
-  if (/login|sign_in/i.test(code)) return '需要登录';
-  if (/asin_mismatch|identity_terminal/i.test(code)) return '商品身份不符';
-  if (/variant/i.test(code)) return '同族变体';
-  if (/currency/i.test(code)) return '币种不符或未确认';
-  if (/postal|delivery_context/i.test(code)) return '配送地区待确认';
-  if (/country/i.test(code)) return '站点地区不符或未确认';
-  if (/missing_core/i.test(code)) return '关键商品字段缺失';
-  if (/job_budget_exhausted|browser_budget|http_body_budget/i.test(code)) return '该商品达到请求上限';
-  if (/budget_or_lease/i.test(code)) return '请求额度或任务租约异常';
-  if (/timeout|browser_navigation/i.test(code)) return '页面打开超时';
-  if (/transport|fetch_error|network/i.test(code)) return '网络或页面读取失败';
-  if (/deadline|expired/i.test(code)) return '处理期限已到';
-  return '其他问题（查看详情）';
+  if (/captcha|robot_check/i.test(code)) return 'CAPTCHA';
+  if (/429|too_many_requests|rate_limit/i.test(code)) return 'Rate limited';
+  if (/403|access_denied|waf/i.test(code)) return 'Access denied';
+  if (/login|sign_in/i.test(code)) return 'Login required';
+  if (/asin_mismatch|identity_terminal/i.test(code)) return 'Identity mismatch';
+  if (/variant/i.test(code)) return 'Variant';
+  if (/currency/i.test(code)) return 'Currency not verified';
+  if (/postal|delivery_context/i.test(code)) return 'Region not verified';
+  if (/country/i.test(code)) return 'Marketplace not verified';
+  if (/missing_core/i.test(code)) return 'Missing product data';
+  if (/job_budget_exhausted|browser_budget|http_body_budget/i.test(code)) return 'Product request limit';
+  if (/budget_or_lease/i.test(code)) return 'Request budget or lease';
+  if (/timeout|browser_navigation/i.test(code)) return 'Navigation timeout';
+  if (/transport|fetch_error|network/i.test(code)) return 'Network error';
+  if (/deadline|expired/i.test(code)) return 'Deadline reached';
+  return 'See details';
 }
 function resultLabel(item) {
   const outcome = item.outcome || item.status;
-  if (outcome === 'variant_redirect') return '同族变体';
+  if (outcome === 'variant_redirect') return 'Variant';
   if (['completed','succeeded','product_done'].includes(outcome))
-    return item.context_quality === 'partial' ? '已采集 · 地区待确认' : '已采集';
+    return 'Collected';
   const reason = item.error_code || item.block_reason || item.last_error || item.evidence_error || item.evidence_block;
   return ['failed','blocked'].includes(outcome) && reason ? issueLabel(reason) : statusLabel(outcome);
 }
 function runName(run) {
   const start = run.started_at || run.ended_at;
   const when = start && Number.isFinite(new Date(start).getTime())
-    ? new Date(start).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})
+    ? new Date(start).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})
     : '时间未记录';
-  return `${when} · ${({reviews:'评论采集',run:'商品采集',probe:'小批商品采集'})[run.command] || '采集任务'}`;
+  return `${when} · ${run.command === 'reviews' ? 'Review crawl' : 'Product crawl'}`;
 }
 function runOption(run) {
   return `${runName(run)} · ${knownNumber(run.recorded_actions)}/${knownNumber(run.requested_actions)} · ${statusLabel(run.terminal_status)}`;
@@ -70,10 +69,12 @@ function runOption(run) {
 function durationLabel(value) {
   if (value === null || value === undefined || !Number.isFinite(Number(value))) return '—';
   const seconds = Math.max(0, Math.round(Number(value)));
-  return seconds < 60 ? `${seconds}秒` : `${Math.floor(seconds / 60)}分${seconds % 60}秒`;
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
-function sourceLabel(value) { return ({http_html:'HTTP',selenium_dom:'浏览器',selenium:'浏览器'})[value] || '未记录'; }
-function priceLabel(value) { return ({available:'有报价',unavailable:'页面未报价',missing:'未解析',unknown:'待确认'})[value] || '待确认'; }
+function sourceLabel(value) { return ({http_html:'HTTP',selenium_dom:'Browser',selenium:'Browser'})[value] || 'Unknown'; }
+function priceLabel(value) { return ({available:'Available',unavailable:'Unavailable',missing:'—',unknown:'—'})[value] || '—'; }
+function priceValue(item) { return String(item.price || '').trim() || priceLabel(item.price_status); }
+function resultClass(item) { return ['blocked','failed'].includes(item.outcome || item.status) ? 'result-error' : (item.context_quality === 'partial' ? 'result-warning' : 'result-ok'); }
 function renderIssues(items) {
   const root = $('runIssues'); clear(root);
   const counts = {};
@@ -226,7 +227,8 @@ function renderRun(data) {
   const business = data.amazon_business || {};
   const processed = business.recorded_actions ?? data.recorded_actions;
   const requested = business.requested_actions ?? data.requested_actions;
-  $('runSummary').textContent = `${statusLabel(data.terminal_status)} · 已处理 ${knownNumber(processed)}/${knownNumber(requested)} · 已采集 ${knownNumber(outcomes.completed)} · 同族变体 ${knownNumber(outcomes.variant_redirect)} · 运行时长 ${durationLabel(data.worker_duration_seconds)}（含本次等待）`;
+  const issues = Number(outcomes.failed || 0) + Number(outcomes.blocked || 0);
+  $('runSummary').textContent = `${statusLabel(data.terminal_status)} · ${knownNumber(processed)} / ${knownNumber(requested)} processed · ${knownNumber(outcomes.completed)} collected · ${knownNumber(outcomes.variant_redirect)} variants · ${number(issues)} issues · ${durationLabel(data.worker_duration_seconds)} elapsed`;
   // Replace the selected option using this same response, not the older list query.
   for (const option of Array.from($('runSelector').options || []))
     if (option.value === data.run_id) option.text = runOption({...data,recorded_actions:processed,requested_actions:requested});
@@ -242,12 +244,11 @@ function renderRun(data) {
   for (const item of data.items || []) {
     const row = document.createElement('tr'); row.dataset.asin = item.asin;
     row.append(taskCell(item.asin, 'asin'));
-    const outcome = document.createElement('td'); const outcomeLabel = resultLabel(item); outcome.append(text('span', outcomeLabel, `status-badge ${item.context_quality === 'partial' ? 'partial' : item.outcome}`)); row.append(outcome);
-    row.append(taskCell(item.title || '—', 'product-cell'), taskCell(priceLabel(item.price_status)), taskCell(sourceLabel(item.source_type)), taskCell(item.http_status));
+    row.append(taskCell(item.title || '—', 'product-cell'), taskCell(priceValue(item)));
+    const outcome = document.createElement('td'); outcome.append(text('span', resultLabel(item), `result-label ${resultClass(item)}`)); row.append(outcome);
     const runReason = item.error_code || item.block_reason || (item.attribution === 'evidence' ? '' : item.last_error) || '—';
-    row.append(taskCell(issueLabel(runReason), 'product-cell'));
-    const attribution = document.createElement('td'); attribution.append(text('span', item.attribution === 'evidence' ? '已留存证据' : '时间推断', `status-badge ${item.attribution === 'evidence' ? '' : 'inferred'}`)); row.append(attribution);
-    row.append(taskCell(dateTime(item.retrieved_at || item.updated_at)));
+    const issue = runReason === '—' && item.context_quality === 'partial' ? 'Region not verified' : issueLabel(runReason);
+    row.append(taskCell(issue, 'product-cell'), taskCell(dateTime(item.retrieved_at || item.updated_at)));
     row.addEventListener('click', () => openDetail(item.asin)); body.append(row);
   }
 }

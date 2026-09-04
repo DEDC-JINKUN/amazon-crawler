@@ -148,11 +148,11 @@ test('run view uses readable names and one progress snapshot without exposing de
 
 test('result names distinguish resolved CAPTCHA from current errors and sibling identity', async () => {
   const app = await loadConsole(async () => response(401), () => null);
-  assert.equal(app.run(`resultLabel({outcome:'completed',context_quality:'full',attempts:[{block_reason:'captcha'}]})`), '已采集');
-  assert.equal(app.run(`resultLabel({outcome:'blocked',block_reason:'captcha'})`), '验证码');
-  assert.equal(app.run(`resultLabel({outcome:'variant_redirect',error_code:'asin_mismatch'})`), '同族变体');
-  assert.equal(app.run(`resultLabel({outcome:'failed',error_code:'asin_mismatch'})`), '商品身份不符');
-  assert.equal(app.run(`issueLabel('recovery_job_budget_exhausted')`), '该商品达到请求上限');
+  assert.equal(app.run(`resultLabel({outcome:'completed',context_quality:'full',attempts:[{block_reason:'captcha'}]})`), 'Collected');
+  assert.equal(app.run(`resultLabel({outcome:'blocked',block_reason:'captcha'})`), 'CAPTCHA');
+  assert.equal(app.run(`resultLabel({outcome:'variant_redirect',error_code:'asin_mismatch'})`), 'Variant');
+  assert.equal(app.run(`resultLabel({outcome:'failed',error_code:'asin_mismatch'})`), 'Identity mismatch');
+  assert.equal(app.run(`issueLabel('recovery_job_budget_exhausted')`), 'Product request limit');
 });
 
 test('operations and technical diagnostics are collapsed by default', () => {
@@ -175,4 +175,12 @@ test('clearing selection prevents an older in-flight run from repainting the pag
   assert.equal(app.run('state.selectedRun'), '');
   assert.equal(app.element('runSelector').value, '');
   assert.doesNotMatch(app.element('runSummary').textContent, /10\/99/);
+});
+
+test('primary run table is compact and keeps transport diagnostics out of sight', () => {
+  const html = fs.readFileSync(path.join(__dirname,'..','console','index.html'),'utf8');
+  const header = html.match(/<thead><tr><th>ASIN<\/th>[\s\S]*?<\/tr><\/thead>/)[0];
+  assert.deepEqual([...header.matchAll(/<th>/g)].length, 6);
+  assert.match(header, /Product|Price|Result|Issue|Updated/);
+  assert.doesNotMatch(header, /来源|HTTP|归属依据|Evidence/);
 });

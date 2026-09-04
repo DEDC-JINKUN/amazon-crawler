@@ -97,6 +97,14 @@ tbody tr[data-asin] { cursor: pointer; }
 .status-badge.reviews_pending { color: #ffe1a5; background: #4b3619; }
 .status-badge.succeeded { color: #b9f7e3; background: #18463d; }
 .status-badge.partial { color: #ffe1a5; background: #4b3619; font-weight: 700; }
+.result-label { display: inline-flex; align-items: center; gap: 8px; color: #c7d3df; font-weight: 600; }
+.result-label::before { width: 7px; height: 7px; border-radius: 50%; background: #6f8295; content: ""; }
+.result-label.result-ok::before { background: #42b98f; }
+.result-label.result-warning { color: #d3b477; }
+.result-label.result-warning::before { background: #c4963f; }
+.result-label.result-error { color: #e59aa0; }
+.result-label.result-error::before { background: #c85c65; }
+.run-panel td { padding-top: 13px; padding-bottom: 13px; }
 .table-summary { margin: 9px 2px 0; }
 .drawer { position: fixed; top: 0; right: 0; z-index: 30; width: min(690px, 64vw); height: 100vh; overflow: hidden; transform: translateX(102%); border-left: 1px solid var(--border); background: #0b1523; box-shadow: -25px 0 80px rgba(0,0,0,.45); transition: transform .22s ease; }
 .drawer.open { transform: translateX(0); }
