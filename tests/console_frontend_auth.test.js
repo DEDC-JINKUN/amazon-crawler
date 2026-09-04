@@ -153,6 +153,8 @@ test('result names distinguish resolved CAPTCHA from current errors and sibling 
   assert.equal(app.run(`resultLabel({outcome:'variant_redirect',error_code:'asin_mismatch'})`), 'Variant');
   assert.equal(app.run(`resultLabel({outcome:'failed',error_code:'asin_mismatch'})`), 'Identity mismatch');
   assert.equal(app.run(`issueLabel('recovery_job_budget_exhausted')`), 'Product request limit');
+  assert.equal(app.run(`resultIssue({outcome:'variant_redirect',error_code:'asin_mismatch'})`), '—');
+  assert.equal(app.run(`resultIssue({outcome:'failed',error_code:'asin_mismatch'})`), 'Identity mismatch');
 });
 
 test('operations and technical diagnostics are collapsed by default', () => {

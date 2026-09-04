@@ -56,6 +56,11 @@ function resultLabel(item) {
   const reason = item.error_code || item.block_reason || item.last_error || item.evidence_error || item.evidence_block;
   return ['failed','blocked'].includes(outcome) && reason ? issueLabel(reason) : statusLabel(outcome);
 }
+function resultIssue(item) {
+  if (item.outcome === 'variant_redirect') return '—';
+  const reason = item.error_code || item.block_reason || (item.attribution === 'evidence' ? '' : item.last_error) || '—';
+  return reason === '—' && item.context_quality === 'partial' ? 'Region not verified' : issueLabel(reason);
+}
 function runName(run) {
   const start = run.started_at || run.ended_at;
   const when = start && Number.isFinite(new Date(start).getTime())
@@ -246,9 +251,7 @@ function renderRun(data) {
     row.append(taskCell(item.asin, 'asin'));
     row.append(taskCell(item.title || '—', 'product-cell'), taskCell(priceValue(item)));
     const outcome = document.createElement('td'); outcome.append(text('span', resultLabel(item), `result-label ${resultClass(item)}`)); row.append(outcome);
-    const runReason = item.error_code || item.block_reason || (item.attribution === 'evidence' ? '' : item.last_error) || '—';
-    const issue = runReason === '—' && item.context_quality === 'partial' ? 'Region not verified' : issueLabel(runReason);
-    row.append(taskCell(issue, 'product-cell'), taskCell(dateTime(item.retrieved_at || item.updated_at)));
+    row.append(taskCell(resultIssue(item), 'product-cell'), taskCell(dateTime(item.retrieved_at || item.updated_at)));
     row.addEventListener('click', () => openDetail(item.asin)); body.append(row);
   }
 }
