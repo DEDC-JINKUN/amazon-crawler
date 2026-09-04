@@ -32,6 +32,31 @@ def read_headers(sock: socket.socket) -> bytes:
     return bytes(data)
 
 
+def test_relay_budget_denial_closes_opaque_tunnel_without_forwarding_payload():
+    observed = []
+    class Upstream(socketserver.BaseRequestHandler):
+        def handle(self):
+            read_headers(self.request)
+            self.request.sendall(b'HTTP/1.1 200 Connection Established\r\n\r\n')
+            observed.append(self.request.recv(4096))
+    upstream = socketserver.ThreadingTCPServer(('127.0.0.1',0),Upstream)
+    thread = threading.Thread(target=upstream.serve_forever,daemon=True)
+    thread.start()
+    relay = None
+    try:
+        relay = load_relay().ProxyConnectRelay(f'http://127.0.0.1:{upstream.server_address[1]}','fixture-user','fixture-pass',transfer_budget=lambda count: False)
+        relay.start()
+        with socket.create_connection(relay.address,timeout=2) as client:
+            client.sendall(b'CONNECT www.amazon.com:443 HTTP/1.1\r\nHost: www.amazon.com:443\r\n\r\n')
+            assert read_headers(client).startswith(b'HTTP/1.1 200')
+            client.sendall(b'opaque-fixture')
+            assert client.recv(4096) == b''
+    finally:
+        if relay: relay.close()
+        upstream.shutdown(); upstream.server_close(); thread.join(timeout=2)
+    assert observed == [b'']
+
+
 def test_loopback_relay_adds_upstream_connect_auth_then_tunnels_opaque_bytes():
     relay_module = load_relay()
     observed = []

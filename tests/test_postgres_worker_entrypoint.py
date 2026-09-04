@@ -57,6 +57,22 @@ class Adapter:
         """, 200
 
 
+def test_http_429_does_not_start_firefox_before_retry_after():
+    worker = load_worker()
+    calls = []
+    class RateLimited(Adapter):
+        last_retry_after_seconds = 7200
+        def fetch(self, url): return 'Too many requests',429
+        def evidence_context(self): return {}
+        def fetch_browser(self,*args,**kwargs):
+            calls.append('firefox')
+            return 'Too many requests',429
+    storage = Storage()
+    worker._run_postgres_actions_impl(storage,RateLimited(),{**worker.DEFAULTS,'context':{}},limit=1)
+    assert calls == []
+    assert storage.saved[0]['state_fields']['next_retry_at'] is not None
+
+
 class ReviewStorage(Storage):
     def claim_task(self, worker_id, lease_seconds=None):
         self.claims += 1

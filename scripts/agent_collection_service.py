@@ -97,6 +97,9 @@ class AgentRefreshWorker:
         self._refresh_storage = RefreshOnlyStorageView(storage)
         self.adapter_factory = adapter_factory
         self.config = dict(config)
+        configure = getattr(self.storage, "configure_recovery", None)
+        if callable(configure):
+            configure(self.config)
         self.poll_seconds = max(0.05, float(poll_seconds))
         self.lease_seconds = max(1, int(lease_seconds))
         self._event = threading.Event()
@@ -166,6 +169,9 @@ class AgentRefreshWorker:
                         self.storage.reclaim_expired_leases()
                     except Exception:
                         continue
+                # A restarted service can begin before the old lease expires.
+                # Sweep while idle too, otherwise claimed refreshes never wake.
+                self.storage.reclaim_expired_leases()
                 counter = getattr(self.storage, "count_pending_refresh_tasks", None)
                 if callable(counter):
                     pending_count = int(counter(MAX_AGENT_REFRESH_BATCH))
@@ -211,6 +217,10 @@ class AgentRefreshWorker:
                     with self._lock:
                         self._state = "blocked"
                         self._last_error = "access_blocked"
+                    if callable(getattr(self.storage, "configure_recovery", None)):
+                        self._event.wait(self.poll_seconds)
+                        self._event.clear()
+                        continue
                     return
                 if result > 0:
                     metrics = self._refresh_storage.batch_metrics()

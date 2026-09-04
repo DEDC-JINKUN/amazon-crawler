@@ -35,6 +35,35 @@ def load_console():
     return module
 
 
+def test_console_startup_never_calls_historical_evidence_writer():
+    powershell = shutil.which('powershell') or shutil.which('powershell.exe')
+    assert powershell
+    script_path = str(SCRIPT).replace("'","''")
+    command = rf'''
+$tokens=$null; $errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{script_path}',[ref]$tokens,[ref]$errors)
+$fn=$ast.FindAll({{param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Ensure-Console'}},$true) | Select-Object -First 1
+Invoke-Expression $fn.Extent.Text
+$script:legacyWrites=0
+function Get-ControlledRawHtmlDir {{ 'fixture-raw' }}
+function Get-RawRootFingerprint {{ 'fixture' }}
+function Get-ConsoleFingerprint {{ 'fixture' }}
+function Remove-StaleLock {{ $null }}
+function Invoke-RestMethod {{ throw 'fixture-no-network' }}
+function Get-NetTCPConnection {{ $null }}
+function Ensure-Credentials {{ }}
+function Ensure-RunLedgerSchema {{ }}
+function Update-LegacyIdentityEvidence {{ $script:legacyWrites++ }}
+function Remove-Item {{ }}
+function Write-JsonAtomic {{ throw 'fixture-stop-before-process' }}
+$consoleUrl='http://127.0.0.1:9'; $Port=9; $python='fixture'; $projectRoot='fixture'; $consoleScript='fixture'; $TenantId='fixture'
+try {{ Ensure-Console 'C:\fixture\console.lock' }} catch {{ if ($_.Exception.Message -ne 'fixture-stop-before-process') {{ throw }} }}
+Write-Output $script:legacyWrites
+'''
+    result = subprocess.run([powershell,'-NoProfile','-Command',command],capture_output=True,text=True,check=True)
+    assert result.stdout.strip() == '0'
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction fingerprint contract")
 def test_windows_junction_raw_fingerprint_matches_controller_lexical_path():
     powershell = shutil.which("powershell") or shutil.which("powershell.exe")
@@ -218,7 +247,7 @@ def test_console_reuse_requires_verified_lock_and_matching_runtime_fingerprint()
     assert "Console did not become ready: $readyFailure" in ensure
     assert "console_process_exited" in ensure
     assert "Get-ControlledRawHtmlDir" in ensure
-    assert "Update-LegacyIdentityEvidence $rawHtmlDir" in ensure
+    assert "Update-LegacyIdentityEvidence $rawHtmlDir" not in ensure
     assert "'--tenant-id',$TenantId,'--raw-html-dir',$rawHtmlDir" in ensure
     assert "data\\console_control" in text
 

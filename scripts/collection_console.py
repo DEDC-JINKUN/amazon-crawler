@@ -104,6 +104,8 @@ def project_amazon_business(
     recorded_actions: int | None,
     unrequested_actions: int | None,
 ) -> dict[str, Any]:
+    if requested_actions is not None and recorded_actions is not None and unrequested_actions is not None:
+        unrequested_actions = max(unrequested_actions, max(0,requested_actions-recorded_actions))
     counts = {
         outcome: sum(item.get("outcome") == outcome for item in items)
         for outcome in ("completed", "variant_redirect", "failed", "blocked")
@@ -670,6 +672,10 @@ class PostgresConsoleRepository:
             },
             "last_evidence_at": evidence.get("last_evidence_at"),
         }
+
+    def load_recovery_status(self) -> dict[str, Any]:
+        from recovery_scheduler import read_projection
+        return read_projection(self._connect, self._require_tenant())
 
     def load_identity(self) -> dict[str, Any]:
         if not self.tenant_id:
@@ -1256,6 +1262,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self.server.raw_tenant_id,
                 getattr(repository, "tenant_id", None),
             )
+            if path == "/api/recovery":
+                self._send_json(HTTPStatus.OK, repository.load_recovery_status())
+                return
             if path == "/api/overview":
                 self._send_json(HTTPStatus.OK, repository.load_overview(selected_raw_root))
                 return

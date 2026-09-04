@@ -418,7 +418,8 @@ function Ensure-Console([string]$ConsoleLock) {
     }
     Ensure-Credentials
     Ensure-RunLedgerSchema
-    Update-LegacyIdentityEvidence $rawHtmlDir
+    # Historical evidence is immutable here. Reconciliation is read-only;
+    # any approved backfill must be an explicit, separately audited operation.
     $controlDir = Split-Path -Parent $ConsoleLock
     $stdout = Join-Path $controlDir 'console.stdout.log'
     $stderr = Join-Path $controlDir 'console.stderr.log'
@@ -923,6 +924,11 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
         }
         $finishedAt = [DateTime]::UtcNow
         $observability = Get-RunObservability $capacityAuthorization $quality $ActionLimit
+        $recoveryProjection = @{ availability = 'unknown'; reason = 'recovery_projection_unavailable' }
+        try {
+            $recoveryTenant = [uri]::EscapeDataString($TenantId)
+            $recoveryProjection = Invoke-ConsoleApi "/api/recovery?tenant=${recoveryTenant}" 5
+        } catch { }
         Write-Host ("Final: {0}/{1} completed={2} variant={3} failed={4} blocked={5} unrequested={6} inferred={7} quality_gate_ok={8}" -f $quality.recorded_actions,$ActionLimit,$quality.completed_actions,$quality.variant_redirect_actions,$quality.failed_actions,$quality.blocked_actions,$quality.unrequested_actions,$quality.inferred_actions,$qualityGateOk)
         if ($runVerificationReason) { Write-Host "Final verification: $runVerificationReason" }
         $receipt = [ordered]@{
@@ -943,6 +949,7 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             inferred_actions = $quality.inferred_actions
             unrequested_actions = $quality.unrequested_actions
             traffic = $quality.traffic
+            recovery = $recoveryProjection
             proxy_session_pool = if ($null -ne $finalSnapshot.run) { $finalSnapshot.run.proxy_session_pool } else { $null }
             capacity_authorization = $capacityAuthorization
             proxy_connectivity = $observability.proxy_connectivity

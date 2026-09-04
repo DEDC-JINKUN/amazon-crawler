@@ -307,6 +307,13 @@ def test_firefox_adapter_installs_selenium_447_high_level_bidi_handlers():
     with pytest.raises(WebDriverException, match="invalid session"):
         request_handler(StaleBlockedRequest("invalid session id"))
     assert [event for event, _ in driver.network.event_handlers] == ["response_completed", "fetch_error"]
+    def exhausted_browser_budget():
+        raise RuntimeError('offline budget denial')
+    adapter.config['_recovery_browser_request'] = exhausted_browser_budget
+    denied = AllowedRequest()
+    request_handler(denied)
+    assert denied.failed is True
+    assert denied.continued == 0
     adapter.close()
     assert driver.network.removed_request_handler_args == ("before_request", "request-handler")
 

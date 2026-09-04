@@ -298,12 +298,22 @@ async function loadItems() {
   params.set('limit', '100');
   renderItems(await request(`/api/items?${params.toString()}`));
 }
+function renderRecovery(data) {
+  const root = $('recoverySummary');
+  if (data?.availability !== 'available') { root.textContent = '持久化恢复：unknown（未部署或不可用），不得据此领取任务。'; return; }
+  const gates = data.egress || [];
+  const paused = gates.some((gate) => gate.manually_paused || new Date(gate.paused_until).getTime() > Date.now());
+  const counts = Object.entries(data.counts || {}).map(([key,value]) => `${key}: ${value}`).join(' · ') || '尚无恢复job';
+  root.textContent = `持久化恢复：${paused ? '全局暂停' : gates.some((gate) => gate.half_open) ? '半开验证' : '串行许可'} · ${counts} · 跨run预算不重置；供应商计费 unknown；这是当前tenant状态，不改写历史run。`;
+}
+
 async function refresh() {
   if (state.loading) return; state.loading = true;
   try {
     await loadBatches();
     if (!state.tenant) throw new Error('PostgreSQL中没有可见tenant');
-    const [overview] = await Promise.all([request('/api/overview'), loadItems(), loadRuns(), loadOperations()]);
+    const [overview, recovery] = await Promise.all([request('/api/overview'), request('/api/recovery'), loadItems(), loadRuns(), loadOperations()]);
+    renderRecovery(recovery);
     renderOverview(overview); $('errorBanner').hidden = true;
     $('liveBadge').classList.remove('offline', 'locked'); $('liveBadge').textContent = '● 实时';
   } catch (error) {

@@ -58,9 +58,11 @@ console      http://127.0.0.1:8770
 9. Worker结束后写receipt，打印stdout/stderr尾部并清除Worker锁；
 10. Worker与Controller幂等释放reservation；异常终止依赖同一释放路径或TTL回收；控制脚本清除自己创建的密码环境变量。
 
-所有任务固定使用 `--product-only`、`--once` 和PostgreSQL事实源。遇CAPTCHA/403/429/WAF时，Worker仍按配置立即停止；控制脚本不会自动换IP、重排blocked或继续剩余任务。
+商品任务使用 `--product-only`、`--once` 和PostgreSQL事实源；评论入口仍单独限定stage。一次run可包含多个最多5-ASIN的容量批次，不能按整个清单一次预约2N槽。每次claim和实际请求仍检查租约与持久化预算。单ASIN最终阻断进入冷却；全局暂停跨run/进程保持，不因新建run清零。HTTP429尊重Retry-After，等待前不启动Firefox。
 
-生产出口仅接受付费`proxy_sessions`配置；VPN/直连只可作人工诊断对照，不能通过正式Gate。商品广度的有效容量按每ASIN一个会话计算，评论分页对同一ASIN保持粘滞。HTTP challenge最多进行一次新代理会话重试和一次stock Firefox验证；Firefox通过临时loopback CONNECT认证中继走同一获准代理，中继不解密TLS且不保存凭据。Firefox仍返回challenge时立即隔离并熔断。
+生产出口仅接受付费`proxy_sessions`配置；VPN/直连只可作人工诊断对照，不能通过正式Gate。商品广度每ASIN使用独立会话，评论分页对同ASIN保持粘滞。HTTP challenge先允许同槽stock Firefox验证；失败时最多换一个已预约槽做最后一次Firefox验证，不再在该新槽先打HTTP；仍为challenge则隔离。连续2个最终blocked ASIN或20窗口内3个最终blocked触发共享暂停；半开只允许一个逻辑任务，成功才恢复。Firefox CONNECT中继不解密TLS且不保存凭据。
+
+持久化恢复需要显式迁移 `schema/migrations/20260904_recovery.sql`（本轮只在独立测试库执行，生产尚未迁移）。默认每ASIN/stage总claim预算3、HTTP尝试/浏览器导航许可12、Firefox获准资源请求240、deadline24小时；总预算不会被内部重试、换槽、重启或重复refresh清零。初次发现无预算合同的历史evidence保持`legacy_budget_unknown`，必须走独立审计/审批，不能自动给空预算。ZIP partial与variant为不同可解释终态，不归为CAPTCHA。HTTP尝试共享至少5秒间隔（可以配置得更慢），已有抖动保留。恢复状态通过Console `/api/recovery`、Agent `/v1/recovery/status` 和新receipt中的`recovery`查询；它是当前tenant投影，不改写历史run。
 
 ## 运行产物
 

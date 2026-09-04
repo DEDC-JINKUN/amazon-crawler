@@ -10,10 +10,11 @@ from typing import Any
 class ProxyTunnelAuthHTTPSHandler(urllib.request.HTTPSHandler):
     """Attach Basic credentials only when urllib opens an HTTPS CONNECT tunnel."""
 
-    def __init__(self, username: str, password: str) -> None:
+    def __init__(self, username: str, password: str, connection_observer=None) -> None:
         super().__init__()
         credential = f"{username}:{password}".encode("utf-8")
         self._proxy_authorization = "Basic " + base64.b64encode(credential).decode("ascii")
+        self._connection_observer = connection_observer
 
     def https_open(self, request: Any) -> Any:
         authorization = self._proxy_authorization
@@ -32,6 +33,8 @@ class ProxyTunnelAuthHTTPSHandler(urllib.request.HTTPSHandler):
                 set_tunnel(tunnel_host, port=port, headers=tunnel_headers)
 
             connection.set_tunnel = authenticated_tunnel  # type: ignore[method-assign]
+            if self._connection_observer is not None:
+                self._connection_observer(connection)
             return connection
 
         return self.do_open(connection_factory, request, context=self._context)

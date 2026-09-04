@@ -130,6 +130,30 @@ class ExplodingAdapter(Adapter):
         raise RuntimeError("provider detail must not escape")
 
 
+def test_running_agent_reclaims_lease_that_expires_after_service_start():
+    service=load('agent_collection_service')
+    config={**load('amazon_us_worker').DEFAULTS,'max_actions_per_run':5,'raw_html_dir':None,'context':{},
+            'proxy_url':'http://proxy.example:10000','proxy_session_ports':[10000,10001],
+            'proxy_session_max_asins':5,'proxy_credential_generation':'test-generation-1'}
+    class ExpiringStorage(RefreshStorage):
+        def __init__(self):
+            super().__init__(); self.claimed=True; self.expires=time.monotonic()+0.15; self.recovered=False
+        def reclaim_expired_leases(self):
+            if not self.recovered and time.monotonic()>=self.expires:
+                self.claimed=False; self.recovered=True; return 1
+            return 0
+    storage=ExpiringStorage()
+    storage.capacity_config_hash=load('proxy_canary').capacity_config_hash(config)
+    background=service.AgentRefreshWorker(storage=storage,adapter_factory=Adapter,config=config,poll_seconds=0.05)
+    background.start()
+    try:
+        deadline=time.monotonic()+2
+        while not storage.finished and time.monotonic()<deadline: time.sleep(0.02)
+        assert storage.finished==[('refresh-1','completed')]
+    finally:
+        background.stop()
+
+
 class FailingRefreshStorage(RefreshStorage):
     def fail_claimed_refreshes(self, worker_id, reason):
         assert worker_id.startswith("agent-refresh-")

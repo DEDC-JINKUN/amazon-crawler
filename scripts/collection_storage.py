@@ -282,6 +282,10 @@ class PostgresCollectionRepository:
         self.tenant_id = tenant_id.strip()
         self._connect_factory = connect or self._connect
 
+    def load_recovery_status(self):
+        from recovery_scheduler import read_projection
+        return read_projection(self._connect_factory, self.tenant_id)
+
     def _connect(self):
         try:
             import psycopg

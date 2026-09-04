@@ -246,6 +246,18 @@ def check_capacity(
     return evaluate_capacity_fact(fact, config, requested_actions=requested_actions)
 
 
+def capacity_batch_actions(config: dict[str, Any], requested_actions: int, fact: dict[str, Any] | None = None) -> int:
+    """A queue is not an instantaneous capacity request; keep reservations small."""
+    if requested_actions < 1:
+        raise ValueError("requested_actions must be positive")
+    slots = len(config.get("proxy_session_ports") or [])
+    per_asin = 1 + int(config.get("proxy_session_retry_per_asin", 1))
+    size = min(requested_actions, 5, max(1, slots // max(1,per_asin)))
+    if fact and type(fact.get('unique_egress_count')) is int and type(fact.get('requested_capacity')) is int:
+        size = min(size,max(1,fact['unique_egress_count']//max(1,per_asin)),max(1,fact['requested_capacity']))
+    return size
+
+
 def reserve_capacity(
     config_path: Path,
     *,
@@ -258,10 +270,12 @@ def reserve_capacity(
     document = tomllib.loads(config_path.read_text(encoding="utf-8"))
     config = dict(document.get("worker") or {})
     config["proxy_credential_generation"] = os.environ.get("AMAZON_PROXY_CREDENTIAL_GENERATION", "").strip()
+    fact_reader = getattr(storage,"load_latest_proxy_capacity",None)
+    fact = fact_reader(max_age_seconds=int(config.get('proxy_canary_max_age_seconds') or 3600)) if callable(fact_reader) else None
     return acquire_capacity_reservation(
         storage,
         config,
-        requested_actions=requested_actions,
+        requested_actions=capacity_batch_actions(config, requested_actions, fact),
         owner_id=owner_id,
         lease_seconds=lease_seconds,
         reservation_id=reservation_id,

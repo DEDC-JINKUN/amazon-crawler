@@ -1805,7 +1805,14 @@ class SeleniumFirefoxAdapter:
     def _handle_bidi_request(self, request: Any) -> None:
         from selenium.common.exceptions import WebDriverException
 
-        blocked = self._network_ledger.should_block_request(request)
+        blocked = self._network_ledger.should_block_request(request) or bool(getattr(self,"_recovery_denied",False))
+        authorize = self.config.get("_recovery_browser_request")
+        if not blocked and callable(authorize):
+            try:
+                authorize()
+            except Exception:
+                self._recovery_denied = True
+                blocked = True
         try:
             if blocked:
                 request.fail()
@@ -1888,6 +1895,7 @@ class SeleniumFirefoxAdapter:
         self._network_ledger.reset(top_context_id=None)
         self.last_context_error_stage = None
         self.last_context_error_code = None
+        self._recovery_denied = False
         try:
             top_context_id = self.driver.current_window_handle
             self._network_ledger.reset(top_context_id=top_context_id)
@@ -1895,9 +1903,16 @@ class SeleniumFirefoxAdapter:
         except Exception:
             self.last_traffic = self._network_ledger.snapshot()
             self.close()
+            if self._recovery_denied:
+                from recovery_scheduler import RecoveryDenied
+                raise RecoveryDenied("recovery_browser_budget_denied") from None
             raise AdapterFetchError(
                 "Firefox browser session is unavailable", stage_code="browser_navigation"
             ) from None
+        if self._recovery_denied:
+            from recovery_scheduler import RecoveryDenied
+            self.close()
+            raise RecoveryDenied("recovery_browser_budget_denied")
         try:
             initial_body = self.driver.page_source
             initial_status = extract_response_status(self.driver)
@@ -1914,6 +1929,10 @@ class SeleniumFirefoxAdapter:
             self._ensure_delivery_context()
         except Exception as exc:
             self._context_initialized = False
+            if self._recovery_denied:
+                from recovery_scheduler import RecoveryDenied
+                self.close()
+                raise RecoveryDenied("recovery_browser_budget_denied") from None
             self.last_context_error_stage = "browser_delivery_context"
             self.last_context_error_code = (
                 "delivery_context_timeout"
@@ -1923,6 +1942,10 @@ class SeleniumFirefoxAdapter:
             self.last_traffic = self._network_ledger.snapshot()
             self.close()
             return initial_body, initial_status
+        if self._recovery_denied:
+            from recovery_scheduler import RecoveryDenied
+            self.close()
+            raise RecoveryDenied("recovery_browser_budget_denied")
         try:
             body = self.driver.page_source
             status = extract_response_status(self.driver)
@@ -1990,6 +2013,12 @@ class HttpFirstAdapter:
         self.timeout = int(self.config.get("request_timeout_seconds", 30))
         self.user_agent = str(self.config.get("user_agent") or "")
         self._opener_handlers: list[Any] = []
+        self._deadline_guard = None
+        observer = self._observe_deadline_connection if callable(self.config.get("_recovery_before_request")) else None
+        self._recovery_deadline_enabled = observer is not None
+        if observer is not None:
+            from http_deadline import DeadlineHTTPHandler
+            self._opener_handlers.append(DeadlineHTTPHandler(observer))
         self._proxy_auth_configured = False
         self._proxy_upstream_url = ""
         self._proxy_username_env = ""
@@ -2015,10 +2044,13 @@ class HttpFirstAdapter:
                 password = os.environ.get(password_env, "")
                 if not username or not password:
                     raise ValueError("proxy credential environment variables are not both populated")
-                self._opener_handlers.append(ProxyTunnelAuthHTTPSHandler(username, password))
+                self._opener_handlers.append(ProxyTunnelAuthHTTPSHandler(username, password, connection_observer=observer))
                 self._proxy_auth_configured = True
                 self._proxy_username_env = username_env
                 self._proxy_password_env = password_env
+        if observer is not None and not self._proxy_auth_configured:
+            from http_deadline import DeadlineHTTPSHandler
+            self._opener_handlers.append(DeadlineHTTPSHandler(observer))
         self.cookie_session = RunScopedAmazonCookieSession(
             "adapter-instance", str(self.config.get("tenant_id") or "local"), str(self.config.get("worker_id") or "worker")
         )
@@ -2043,6 +2075,26 @@ class HttpFirstAdapter:
         self.last_context_error_stage: str | None = None
         self.last_context_error_code: str | None = None
 
+    def _observe_deadline_connection(self, connection) -> None:
+        if self._deadline_guard is not None:
+            self._deadline_guard.bind_connection(connection)
+
+    def enable_recovery_deadline(self) -> None:
+        """Support late hook binding without losing cookies or CONNECT auth."""
+        if self._recovery_deadline_enabled or not callable(self.config.get("_recovery_before_request")):
+            return
+        from http_deadline import DeadlineHTTPHandler, DeadlineHTTPSHandler
+        observer=self._observe_deadline_connection
+        self._opener_handlers.append(DeadlineHTTPHandler(observer))
+        if self._proxy_auth_configured:
+            for handler in self._opener_handlers:
+                if isinstance(handler,ProxyTunnelAuthHTTPSHandler):
+                    handler._connection_observer=observer
+        else:
+            self._opener_handlers.append(DeadlineHTTPSHandler(observer))
+        self._rebuild_opener()
+        self._recovery_deadline_enabled=True
+
     def _rebuild_opener(self) -> None:
         cookie_handler = urllib.request.HTTPCookieProcessor(self.cookie_session.jar)
         self.opener = urllib.request.build_opener(*self._opener_handlers, cookie_handler)
@@ -2061,6 +2113,14 @@ class HttpFirstAdapter:
             self._rebuild_opener()
 
     def begin_action(self) -> None:
+        if callable(self.config.get("_recovery_before_request")):
+            # Never rebind an old browser's background requests to a new lease.
+            if self.browser is not None:
+                self.browser.close()
+                self.browser=None
+            if self._proxy_relay is not None:
+                self._proxy_relay.close()
+                self._proxy_relay=None
         self.action_http_transfer_bytes = 0
         self.last_browser_traffic = None
         self.last_browser_context_confirmed = False
@@ -2085,6 +2145,7 @@ class HttpFirstAdapter:
 
     def fetch(self, url: str) -> tuple[str, int | None]:
         self.last_retry_after_seconds = None
+        self.enable_recovery_deadline()
         self.last_transfer_bytes = 0
         self.last_browser_traffic = None
         self.last_fallback_reason = None
@@ -2099,6 +2160,8 @@ class HttpFirstAdapter:
                 delay = random.uniform(0.0, self._proxy_request_jitter_seconds)
                 if delay > 0:
                     time.sleep(delay)
+            authorize = self.config.get("_recovery_before_request")
+            request_timeout = min(self.timeout, authorize()) if callable(authorize) else self.timeout
             request = urllib.request.Request(
                 url,
                 headers={
@@ -2109,9 +2172,12 @@ class HttpFirstAdapter:
                 },
                 method="GET",
             )
+            if callable(authorize):
+                from http_deadline import HttpDeadline
+                self._deadline_guard = HttpDeadline(request_timeout)
             try:
-                with self.opener.open(request, timeout=self.timeout) as response:
-                    encoded_body = response.read()
+                with self.opener.open(request, timeout=request_timeout) as response:
+                    encoded_body = self._read_budgeted_body(response)
                     self.last_transfer_bytes += len(encoded_body)
                     self.action_http_transfer_bytes += len(encoded_body)
                     body = self._decode_content(response, encoded_body)
@@ -2121,7 +2187,7 @@ class HttpFirstAdapter:
                 if int(exc.code) == 429:
                     self.last_retry_after_seconds = _retry_after_seconds(exc.headers.get("Retry-After") if exc.headers else None)
                 try:
-                    encoded_body = exc.read()
+                    encoded_body = self._read_budgeted_body(exc)
                 except http.client.IncompleteRead as partial:
                     encoded_body = partial.partial or b""
                 self.last_transfer_bytes += len(encoded_body)
@@ -2136,10 +2202,35 @@ class HttpFirstAdapter:
                 if attempt < max_attempts and backoff:
                     time.sleep(backoff * attempt)
             except (urllib.error.URLError, ConnectionResetError, TimeoutError, OSError) as exc:
+                if self._deadline_guard is not None:
+                    self._deadline_guard.check()
                 last_error = exc
                 if attempt < max_attempts and backoff:
                     time.sleep(backoff * attempt)
+            finally:
+                if self._deadline_guard is not None:
+                    self._deadline_guard.close()
+                    self._deadline_guard = None
+        # Observed partial bytes remain in action_http_transfer_bytes; a failed
+        # transport has no known complete transfer total (including TLS EOF).
+        self.last_transfer_bytes = None
         raise AdapterFetchError(f"{last_error} after {max_attempts} HTTP attempts") from last_error
+
+    def _read_budgeted_body(self, response: Any) -> bytes:
+        if not callable(self.config.get("_recovery_before_request")):
+            return response.read()
+        limit = 4*1024*1024
+        if self._deadline_guard is not None:
+            self._deadline_guard.bind_response(response)
+        body = response.read(limit+1)
+        if self._deadline_guard is not None:
+            self._deadline_guard.check()
+        if len(body) > limit:
+            self.last_transfer_bytes += len(body)
+            self.action_http_transfer_bytes += len(body)
+            from recovery_scheduler import RecoveryDenied
+            raise RecoveryDenied("recovery_http_body_budget_denied")
+        return body
 
     @staticmethod
     def _decode_content(response: Any, body: bytes) -> bytes:
@@ -2170,6 +2261,10 @@ class HttpFirstAdapter:
             raise TypeError("fallback reason must be a FallbackReason")
         self.last_fallback_reason = fallback_reason.value
         browser_config = getattr(self, "config", DEFAULTS)
+        authorize = browser_config.get("_recovery_before_request")
+        if callable(authorize):
+            remaining = authorize()
+            browser_config = {**browser_config, "request_timeout_seconds": min(self.timeout, remaining)}
         if getattr(self, "_proxy_auth_configured", False):
             if str(self.config.get("firefox_proxy_auth_mode") or "disabled") != "loopback_connect_relay":
                 raise AdapterFetchError("Firefox proxy authentication is unavailable")
@@ -2182,6 +2277,7 @@ class HttpFirstAdapter:
                     self._proxy_relay = ProxyConnectRelay(
                         self._proxy_upstream_url, username, password,
                         connect_timeout_seconds=self.timeout,
+                        transfer_budget=self.config.get("_recovery_relay_bytes"),
                     )
                     self._proxy_relay.start()
                 except (OSError, RuntimeError, ValueError):
@@ -2192,7 +2288,7 @@ class HttpFirstAdapter:
                     ) from None
             relay_host, relay_port = self._proxy_relay.address
             browser_config = {
-                **self.config,
+                **browser_config,
                 "proxy_url": f"http://{relay_host}:{relay_port}",
                 "proxy_username_env": "",
                 "proxy_password_env": "",
@@ -2387,6 +2483,9 @@ def _fetch_browser_once(
 
 def _evidence_context(base_context: dict[str, Any] | None, adapter: Any) -> dict[str, Any]:
     context = dict(base_context or {})
+    recovery_snapshot = getattr(adapter, "config", {}).get("_recovery_snapshot")
+    if callable(recovery_snapshot):
+        context["recovery"] = recovery_snapshot()
     traffic: dict[str, Any] = {}
     action_http_transfer = getattr(adapter, "action_http_transfer_bytes", None)
     action_http_unknown = int(getattr(adapter, "action_http_transfer_unknown_count", 0) or 0)
@@ -3036,9 +3135,24 @@ def _run_postgres_actions_impl(
                 else storage.claim_task(worker_id, lease_seconds=lease_seconds)
             )
         if task is None:
+            reason_reader = getattr(storage,"recovery_denial_reason",None)
+            denial = reason_reader() if callable(reason_reader) else None
+            if denial in {"recovery_global_pause","recovery_manual_pause","recovery_authorization_expired"}:
+                adapter.circuit_open_reason = denial
+                _note_proxy_unrequested(adapter,max_actions-actions)
             break
         if hasattr(adapter, "begin_action"):
             adapter.begin_action()
+        if task.get("recovery"):
+            hooks={
+                "_recovery_before_request":lambda bound=task: storage.before_recovery_request(bound),
+                "_recovery_browser_request":lambda bound=task: storage.before_recovery_browser_request(bound),
+                "_recovery_relay_bytes":lambda count,bound=task: storage.consume_recovery_relay_bytes(bound,count),
+                "_recovery_snapshot":lambda bound=task: storage.recovery_status(bound["asin"],bound["recovery"]["stage"]),
+            }
+            binder=getattr(adapter,"bind_recovery_hooks",None)
+            if callable(binder): binder(hooks)
+            else: adapter.config.update(hooks)
         if reviews_only and (
             task.get("task_stage") != "reviews" or not str(task.get("next_review_url") or "").strip()
         ):
@@ -3227,6 +3341,7 @@ def _run_postgres_actions_impl(
         reason = classify_block(response_status, body)
         if (
             reason
+            and response_status != 429 and reason != "too_many_requests"
             and bool(config.get("proxy_firefox_verify_on_access_block", True))
             and callable(getattr(adapter, "evidence_context", None))
             and _browser_fallback_available(adapter)
@@ -3261,7 +3376,7 @@ def _run_postgres_actions_impl(
                 if first_browser_failed:
                     _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, task["asin"])
             rotate = getattr(adapter, "rotate_after_browser_failure", None)
-            if reason and first_browser_failed and callable(rotate) and rotate(task["url"]):
+            if reason and response_status != 429 and reason != "too_many_requests" and first_browser_failed and callable(rotate) and rotate(task["url"]):
                 try:
                     browser_result = _fetch_browser_once(
                         adapter, task["url"], fallback_reason=FallbackReason.ACCESS_CONTROL_RETRY,
@@ -3519,7 +3634,39 @@ def _run_postgres_actions_impl(
     return -1 if _proxy_circuit_reason(adapter) or (blocked and not pooled) else actions
 
 
-def run_postgres_actions(
+def run_postgres_actions(storage: Any, adapter: Any, config: dict[str, Any], *,
+                         limit: int | None = None, run_id: str | None = None,
+                         worker_id: str = "amazon-us-worker", lease_seconds: int = 600,
+                         product_only: bool = False, reviews_only: bool = False,
+                         capacity_reservation_id: str | None = None) -> int:
+    from proxy_capacity_gate import capacity_batch_actions
+    target = min(limit, int(config["max_actions_per_run"])) if limit else int(config["max_actions_per_run"])
+    run_id = run_id or f"run-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
+    begin_recovery = getattr(storage,"begin_recovery_run",None)
+    if callable(begin_recovery):
+        begin_recovery()
+    done = 0
+    while done < target:
+        fact_reader = getattr(storage,"load_latest_proxy_capacity",None)
+        try:
+            fact = fact_reader(max_age_seconds=int(config.get('proxy_canary_max_age_seconds') or 3600)) if callable(fact_reader) else None
+        except Exception:
+            raise ProxyCapacityGateDenied('capacity_evidence_unavailable') from None
+        size = capacity_batch_actions(config, target-done, fact)
+        result = _run_reserved_postgres_actions(
+            storage,adapter,config,limit=size,run_id=run_id,worker_id=worker_id,
+            lease_seconds=lease_seconds,product_only=product_only,reviews_only=reviews_only,
+            capacity_reservation_id=capacity_reservation_id if done == 0 else None,
+        )
+        if result < 0:
+            return result
+        done += result
+        if result < size:
+            break
+    return done
+
+
+def _run_reserved_postgres_actions(
     storage: Any,
     adapter: Any,
     config: dict[str, Any],
@@ -3533,6 +3680,9 @@ def run_postgres_actions(
     capacity_reservation_id: str | None = None,
 ) -> int:
     """Reserve shared proxy capacity, bind it to the run, and release it on every exit path."""
+    configure_recovery = getattr(storage, "configure_recovery", None)
+    if callable(configure_recovery):
+        configure_recovery(config)
     max_actions = min(limit, int(config["max_actions_per_run"])) if limit else int(config["max_actions_per_run"])
     validate = getattr(storage, "validate_proxy_capacity_reservation", None)
     release = getattr(storage, "release_proxy_capacity", None)
@@ -3560,6 +3710,9 @@ def run_postgres_actions(
             lease_seconds=lease_seconds,
         )
     reservation_id = str(reservation["reservation_id"])
+    bind_recovery = getattr(storage,"bind_recovery_authorization",None)
+    if callable(bind_recovery):
+        bind_recovery(reservation)
     expected_hash = capacity_config_hash(config)
     expected_generation = str(config.get("proxy_credential_generation") or "")
     expected_reserved_slots = reservation_slots_for(config, max_actions)
@@ -3626,6 +3779,20 @@ def run_postgres_actions(
             lease_seconds=lease_seconds, product_only=product_only, reviews_only=reviews_only,
             capacity_validator=validate_reservation,
         )
+    except Exception as exc:
+        from recovery_scheduler import RecoveryDenied
+        if isinstance(exc, RecoveryDenied):
+            task = storage.recovery_active_task()
+            evidence = None
+            if task:
+                raw_root = Path(config["raw_html_dir"]) if config.get("raw_html_dir") else None
+                _capture_proxy_attempt_evidence(adapter,raw_root,run_id,task['asin'])
+                evidence = _postgres_evidence(run_id,task,None,None,getattr(adapter,'source_type','http_html'),
+                    raw_root,_evidence_context(scoped_config.get('context'),adapter),getattr(adapter,'last_transfer_bytes',None),
+                    error_code='recovery_budget_or_lease_denied')
+            storage.abort_recovery(evidence)
+            raise ProxyCapacityGateDenied("recovery_budget_or_lease_denied") from None
+        raise
     finally:
         release_adapter = getattr(adapter, "release_capacity_reservation", None)
         if callable(release_adapter):

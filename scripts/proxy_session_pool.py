@@ -216,10 +216,18 @@ class ProxySessionPool:
         self._prepare(slot)
         return slot
 
+    def bind_recovery_hooks(self, hooks: dict[str, Any]) -> None:
+        self.config.update(hooks)
+        if self._current is not None:
+            self._prepare(self._current)
+
     def _prepare(self, slot: _Slot) -> None:
         if slot.action_generation != self._action_generation and hasattr(slot.adapter, "begin_action"):
             slot.adapter.begin_action()
             slot.action_generation = self._action_generation
+        for name in ("_recovery_before_request","_recovery_browser_request","_recovery_relay_bytes","_recovery_snapshot"):
+            if name in self.config:
+                slot.adapter.config[name]=self.config[name]
 
     @staticmethod
     def _asin(url: str) -> str:

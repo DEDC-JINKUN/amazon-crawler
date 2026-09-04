@@ -63,12 +63,21 @@ async function loadConsole(fetchImpl, promptImpl) {
   });
   vm.runInContext(APP, context, { filename: 'console/app.js' });
   await settle();
-  return { element, storageWrites, tick: async () => { interval(); await settle(); } };
+  return { element, storageWrites, run: (code) => vm.runInContext(code,context), tick: async () => { interval(); await settle(); } };
 }
 
 function response(status, payload = {}) {
   return { status, ok: status >= 200 && status < 300, async json() { return payload; } };
 }
+
+test('recovery panel distinguishes unknown budgets and persistent pause', async () => {
+  const app = await loadConsole(async () => response(401), () => null);
+  app.run("renderRecovery({availability:'unknown'})");
+  assert.match(app.element('recoverySummary').textContent, /unknown/);
+  app.run("renderRecovery({availability:'available',counts:{transport:2},egress:[{paused_until:'2099-01-01T00:00:00Z'}]})");
+  assert.match(app.element('recoverySummary').textContent, /暂停/);
+  assert.match(app.element('recoverySummary').textContent, /transport.*2/);
+});
 
 test('cancelled API key prompt stays locked across automatic refresh until button click', async () => {
   let prompts = 0;

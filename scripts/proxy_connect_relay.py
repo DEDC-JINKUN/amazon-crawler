@@ -12,7 +12,7 @@ import select
 import socket
 import socketserver
 import threading
-from typing import Iterable
+from typing import Callable, Iterable
 from urllib.parse import urlsplit
 
 
@@ -37,6 +37,7 @@ class ProxyConnectRelay:
         allowed_hosts: Iterable[str] = ("amazon.com", "media-amazon.com", "ssl-images-amazon.com"),
         connect_timeout_seconds: float = 15.0,
         max_connections: int = 32,
+        transfer_budget: Callable[[int], bool] | None = None,
     ) -> None:
         upstream = urlsplit(str(upstream_proxy_url or "").strip())
         if (
@@ -55,6 +56,7 @@ class ProxyConnectRelay:
         self._allowed_hosts = normalized_hosts
         self._timeout = max(1.0, min(float(connect_timeout_seconds), 120.0))
         self._max_connections = int(max_connections)
+        self._transfer_budget = transfer_budget
         if self._max_connections < 1 or self._max_connections > 64:
             raise ValueError("proxy relay max_connections must be between 1 and 64")
         encoded = base64.b64encode(f"{username}:{password}".encode("utf-8"))
@@ -120,6 +122,13 @@ class ProxyConnectRelay:
                 payload = source.recv(65536)
                 if not payload:
                     return
+                if self._transfer_budget is not None:
+                    try:
+                        permitted = self._transfer_budget(len(payload))
+                    except Exception:
+                        permitted = False
+                    if not permitted:
+                        return
                 destination = upstream if source is client else client
                 destination.sendall(payload)
 
@@ -176,10 +185,13 @@ class ProxyConnectRelay:
             client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             self._tunnel(client, upstream)
         except (OSError, ValueError):
-            try:
-                self._reply(client, 502, "Bad Gateway")
-            except OSError:
-                pass
+            # Once CONNECT succeeded, only opaque TLS bytes or EOF are legal.
+            # In particular, shutdown must not inject a plaintext 502 into TLS.
+            if not counted_active:
+                try:
+                    self._reply(client, 502, "Bad Gateway")
+                except OSError:
+                    pass
         finally:
             if upstream is not None:
                 try:

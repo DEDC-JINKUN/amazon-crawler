@@ -439,6 +439,9 @@ def test_agent_api_refresh_is_consumed_and_returned_from_real_postgres():
         last_transfer_bytes = 789
         last_retry_after_seconds = None
 
+        def __init__(self):
+            self.config = {}
+
         def configure_capacity_reservation(self, slot_ids, validator):
             self.capacity_slot_ids = list(slot_ids)
             self.capacity_validator = validator
@@ -446,6 +449,7 @@ def test_agent_api_refresh_is_consumed_and_returned_from_real_postgres():
         def release_capacity_reservation(self): return None
 
         def fetch(self, url):
+            self.config["_recovery_before_request"]()
             return """
             <html><head><link rel="canonical" href="https://www.amazon.com/dp/B00RCPDCQU"></head><body>
               <input id="ASIN" value="B00RCPDCQU"><span id="productTitle">Agent E2E Product</span>
@@ -519,9 +523,10 @@ def test_agent_api_refresh_is_consumed_and_returned_from_real_postgres():
         )
         result = client.refresh_and_wait(["B00RCPDCQU"], reason="postgres_e2e", timeout_seconds=5, poll_seconds=0.02)
         item = result["results"][0]
-        assert item["job"]["status"] == "completed"
+        assert item["job"]["status"] == "completed", background.status().get("last_error")
         assert item["result"]["product"]["product"]["title"] == "Agent E2E Product"
         assert item["result"]["latest_evidence"]["transfer_bytes"] == 789
+        assert item["result"]["latest_evidence"]["context_json"]["recovery"]["request_count"] == 1
         assert item["result"]["latest_evidence"]["context_json"]["capacity_authorization"]["canary_operation_id"] == operation_id
         assert item["result"]["latest_evidence"]["context_json"]["capacity_authorization"]["reservation_id"]
         assert item["result"]["evidence_after_request"] is True
@@ -534,7 +539,8 @@ def test_agent_api_refresh_is_consumed_and_returned_from_real_postgres():
         assert audit == ("refresh-agent", "request_refresh_batch", "accepted")
 
         background.stop()
-        failed_job = repository.request_refresh("US", "B00RCPDCQU", "refresh-agent", "forced_worker_error")
+        storage.initialize_manifest([{"asin":"B00RCPDI50","url":"https://www.amazon.com/dp/B00RCPDI50"}])
+        failed_job = repository.request_refresh("US", "B00RCPDI50", "refresh-agent", "forced_worker_error")
         claimed = storage.claim_refresh_task("agent-refresh-failure", lease_seconds=120)
         assert claimed["job_id"] == failed_job["job_id"]
         assert storage.fail_claimed_refreshes("agent-refresh-failure", "agent_refresh_worker_failed") == 1
@@ -543,7 +549,7 @@ def test_agent_api_refresh_is_consumed_and_returned_from_real_postgres():
         with psycopg.connect(DSN) as connection:
             state = connection.execute(
                 "SELECT status,lease_token,lease_owner,last_error FROM amazon_us.item_state "
-                "WHERE tenant_id=%s AND asin='B00RCPDCQU'",
+                "WHERE tenant_id=%s AND asin='B00RCPDI50'",
                 (tenant_id,),
             ).fetchone()
         assert state == ("failed", None, None, "agent_refresh_worker_failed")

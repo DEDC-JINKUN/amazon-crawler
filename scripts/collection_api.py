@@ -239,6 +239,14 @@ class CollectionHandler(BaseHTTPRequestHandler):
             principal = self._authorized("read", "read", path)
             if principal is None:
                 return
+        if path == "/v1/recovery/status":
+            try:
+                payload = self.server.repository.load_recovery_status()
+                self._audit(principal, "read", path, "ok")
+                self._send_json(HTTPStatus.OK, payload)
+            except Exception:
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error":"recovery_unavailable"})
+            return
         if path == "/v1/jobs/status":
             try:
                 payload = self.server.repository.load_job_status()

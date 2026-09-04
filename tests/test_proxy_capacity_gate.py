@@ -18,6 +18,15 @@ def load(name: str):
     return module
 
 
+def test_production_queue_is_partitioned_into_capacity_sized_batches():
+    gate = load('proxy_capacity_gate')
+    cfg = {'proxy_session_ports': list(range(10000,10010)), 'proxy_session_retry_per_asin': 1}
+    assert gate.capacity_batch_actions(cfg,1093) == 5
+    assert gate.capacity_batch_actions(cfg,3) == 3
+    assert gate.capacity_batch_actions({**cfg,'proxy_session_ports':[10000,10001]},20) == 1
+    assert gate.capacity_batch_actions(cfg,1093,{'unique_egress_count':4,'requested_capacity':20}) == 2
+
+
 def config(**overrides):
     value = {
         "egress_profile": "proxy_sessions",

@@ -45,6 +45,58 @@ class PostgresWorkerStorage:
         self.subject_type = subject_type
         self.default_lease_seconds = int(default_lease_seconds)
         self._connect_factory = connect or self._connect
+        self._recovery = None
+
+    def configure_recovery(self, config: Mapping[str, Any]) -> None:
+        from recovery_scheduler import RecoveryScheduler
+        try:
+            with self._connect_factory() as conn, conn.cursor() as cursor:
+                cursor.execute("SELECT COUNT(*) AS count FROM information_schema.columns WHERE table_schema='amazon_us' AND table_name='recovery_job' AND column_name IN ('browser_request_count','relay_payload_bytes')")
+                if int(cursor.fetchone()['count']) != 2:
+                    raise RuntimeError("recovery_schema_required")
+        except Exception:
+            raise RuntimeError("recovery_schema_required") from None
+        self._recovery = RecoveryScheduler(self, config)
+
+    def recovery_status(self, asin: str, stage: str = "product") -> dict[str, Any] | None:
+        if self._recovery is None:
+            raise RuntimeError("recovery_not_configured")
+        return self._recovery.get(asin, stage)
+
+    def begin_recovery_run(self) -> None:
+        self._recovery_excluded_asins = set()
+
+    def before_recovery_request(self, task: Mapping[str, Any]) -> float:
+        if self._recovery is None or not task.get("recovery"):
+            raise RuntimeError("recovery_not_configured")
+        return self._recovery.before_request(task)
+
+    def recovery_active_task(self):
+        return getattr(self._recovery,"current_task",None)
+
+    def bind_recovery_authorization(self, authorization: Mapping[str, Any]) -> None:
+        if self._recovery is not None:
+            self._recovery.authorization_expires_at = authorization.get("fact_expires_at")
+
+    def abort_recovery(self, evidence=None) -> None:
+        if self._recovery is not None:
+            self._recovery.abort(evidence)
+
+    def recovery_denial_reason(self) -> str | None:
+        return self._recovery.last_denial if self._recovery is not None else None
+
+    def before_recovery_browser_request(self, task: Mapping[str, Any]) -> None:
+        if self._recovery is None:
+            raise RuntimeError("recovery_not_configured")
+        self._recovery.before_browser_request(task)
+
+    def consume_recovery_relay_bytes(self, task: Mapping[str, Any], count: int) -> bool:
+        return self._recovery is not None and self._recovery.consume_relay_bytes(task,count)
+
+    def _lock_recovery(self, cursor: Any, task: Mapping[str, Any]) -> None:
+        if self._recovery is not None and task.get("recovery"):
+            cursor.execute("SELECT 1 FROM amazon_us.recovery_egress WHERE tenant_id=%s AND egress_id=%s FOR UPDATE",
+                           (self.tenant_id, self._recovery.egress_id))
 
     def _connect(self):
         try:
@@ -140,6 +192,8 @@ class PostgresWorkerStorage:
         task_stage: str | None = None,
     ) -> dict[str, Any] | None:
         """Atomically claim one eligible task using row locking and a lease token."""
+        if self._recovery is not None:
+            return self._recovery.claim(worker_id, lease_seconds=lease_seconds or self.default_lease_seconds, stage=task_stage)
         if not worker_id or not worker_id.strip():
             raise ValueError("worker_id is required")
         seconds = int(lease_seconds if lease_seconds is not None else self.default_lease_seconds)
@@ -805,6 +859,8 @@ class PostgresWorkerStorage:
 
     def has_pending_refresh_task(self) -> bool:
         """Read whether this Agent scope has claimable refresh work without taking a lease."""
+        if self._recovery is not None:
+            return self._recovery.due_count(1) > 0
         with self._connect_factory() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(
@@ -829,6 +885,8 @@ class PostgresWorkerStorage:
 
     def count_pending_refresh_tasks(self, limit: int = 5) -> int:
         """Count claimable refresh work up to the Agent's bounded batch size."""
+        if self._recovery is not None:
+            return self._recovery.due_count(max(1,min(5,int(limit))))
         limit = int(limit)
         if limit < 1 or limit > 5:
             raise ValueError("refresh task count limit must be between 1 and 5")
@@ -859,6 +917,8 @@ class PostgresWorkerStorage:
 
     def claim_refresh_task(self, worker_id: str, *, lease_seconds: int | None = None) -> dict[str, Any] | None:
         """Atomically claim a queued refresh request and lease its requested ASIN."""
+        if self._recovery is not None:
+            return self._recovery.claim(worker_id, lease_seconds=lease_seconds or self.default_lease_seconds, refresh_only=True)
         if not worker_id or not worker_id.strip():
             raise ValueError("worker_id is required")
         seconds = int(lease_seconds if lease_seconds is not None else self.default_lease_seconds)
@@ -921,6 +981,14 @@ class PostgresWorkerStorage:
         with self._connect_factory() as conn:
             try:
                 with conn.cursor() as cursor:
+                    if self._recovery is not None and status in {"failed", "queued"}:
+                        cursor.execute('''SELECT j.terminal,j.deadline>CURRENT_TIMESTAMP AS in_time
+                                          FROM amazon_us.recovery_job j JOIN amazon_us.refresh_request r
+                                          ON j.tenant_id=r.tenant_id AND j.asin=r.asin AND j.subject_type=r.subject_type
+                                          WHERE r.job_id=%s AND r.tenant_id=%s AND j.stage='product' ''', (job_id,self.tenant_id))
+                        job = cursor.fetchone()
+                        if job:
+                            status = "queued" if not job['terminal'] and job['in_time'] else "failed"
                     cursor.execute(
                         """
                         UPDATE amazon_us.refresh_request
@@ -1060,6 +1128,7 @@ class PostgresWorkerStorage:
         with self._connect_factory() as conn:
             try:
                 with conn.cursor() as cursor:
+                    self._lock_recovery(cursor, task)
                     cursor.execute(
                         """
                         SELECT status FROM amazon_us.item_state
@@ -1202,6 +1271,9 @@ class PostgresWorkerStorage:
                         """,
                         (self.tenant_id, asin, self.subject_type, current["status"], next_status, reason),
                     )
+                    if self._recovery is not None:
+                        quality = evidence.get("context_json") or {}
+                        self._recovery.finish(cursor, task, "partial" if quality.get("context_quality") == "partial" else "completed", transfer_bytes=evidence.get("transfer_bytes"))
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -1238,6 +1310,7 @@ class PostgresWorkerStorage:
         with self._connect_factory() as conn:
             try:
                 with conn.cursor() as cursor:
+                    self._lock_recovery(cursor, task)
                     cursor.execute(
                         """
                         SELECT status FROM amazon_us.item_state
@@ -1294,6 +1367,14 @@ class PostgresWorkerStorage:
                         """,
                         (self.tenant_id, asin, self.subject_type, current["status"], next_status, reason),
                     )
+                    if self._recovery is not None:
+                        outcome = ("variant" if reason == "variant_redirect" else "identity_terminal" if terminal
+                                   else "access_control" if next_status == "blocked" or fields.get("block_reason")
+                                   else "transport" if reason in {"fetch_error", "review_fetch_error"} else "unknown")
+                        retry_at = fields.get("next_retry_at")
+                        retry_seconds = max(0, (datetime.fromisoformat(str(retry_at)) - datetime.now(timezone.utc)).total_seconds()) if retry_at else None
+                        self._recovery.finish(cursor, task, outcome, retry_after=retry_seconds,
+                                              transfer_bytes=(evidence or {}).get("transfer_bytes"))
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -1331,6 +1412,7 @@ class PostgresWorkerStorage:
         with self._connect_factory() as conn:
             try:
                 with conn.cursor() as cursor:
+                    self._lock_recovery(cursor, task)
                     cursor.execute(
                         """
                         SELECT status FROM amazon_us.item_state
@@ -1429,6 +1511,9 @@ class PostgresWorkerStorage:
                         """,
                         (self.tenant_id, asin, self.subject_type, current["status"], next_status, reason),
                     )
+                    if self._recovery is not None:
+                        outcome = "access_control" if next_status == "blocked" or state_fields.get("block_reason") else "transport" if increment_attempts else "completed" if next_status == "succeeded" else "review_page"
+                        self._recovery.finish(cursor,task,outcome,transfer_bytes=evidence.get("transfer_bytes"))
                 conn.commit()
             except Exception:
                 conn.rollback()
