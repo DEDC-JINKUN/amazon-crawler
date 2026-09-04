@@ -192,6 +192,13 @@ def reconcile_legacy_variant_canonical(
     identity = context.get("identity") or {}
     if not isinstance(identity, dict) or "canonical_valid_amazon" in identity:
         return row
+    # Raw reconciliation can only supply the missing canonical proof. It cannot
+    # invent sibling identity for ordinary successful/blocked/transport rows.
+    proof_candidate = {**row, "context_json": {**context, "identity": {
+        **identity, "canonical_valid_amazon": True,
+    }}}
+    if row.get("block_reason") or not _explicit_sibling_identity(proof_candidate):
+        return row
     updated = dict(row)
     updated_context = dict(context)
     updated_identity = dict(identity)

@@ -199,6 +199,19 @@ def test_console_is_loopback_only():
         module.ConsoleServer(("0.0.0.0", 0), Repository())
 
 
+@pytest.mark.parametrize("error,block", [(None, None), ("fetch_error", None), ("captcha", "captcha")])
+def test_progress_does_not_open_raw_for_non_variant_evidence(tmp_path, monkeypatch, error, block):
+    module = load_module()
+    def forbidden_raw(*args, **kwargs):
+        raise AssertionError("ordinary progress must not read or parse raw HTML")
+    monkeypatch.setattr(module.gzip, "open", forbidden_raw)
+    for index in range(20):
+        row = {"asin": "B00RCPDCQU", "error_code": error, "block_reason": block,
+               "raw_html_path": f"{index}.html.gz", "content_hash": "a" * 64,
+               "context_json": {"context_quality": "partial"}}
+        assert module.reconcile_legacy_variant_canonical(row, tmp_path) == row
+
+
 def test_console_traffic_summary_separates_http_firefox_and_proxy_unknown():
     module = load_module()
     rows = [

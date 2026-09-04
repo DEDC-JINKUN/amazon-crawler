@@ -8,6 +8,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 import time
 import uuid
+import json
+from recovery_policy import RecoveryPolicy
 
 
 class RecoveryDenied(RuntimeError):
@@ -37,6 +39,8 @@ def read_projection(connect, tenant):
         gates = [dict(row) for row in cur.fetchall()]
         for gate in gates:
             outcomes = gate.pop('outcomes')
+            gate['policy_versions'] = sorted({str(value['policy']['version']) for value in outcomes
+                                             if isinstance(value,dict) and isinstance(value.get('policy'),dict) and value['policy'].get('version')})
             flags = [bool(value.get('blocked')) if isinstance(value,dict) else bool(value) for value in outcomes]
             gate['sample_count'] = len(flags)
             gate['blocked_count'] = sum(flags)
@@ -52,6 +56,7 @@ class RecoveryScheduler:
     def __init__(self, storage, config=None):
         self.storage = storage
         self.config = dict(config or {})
+        self.policy = RecoveryPolicy(self.config)
         # Deliberately independent of ports, credentials, config hashes and run IDs.
         self.egress_id = 'paid-residential'
         self.interval = max(5.0, float(self.config.get('recovery_request_interval_seconds', 5)))
@@ -121,6 +126,19 @@ class RecoveryScheduler:
             if gate['manually_paused'] or (gate['paused_until'] and gate['paused_until'] > now) or (gate['lease_expires_at'] and gate['lease_expires_at'] > now):
                 self.last_denial = 'recovery_manual_pause' if gate['manually_paused'] else 'recovery_global_pause' if gate['paused_until'] and gate['paused_until'] > now else 'recovery_egress_busy'
                 return None
+            first_pass = False
+            if not refresh_only:
+                cur.execute('''SELECT EXISTS(SELECT 1 FROM amazon_us.item_state s
+                    LEFT JOIN amazon_us.recovery_job j ON j.tenant_id=s.tenant_id AND j.asin=s.asin
+                      AND j.subject_type=s.subject_type AND j.stage=s.task_stage
+                    WHERE s.tenant_id=%s AND s.subject_type=%s AND s.marketplace='US'
+                      AND (%s::text[] IS NULL OR s.asin=ANY(%s))
+                      AND (%s::text IS NULL OR s.task_stage=%s)
+                      AND s.status IN ('pending','running','reviews_pending')
+                      AND COALESCE(j.attempts,s.attempts,0)=0
+                      AND (j.tenant_id IS NULL OR (NOT j.terminal AND j.deadline>CURRENT_TIMESTAMP))) AS pending''',
+                    (tenant,subject,getattr(self.storage,'_recovery_allowed_asins',None),getattr(self.storage,'_recovery_allowed_asins',None),stage,stage))
+                first_pass = bool(cur.fetchone()['pending'])
             cur.execute('''
                 SELECT s.*,r.job_id,j.attempts AS recovery_attempts
                 FROM amazon_us.item_state s
@@ -135,6 +153,7 @@ class RecoveryScheduler:
                   AND (%s::text[] IS NULL OR s.asin=ANY(%s))
                   AND NOT(s.asin=ANY(%s))
                   AND (%s::text IS NULL OR s.task_stage=%s)
+                  AND (NOT %s OR COALESCE(j.attempts,s.attempts,0)=0)
                   AND (s.lease_expires_at IS NULL OR s.lease_expires_at <= CURRENT_TIMESTAMP)
                   AND (s.next_retry_at IS NULL OR s.next_retry_at <= CURRENT_TIMESTAMP)
                   AND ((%s AND r.job_id IS NOT NULL) OR (NOT %s AND
@@ -144,7 +163,7 @@ class RecoveryScheduler:
                        AND j.request_count < j.max_requests AND j.browser_request_count<240 AND j.deadline>CURRENT_TIMESTAMP
                        AND (j.next_retry_at IS NULL OR j.next_retry_at<=CURRENT_TIMESTAMP)))
                 ORDER BY s.updated_at,s.asin FOR UPDATE OF s SKIP LOCKED LIMIT 1
-            ''', (refresh_only, tenant, subject,getattr(self.storage,'_recovery_allowed_asins',None),getattr(self.storage,'_recovery_allowed_asins',None), sorted(getattr(self.storage,'_recovery_excluded_asins',set())), stage, stage, refresh_only, refresh_only))
+            ''', (refresh_only, tenant, subject,getattr(self.storage,'_recovery_allowed_asins',None),getattr(self.storage,'_recovery_allowed_asins',None), sorted(getattr(self.storage,'_recovery_excluded_asins',set())), stage, stage, first_pass, refresh_only, refresh_only))
             row = cur.fetchone()
             if not row:
                 self.last_denial = 'recovery_no_due_work'
@@ -198,7 +217,7 @@ class RecoveryScheduler:
         if job['lease_token'] != task['lease_token']:
             raise RecoveryDenied('recovery_lease_lost')
         terminal = outcome in {'completed','partial','variant','identity_terminal','unknown'} or job['attempts'] >= job['max_attempts'] or job['request_count'] >= job['max_requests'] or job['browser_request_count'] >= 240 or job['relay_payload_bytes'] >= 64*1024*1024 or job['deadline'] <= gate['now']
-        cooldown = max(3600 if outcome == 'access_control' else 0 if outcome == 'review_page' else 60, float(retry_after or 0))
+        cooldown = self.policy.cooldown(outcome, job['attempts'], retry_after)
         due = None if terminal else gate['now'] + timedelta(seconds=cooldown)
         cursor.execute('''UPDATE amazon_us.recovery_job SET outcome=%s,terminal=%s,next_retry_at=%s,lease_token=NULL,
                           known_bytes=known_bytes+%s,unknown_byte_attempts=unknown_byte_attempts+%s,updated_at=CURRENT_TIMESTAMP
@@ -215,20 +234,25 @@ class RecoveryScheduler:
         prior = [value if isinstance(value,dict) else {'key':'legacy-'+str(index),'blocked':bool(value)}
                  for index,value in enumerate(gate['outcomes'])]
         window = [value for value in prior if value['key'] != sample_key][-19:]
-        window.append({'key':sample_key,'blocked':outcome == 'access_control'})
+        window.append({'key':sample_key,'blocked':outcome == 'access_control', 'policy':self.policy.snapshot()})
         if gate['half_open'] and outcome in {'completed','partial','variant'}:
-            window = [{'key':sample_key,'blocked':False}]
+            window = [{'key':sample_key,'blocked':False,'policy':self.policy.snapshot()}]
         consecutive = 0
         for value in reversed(window):
             if not value['blocked']: break
             consecutive += 1
-        block_count = sum(value['blocked'] for value in window)
-        rolling_pause = len(window) >= 3 and block_count >= 3 and block_count/len(window) >= 0.15
-        pause = bool(retry_after and retry_after > 0) or (gate['half_open'] and outcome not in {'completed','partial','variant'}) or (outcome == 'access_control' and (consecutive >= 2 or rolling_pause))
+        pause_reason = self.policy.pause_reason(window, gate['half_open'], outcome, retry_after)
+        paused_until = gate['now']+timedelta(seconds=max(self.policy.global_seconds, float(retry_after or 0))) if pause_reason else None
+        audit = {'policy':self.policy.snapshot(),'outcome':outcome,'attempts':job['attempts'],
+                 'old_next_retry_at':job['next_retry_at'],'new_next_retry_at':due,
+                 'old_paused_until':gate['paused_until'],'new_paused_until':paused_until,
+                 'server_retry_after_seconds':float(retry_after or 0),'pause_reason':pause_reason}
+        cursor.execute("INSERT INTO amazon_us.state_history(tenant_id,marketplace,asin,subject_type,from_status,to_status,reason) VALUES(%s,'US',%s,%s,%s,%s,%s)",
+                       (tenant,task['asin'],subject,task['status'],task['status'],'recovery_policy:'+json.dumps(audit,default=str,sort_keys=True)))
         cursor.execute('''UPDATE amazon_us.recovery_egress SET outcomes=%s,consecutive_blocks=%s,
                           paused_until=%s,half_open=false,lease_token=NULL,lease_expires_at=NULL
                           WHERE tenant_id=%s AND egress_id=%s AND lease_token=%s''',
-                       (self.storage._jsonb(window),consecutive,gate['now']+timedelta(seconds=max(3600,cooldown)) if pause else None,tenant,self.egress_id,task['lease_token']))
+                       (self.storage._jsonb(window),consecutive,paused_until,tenant,self.egress_id,task['lease_token']))
 
     def before_request(self, task):
         """Charge each HTTP retry / browser navigation before transport, not after."""

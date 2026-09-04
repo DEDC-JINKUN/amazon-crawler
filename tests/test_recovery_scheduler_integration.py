@@ -47,6 +47,43 @@ def test_recovery_survives_restart_and_refresh_cannot_bypass_cooldown():
     assert restarted.claim_refresh_task('refresh-worker') is None
 
 
+def test_first_pass_scattered_captcha_does_not_preempt_untried_or_pause_cohort():
+    import psycopg
+    from datetime import datetime, timezone
+    from postgres_worker_storage import PostgresWorkerStorage
+    tenant = 'policy-' + uuid.uuid4().hex
+    asins = [f'B0TST{i:05d}' for i in range(20)]
+    storage = PostgresWorkerStorage(DSN, tenant)
+    storage.initialize_manifest([{'asin':a, 'url':'https://www.amazon.com/dp/'+a} for a in asins])
+    storage.configure_recovery({})
+    storage._recovery_allowed_asins = asins
+    seen = []
+    for index in range(20):
+        task = storage.claim_task('first-pass')
+        assert task is not None
+        assert task['asin'] not in seen
+        seen.append(task['asin'])
+        if index in {1,7,14}:
+            before = datetime.now(timezone.utc)
+            storage.save_failure(task=task,reason='captcha',error='captcha',next_status='blocked',state_fields={'block_reason':'captcha'})
+            status = storage.recovery_status(task['asin'])
+            delay = (datetime.fromisoformat(status['next_retry_at'])-before).total_seconds()
+            assert 299 <= delay <= 305
+            with psycopg.connect(DSN) as conn:
+                conn.execute("UPDATE amazon_us.recovery_job SET next_retry_at=now()-interval '1 second' WHERE tenant_id=%s AND asin=%s",(tenant,task['asin']))
+                conn.execute("UPDATE amazon_us.item_state SET next_retry_at=now()-interval '1 second',updated_at=now()-interval '1 day' WHERE tenant_id=%s AND asin=%s",(tenant,task['asin']))
+        else:
+            storage.save_failure(task=task,reason='variant_redirect',error=None,next_status='succeeded',increment_attempts=False)
+    restarted = PostgresWorkerStorage(DSN, tenant); restarted.configure_recovery({})
+    restarted._recovery_allowed_asins = asins
+    retry = restarted.claim_task('recovery-after-first-pass')
+    assert retry is not None and retry['recovery']['attempts'] == 2
+    storage.save_failure(task=retry,reason='captcha',error='captcha',next_status='blocked',state_fields={'block_reason':'captcha'})
+    with psycopg.connect(DSN) as conn:
+        notes = conn.execute("SELECT reason FROM amazon_us.state_history WHERE tenant_id=%s AND reason LIKE %s",(tenant,'recovery_policy:%')).fetchall()
+    assert notes and all('captcha-first-pass-v2' in row[0] for row in notes)
+
+
 def test_total_budget_is_not_reset_by_crash_reclaim_or_explicit_refresh():
     import psycopg
     from postgres_worker_storage import PostgresWorkerStorage
@@ -87,8 +124,8 @@ def test_persistent_access_pause_allows_only_one_half_open_probe():
     tenant = 'recovery-' + uuid.uuid4().hex
     storage = PostgresWorkerStorage(DSN,tenant)
     storage.configure_recovery({})
-    storage.initialize_manifest([{'asin': asin,'url':'https://www.amazon.com/dp/'+asin} for asin in ('B0CC2FRY3J','B0CC2JBW2H','B0CJFNJCNV')])
-    for _ in range(2):
+    storage.initialize_manifest([{'asin': asin,'url':'https://www.amazon.com/dp/'+asin} for asin in ('B0CC2FRY3J','B0CC2JBW2H','B0CJFNJCNV','B0DPMD58CN')])
+    for _ in range(3):
         task = storage.claim_task('worker')
         storage.save_failure(task=task,reason='captcha',error='captcha',next_status='blocked',state_fields={'block_reason':'captcha'})
     assert storage.claim_task('new-run') is None

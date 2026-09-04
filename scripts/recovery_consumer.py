@@ -61,6 +61,7 @@ def batch_progress(storage,run_id):
         gate=dict(cur.fetchone() or {})
     terminal=due=resolved=0
     waits=[]
+    first_pass = any(not job['attempts'] and job['status'] in {'pending','running'} and not job['terminal'] for job in jobs)
     for job in jobs:
         exhausted=bool(job['terminal']) or (job['attempts'] is not None and (
             job['attempts']>=job['max_attempts'] or job['request_count']>=job['max_requests']
@@ -70,12 +71,14 @@ def batch_progress(storage,run_id):
             terminal+=1
             resolved+=int(job['outcome'] in {'completed','partial','variant'})
             continue
+        if first_pass and job['attempts']:
+            continue
         ready_at=max([now]+[value for value in (job['next_retry_at'],job['state_retry'],job['lease_expires_at'],gate.get('paused_until'),gate.get('lease_expires_at')) if value])
         wait=max(0,(ready_at-now).total_seconds())
         waits.append(wait)
         if not wait and not gate.get('manually_paused'): due+=1
     return {'run_id':run_id,'asins':batch['asins'],'requested':len(batch['asins']),
-            'terminal_count':terminal,'resolved_count':resolved,'due_count':due,
+            'terminal_count':terminal,'resolved_count':resolved,'due_count':due,'first_pass':first_pass,
             'wait_seconds':min(waits) if waits else 0,'deadline_expired':batch['deadline']<=now,
             'manual_pause':bool(gate.get('manually_paused')),'remaining_seconds':max(0,(batch['deadline']-now).total_seconds())}
 
@@ -96,10 +99,12 @@ def finish_batch(storage,run_id,status,reason=None):
 
 def consume_batch(storage,adapter,config,*,run_id,target,worker_id,lease_seconds,max_seconds,reservation_id,run_once):
     from proxy_capacity_gate import ProxyCapacityGateDenied,capacity_batch_actions
+    from recovery_policy import RecoveryPolicy
     storage.configure_recovery(config)
     batch=storage.prepare_recovery_batch(run_id,target,config.get('manifest_asins'),max_seconds)
     scoped={**config,'_recovery_batch_deadline':batch['deadline'],
-            'context':{**(config.get('context') or {}),'recovery_batch_id':run_id}}
+            'context':{**(config.get('context') or {}),'recovery_batch_id':run_id,
+                       'recovery_policy':RecoveryPolicy(config).snapshot()}}
     wait=config.get('_recovery_wait') or time.sleep
     waitable={'capacity_evidence_stale','capacity_evidence_missing','capacity_reserved_elsewhere',
               'capacity_reservation_expired','capacity_authorization_expired','recovery_authorization_expired'}

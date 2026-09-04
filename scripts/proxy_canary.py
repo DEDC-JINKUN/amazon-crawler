@@ -112,6 +112,7 @@ def reservation_slots_for(config: dict[str, Any], requested_actions: int) -> int
 
 
 def capacity_config_hash(config: dict[str, Any]) -> str:
+    from recovery_policy import RecoveryPolicy
     shape = _validated_shape(config)
     credential_generation = str(
         config.get("proxy_credential_generation")
@@ -121,6 +122,7 @@ def capacity_config_hash(config: dict[str, Any]) -> str:
     if not re.fullmatch(r"[A-Za-z0-9_.:-]{8,100}", credential_generation):
         raise ValueError("proxy credential generation is required")
     payload = {
+        "recovery_policy": RecoveryPolicy(config).snapshot(),
         "proxy_scheme": shape["base"].scheme,
         "proxy_host": shape["base"].hostname,
         "proxy_path": shape["base"].path,

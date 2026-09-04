@@ -11,6 +11,49 @@ DSN=os.environ.get('AMAZON_TEST_POSTGRES_DSN')
 pytestmark=pytest.mark.skipif(not DSN,reason='isolated PostgreSQL DSN required')
 
 
+def test_final_snapshot_reads_nineteen_of_twenty_after_console_is_stopped():
+    import json, subprocess, psycopg, shutil
+    from postgres_worker_storage import PostgresWorkerStorage
+    tenant='final-'+uuid.uuid4().hex
+    storage=PostgresWorkerStorage(DSN,tenant); storage.configure_recovery({})
+    asins=[f'B0FIN{i:05d}' for i in range(20)]
+    storage.initialize_manifest([{'asin':a,'url':'https://www.amazon.com/dp/'+a} for a in asins])
+    storage.prepare_recovery_batch('stopped-fixture',20,asins,5400)
+    with psycopg.connect(DSN) as conn:
+        conn.execute("INSERT INTO amazon_us.collection_run(tenant_id,run_id,command,requested_actions,status) VALUES(%s,'stopped-fixture','run',20,'running')",(tenant,))
+        for index,asin in enumerate(asins[:19]):
+            conn.execute('''INSERT INTO amazon_us.collection_evidence(tenant_id,marketplace,asin,subject_type,run_id,url,error_code,block_reason,context_json)
+                           VALUES(%s,'US',%s,'own','stopped-fixture',%s,%s,%s,%s)''',
+                         (tenant,asin,'https://www.amazon.com/dp/'+asin,'asin_mismatch' if index in {14,15} else 'captcha' if index>=16 else None,
+                          'captcha' if index>=16 else None,storage._jsonb({'context_quality':'partial','recovery_batch_id':'stopped-fixture'})))
+    result=subprocess.run([sys.executable,'-B',str(ROOT/'scripts/run_snapshot.py'),'--tenant-id',tenant,'--run-id','stopped-fixture','--dsn-env','AMAZON_TEST_POSTGRES_DSN'],capture_output=True,text=True)
+    assert result.returncode==0,result.stderr
+    value=json.loads(result.stdout)
+    assert value['projection_source']=='postgres_readonly'
+    assert value['requested_actions']==20 and value['recorded_actions']==19 and value['attempt_actions']==19
+    assert value['outcome_counts']=={'completed':14,'variant_redirect':0,'failed':2,'blocked':3}
+    assert value['amazon_business']['unrequested_actions']==1
+    shell=shutil.which('powershell') or shutil.which('pwsh')
+    script=str(ROOT/'crawler.ps1').replace("'","''")
+    command=rf'''
+$tokens=$null; $errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('{script}',[ref]$tokens,[ref]$errors)
+foreach($name in @('Get-PostgresRunProjection','Get-FinalRunSnapshot')) {{
+  $fn=$ast.FindAll({{param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true) | Select-Object -First 1
+  Invoke-Expression $fn.Extent.Text
+}}
+$env:AMAZON_US_POSTGRES_DSN=$env:AMAZON_TEST_POSTGRES_DSN
+$python='{str(Path(sys.executable)).replace("'","''")}'; $projectRoot='{str(ROOT).replace("'","''")}'; $TenantId='{tenant}'
+$script:httpCalls=0
+function Get-RunProjection {{ $script:httpCalls++; throw 'Console stopped' }}
+$final=Get-FinalRunSnapshot 'stopped-fixture' 20 1 $true
+@{{http_calls=$script:httpCalls;recorded=$final.run.recorded_actions;requested=$final.run.requested_actions;attempts=$final.run.attempt_actions;reason=$final.verification_reason}} | ConvertTo-Json -Compress
+'''
+    controlled=subprocess.run([shell,'-NoProfile','-Command',command],capture_output=True,text=True)
+    assert controlled.returncode==0,controlled.stderr
+    assert json.loads(controlled.stdout)=={'http_calls':0,'recorded':19,'requested':20,'attempts':19,'reason':'recorded_actions_incomplete:19/20'}
+
+
 def test_frozen_cohort_survives_reentry_without_replacing_asins_or_extending_deadline():
     from postgres_worker_storage import PostgresWorkerStorage
     tenant='consumer-'+uuid.uuid4().hex

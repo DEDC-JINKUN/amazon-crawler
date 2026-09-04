@@ -520,20 +520,40 @@ function Reserve-Worker([string]$WorkerLock, [string]$RunId, [string]$Mode, [int
     }) $WorkerLock
 }
 
-function Get-FinalRunSnapshot([string]$RunId, [int]$ExpectedActions, [int]$MaxAttempts = 40) {
+function Get-PostgresRunProjection([string]$RunId) {
+    $json = & $python -B (Join-Path $projectRoot 'scripts\run_snapshot.py') --tenant-id $TenantId --run-id $RunId
+    if ($LASTEXITCODE -ne 0) { throw 'PostgreSQL final projection unavailable; counts remain unknown.' }
+    return ($json | ConvertFrom-Json)
+}
+
+function Get-RunExitDisposition([Nullable[int]]$WorkerExitCode, [bool]$OperatorStopped) {
+    $status = if ($OperatorStopped -or $WorkerExitCode -eq 130) { 'interrupted' } elseif ($WorkerExitCode -eq 0) { 'completed' } elseif ($WorkerExitCode -eq 3) { 'blocked' } else { 'failed' }
+    return [pscustomobject]@{
+        status = $status
+        controller_exit_code = $(if ($status -eq 'interrupted') { 130 } elseif ($null -eq $WorkerExitCode) { 4 } else { $WorkerExitCode })
+        worker_exit_code = $WorkerExitCode
+        reason = $(if ($OperatorStopped) { 'operator_interrupted' } elseif ($WorkerExitCode -eq 130) { 'controller_exited' } else { $null })
+    }
+}
+
+function Get-FinalRunSnapshot([string]$RunId, [int]$ExpectedActions, [int]$MaxAttempts = 40, [bool]$AllowIncomplete = $false) {
     $latest = $null
     for ($index = 0; $index -lt $MaxAttempts; $index++) {
         try {
-            $latest = Get-RunProjection $RunId 2
-            if ([int]$latest.recorded_actions -ge $ExpectedActions) {
-                return [pscustomobject][ordered]@{ run = $latest; verification_reason = $null }
+            if (Get-Command Get-PostgresRunProjection -ErrorAction SilentlyContinue) {
+                $latest = Get-PostgresRunProjection $RunId
+            } else { $latest = Get-RunProjection $RunId 2 }
+            if ($AllowIncomplete -or [int]$latest.recorded_actions -ge $ExpectedActions) {
+                $reason = if ([int]$latest.recorded_actions -lt $ExpectedActions) { "recorded_actions_incomplete:$([int]$latest.recorded_actions)/${ExpectedActions}" } else { $null }
+                return [pscustomobject][ordered]@{ run = $latest; verification_reason = $reason }
             }
         }
         catch { }
         if ($index -lt ($MaxAttempts - 1)) { Start-Sleep -Milliseconds 250 }
     }
     if ($null -eq $latest) {
-        return [pscustomobject][ordered]@{ run = $null; verification_reason = 'run_api_unavailable' }
+        $reason = if (Get-Command Get-PostgresRunProjection -ErrorAction SilentlyContinue) { 'postgres_snapshot_unavailable' } else { 'run_api_unavailable' }
+        return [pscustomobject][ordered]@{ run = $null; verification_reason = $reason }
     }
     return [pscustomobject][ordered]@{
         run = $latest
@@ -563,7 +583,9 @@ function Test-ProbeRunQuality([object]$Run, [int]$ExpectedActions) {
     $variant = @($items | Where-Object { $_.outcome -eq 'variant_redirect' }).Count
     $failed = @($items | Where-Object { $_.outcome -eq 'failed' }).Count
     $blocked = @($items | Where-Object { $_.outcome -eq 'blocked' }).Count
-    $unrequested = if ($null -eq $Run.proxy_session_pool -or $null -eq $Run.proxy_session_pool.unrequested_count) {
+    $unrequested = if ($null -ne $Run -and $Run.PSObject.Properties.Name -contains 'recovery_batch' -and $null -ne $Run.recovery_batch) {
+        [Math]::Max(0,$ExpectedActions - [int]$recorded)
+    } elseif ($null -eq $Run.proxy_session_pool -or $null -eq $Run.proxy_session_pool.unrequested_count) {
         $null
     } else { [int]$Run.proxy_session_pool.unrequested_count }
     $nonEvidence = @($items | Where-Object { $_.attribution -ne 'evidence' }).Count
@@ -895,8 +917,10 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             $process.Refresh()
         }
         $workerExitCode = $process.ExitCode
-        $finalAttempts = 20
-        $finalSnapshot = Get-FinalRunSnapshot $runId $ActionLimit $finalAttempts
+        $stopNotice = Read-Lock (Join-Path $runDir 'operator.stop.json')
+        $operatorStopped = $null -ne $stopNotice -and $stopNotice.run_id -eq $runId -and $stopNotice.reason -eq 'operator_interrupted'
+        $finalAttempts = 3
+        $finalSnapshot = Get-FinalRunSnapshot $runId $ActionLimit $finalAttempts $operatorStopped
         $quality = Test-ProbeRunQuality $finalSnapshot.run $ActionLimit
         $completion = Test-RunCompleteness $finalSnapshot.run $ActionLimit
         $reasonParts = [Collections.Generic.List[string]]::new()
@@ -908,11 +932,12 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
         $runVerificationReason = $reasonParts -join ';'
         $completionGateOk = $null -eq $finalSnapshot.verification_reason -and [bool]$completion.completion_gate_ok
         $qualityGateOk = $completionGateOk -and [bool]$quality.quality_gate_ok
-        $controllerExitCode = $workerExitCode
-        $outcome = if ($workerExitCode -eq 0) { 'completed' } elseif ($workerExitCode -eq 3) { 'blocked' } elseif ($workerExitCode -eq 130) { 'interrupted' } else { 'failed' }
-        if ($workerExitCode -eq 130) {
+        $disposition = Get-RunExitDisposition $workerExitCode $operatorStopped
+        $controllerExitCode = $disposition.controller_exit_code
+        $outcome = $disposition.status
+        if ($outcome -eq 'interrupted') {
             $controllerExitCode = 130
-            $runVerificationReason = 'controller_exited'
+            $runVerificationReason = $disposition.reason
         }
         elseif ($Mode -in @('probe', 'reviews') -and ($workerExitCode -ne 0 -or -not $qualityGateOk)) {
             $outcome = 'quality_failed'
@@ -930,8 +955,9 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
         $observability = Get-RunObservability $capacityAuthorization $quality $ActionLimit
         $recoveryProjection = @{ availability = 'unknown'; reason = 'recovery_projection_unavailable' }
         try {
-            $recoveryTenant = [uri]::EscapeDataString($TenantId)
-            $recoveryProjection = Invoke-ConsoleApi "/api/recovery?tenant=${recoveryTenant}" 5
+            if ($null -ne $finalSnapshot.run -and $finalSnapshot.run.PSObject.Properties.Name -contains 'recovery') {
+                $recoveryProjection = $finalSnapshot.run.recovery
+            }
         } catch { }
         Write-Host ("Final: {0}/{1} completed={2} variant={3} failed={4} blocked={5} unrequested={6} inferred={7} quality_gate_ok={8}" -f $quality.recorded_actions,$ActionLimit,$quality.completed_actions,$quality.variant_redirect_actions,$quality.failed_actions,$quality.blocked_actions,$quality.unrequested_actions,$quality.inferred_actions,$qualityGateOk)
         if ($runVerificationReason) { Write-Host "Final verification: $runVerificationReason" }
@@ -964,7 +990,7 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             quality_gate_ok = $qualityGateOk
             completion_gate_ok = $completionGateOk
             run_verification_reason = $runVerificationReason
-            termination_reason = if ($outcome -eq 'interrupted') { 'controller_exited' } else { $null }
+            termination_reason = if ($outcome -eq 'interrupted') { $disposition.reason } else { $null }
             started_at = $startedAt.ToString('o')
             finished_at = $finishedAt.ToString('o')
             elapsed_seconds = [Math]::Round(($finishedAt - $startedAt).TotalSeconds, 2)
@@ -973,7 +999,7 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             preflight_log = $preflightLog
             console_url = $consoleUrl
         }
-        $ledgerReason = if ($outcome -eq 'interrupted') { 'controller_exited' } else { $runVerificationReason }
+        $ledgerReason = if ($outcome -eq 'interrupted') { $disposition.reason } else { $runVerificationReason }
         Finish-RunLedger $runId $outcome $controllerExitCode $workerExitCode $ledgerReason $receipt
         $runLedgerFinished = $true
         Write-JsonAtomic $receipt $receiptPath
@@ -1088,6 +1114,13 @@ function Stop-Locked([string]$LockPath, [string]$Name) {
         if (Test-Path -LiteralPath $LockPath) { Remove-Item -LiteralPath $LockPath -Force }
         Write-Host "${Name}: not running"
         return
+    }
+    if ($Name -eq 'Worker' -and $lock.run_id -and $lock.receipt) {
+        $stopPath = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $lock.receipt) 'operator.stop.json'))
+        if (-not $stopPath.StartsWith($projectRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Operator stop marker must stay inside the verified project.'
+        }
+        Write-JsonAtomic ([ordered]@{ run_id=$lock.run_id; reason='operator_interrupted'; requested_at=[DateTime]::UtcNow.ToString('o') }) $stopPath
     }
     Stop-Process -Id $process.Id -Force
     for ($index = 0; $index -lt 20; $index++) {

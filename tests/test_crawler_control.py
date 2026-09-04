@@ -155,7 +155,7 @@ def test_setup_failures_are_audited_before_paths_limits_and_locks():
 def test_interrupt_status_is_preserved_by_controller_and_operation_ledgers():
     text = SCRIPT.read_text(encoding="utf-8")
     body = text[text.index("function Start-Crawl"):text.index("function Stop-Locked")]
-    assert "$workerExitCode -eq 130" in body
+    assert "Get-RunExitDisposition $workerExitCode $operatorStopped" in body
     assert "$outcome -eq 'interrupted'" in body
     assert "System.Management.Automation.PipelineStoppedException" in body
     assert "$failureStatus = if ($isInterrupted) { 'interrupted' } else { 'failed' }" in body
