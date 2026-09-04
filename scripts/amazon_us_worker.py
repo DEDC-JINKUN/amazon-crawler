@@ -3803,7 +3803,11 @@ def _run_reserved_postgres_actions(
                 evidence = _postgres_evidence(run_id,task,None,None,getattr(adapter,'source_type','http_html'),
                     raw_root,_evidence_context(scoped_config.get('context'),adapter),getattr(adapter,'last_transfer_bytes',None),
                     error_code='recovery_budget_or_lease_denied')
-            storage.abort_recovery(evidence)
+            disposition = storage.abort_recovery(evidence)
+            if disposition == 'job_budget_exhausted':
+                # The failed job/evidence is committed. End this reservation,
+                # then let the consumer/Agent claim other jobs with their budgets.
+                return 0
             raise ProxyCapacityGateDenied("recovery_budget_or_lease_denied") from None
         raise
     finally:

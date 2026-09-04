@@ -95,9 +95,10 @@ class PostgresWorkerStorage:
             expiries=[value for value in (authorization.get("fact_expires_at"),deadline_limit) if value]
             self._recovery.authorization_expires_at = min(expiries,key=lambda value:datetime.fromisoformat(value)) if expiries else None
 
-    def abort_recovery(self, evidence=None) -> None:
+    def abort_recovery(self, evidence=None) -> str | None:
         if self._recovery is not None:
-            self._recovery.abort(evidence)
+            return self._recovery.abort(evidence)
+        return None
 
     def recovery_denial_reason(self) -> str | None:
         return self._recovery.last_denial if self._recovery is not None else None

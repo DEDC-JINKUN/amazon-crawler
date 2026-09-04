@@ -95,20 +95,42 @@ class RecoveryScheduler:
             return
         tenant, subject = self.storage.tenant_id,self.storage.subject_type
         with self.storage._connect_factory() as conn, conn.cursor() as cur:
-            cur.execute('SELECT 1 FROM amazon_us.recovery_egress WHERE tenant_id=%s AND egress_id=%s FOR UPDATE', (tenant,self.egress_id))
+            cur.execute('SELECT *,CURRENT_TIMESTAMP AS now FROM amazon_us.recovery_egress WHERE tenant_id=%s AND egress_id=%s FOR UPDATE', (tenant,self.egress_id))
+            gate = dict(cur.fetchone())
+            cur.execute('''SELECT j.*,s.lease_token AS item_lease_token,s.lease_expires_at AS item_lease_expires_at
+                           FROM amazon_us.recovery_job j JOIN amazon_us.item_state s
+                             ON s.tenant_id=j.tenant_id AND s.asin=j.asin AND s.subject_type=j.subject_type AND s.marketplace='US'
+                           WHERE j.tenant_id=%s AND j.asin=%s AND j.subject_type=%s AND j.stage=%s FOR UPDATE OF j,s''',
+                        (tenant,task['asin'],subject,task['recovery']['stage']))
+            job = dict(cur.fetchone())
+            # A browser callback can collapse different denials into one error.
+            # Recheck durable ownership and counters before declaring it job-local.
+            owned = (not gate['manually_paused'] and not job['terminal']
+                     and gate['lease_token'] == job['lease_token'] == job['item_lease_token'] == task['lease_token']
+                     and gate['lease_expires_at'] is not None and gate['lease_expires_at'] > gate['now']
+                     and job['item_lease_expires_at'] is not None and job['item_lease_expires_at'] > gate['now'])
+            local_budget = owned and (job['browser_request_count'] >= 240
+                           or job['request_count'] >= job['max_requests']
+                           or job['known_bytes'] >= 50_000_000 or job['relay_payload_bytes'] >= 64*1024*1024
+                           or job['deadline'] <= gate['now'])
+            outcome = 'job_budget_exhausted' if local_budget else 'budget_or_lease_denied'
+            error = 'recovery_job_budget_exhausted' if local_budget else 'recovery_budget_or_lease_denied'
             transfer=(evidence or {}).get('transfer_bytes')
-            cur.execute("UPDATE amazon_us.recovery_job SET terminal=true,outcome='budget_or_lease_denied',lease_token=NULL,known_bytes=known_bytes+%s,unknown_byte_attempts=unknown_byte_attempts+%s WHERE tenant_id=%s AND asin=%s AND subject_type=%s AND lease_token=%s", (max(0,int(transfer or 0)),int(transfer is None),tenant,task['asin'],subject,task['lease_token']))
-            cur.execute("UPDATE amazon_us.item_state SET status='failed',last_error='recovery_budget_or_lease_denied',lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL WHERE tenant_id=%s AND asin=%s AND subject_type=%s AND lease_token=%s", (tenant,task['asin'],subject,task['lease_token']))
-            if cur.rowcount:
+            cur.execute("UPDATE amazon_us.recovery_job SET terminal=true,outcome=%s,lease_token=NULL,known_bytes=known_bytes+%s,unknown_byte_attempts=unknown_byte_attempts+%s WHERE tenant_id=%s AND asin=%s AND subject_type=%s AND stage=%s AND lease_token=%s", (outcome,max(0,int(transfer or 0)),int(transfer is None),tenant,task['asin'],subject,task['recovery']['stage'],task['lease_token']))
+            cur.execute("UPDATE amazon_us.item_state SET status='failed',last_error=%s,lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL WHERE tenant_id=%s AND asin=%s AND subject_type=%s AND marketplace='US' AND lease_token=%s", (error,tenant,task['asin'],subject,task['lease_token']))
+            finalized = cur.rowcount == 1
+            if finalized:
                 cur.execute("UPDATE amazon_us.refresh_request SET status='failed',completed_at=CURRENT_TIMESTAMP WHERE tenant_id=%s AND asin=%s AND subject_type=%s AND status='claimed'", (tenant,task['asin'],subject))
-                cur.execute("INSERT INTO amazon_us.state_history(tenant_id,marketplace,asin,subject_type,from_status,to_status,reason) VALUES(%s,'US',%s,%s,'running','failed','recovery_budget_or_lease_denied')", (tenant,task['asin'],subject))
+                cur.execute("INSERT INTO amazon_us.state_history(tenant_id,marketplace,asin,subject_type,from_status,to_status,reason) VALUES(%s,'US',%s,%s,'running','failed',%s)", (tenant,task['asin'],subject,error))
                 if evidence:
                     cur.execute('''INSERT INTO amazon_us.collection_evidence
                         (tenant_id,marketplace,asin,subject_type,run_id,url,transfer_bytes,source_type,error_code,context_json)
-                        VALUES(%s,'US',%s,%s,%s,%s,%s,%s,'recovery_budget_or_lease_denied',%s)''',
+                        VALUES(%s,'US',%s,%s,%s,%s,%s,%s,%s,%s)''',
                         (tenant,task['asin'],subject,evidence['run_id'],task['url'],evidence.get('transfer_bytes'),
-                         evidence.get('source_type'),self.storage._jsonb(evidence.get('context_json') or {})))
+                         evidence.get('source_type'),error,self.storage._jsonb(evidence.get('context_json') or {})))
             cur.execute('UPDATE amazon_us.recovery_egress SET lease_token=NULL,lease_expires_at=NULL WHERE tenant_id=%s AND egress_id=%s AND lease_token=%s', (tenant,self.egress_id,task['lease_token']))
+        self.current_task = None
+        return 'job_budget_exhausted' if local_budget and finalized else None
 
     def claim(self, worker_id, *, lease_seconds=600, stage=None, refresh_only=False):
         if not worker_id or not 1 <= lease_seconds <= 3600:

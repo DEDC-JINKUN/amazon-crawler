@@ -147,6 +147,62 @@ def test_live_bounded_batch_automatically_recovers_same_cohort_after_cooldown(mo
     assert summary['requested_actions']==summary['recorded_actions']==1 and summary['attempt_actions']==2
 
 
+@pytest.mark.parametrize('global_denial', [None, 'manual', 'lease'])
+def test_local_browser_budget_finishes_only_its_job_and_preserves_global_denials(monkeypatch,tmp_path,global_denial):
+    import io, psycopg
+    from amazon_us_worker import HttpFirstAdapter,run_postgres_actions,classify_block
+    from proxy_session_pool import ProxySessionPool
+    from proxy_capacity_gate import ProxyCapacityGateDenied
+    from collection_storage import PostgresCollectionRepository
+    storage,config,_,calls,_,advance=build_fixture(monkeypatch,tmp_path)
+    asins=['B0CC2FRY3J','B0CC2JBW2H']
+    config['manifest_asins']=asins
+    config['_recovery_wait']=advance
+    class Response(io.BytesIO):
+        headers={}
+        def getcode(self): return 200
+    class Transport:
+        def __init__(self,slot_config): self.config=slot_config
+        def open(self,request,timeout):
+            asin=request.full_url.rsplit('/',1)[-1]; calls.append(asin)
+            if asin==asins[0]:
+                # Seed a near-limit page, then use the real resource admission hook.
+                with psycopg.connect(DSN) as conn:
+                    conn.execute('UPDATE amazon_us.recovery_job SET browser_request_count=239 WHERE tenant_id=%s AND asin=%s',(storage.tenant_id,asin))
+                self.config['_recovery_browser_request']()
+                if global_denial:
+                    with psycopg.connect(DSN) as conn:
+                        if global_denial=='manual':
+                            conn.execute('UPDATE amazon_us.recovery_egress SET manually_paused=true WHERE tenant_id=%s',(storage.tenant_id,))
+                        else:
+                            conn.execute("UPDATE amazon_us.recovery_egress SET lease_expires_at=now()-interval '1 second' WHERE tenant_id=%s",(storage.tenant_id,))
+                self.config['_recovery_browser_request']()
+                raise AssertionError('241st resource must be refused')
+            return Response((f'<link rel="canonical" href="https://www.amazon.com/dp/{asin}">'
+                             f'<input id="ASIN" value="{asin}"><span id="productTitle">Fixture</span>').encode())
+    class Adapter(HttpFirstAdapter):
+        def _rebuild_opener(self): self.opener=Transport(self.config)
+    pool=ProxySessionPool(config,Adapter,classify_block)
+    run_id='budget-scope-fixture'
+    if global_denial:
+        with pytest.raises(ProxyCapacityGateDenied):
+            run_postgres_actions(storage,pool,config,limit=2,product_only=True,run_id=run_id,
+                                 keep_alive=True,consumer_max_seconds=300)
+        assert calls==asins[:1]
+        assert storage.recovery_status(asins[1]) is None
+    else:
+        assert run_postgres_actions(storage,pool,config,limit=2,product_only=True,run_id=run_id,
+                                    keep_alive=True,consumer_max_seconds=300)==-1
+        assert calls==asins
+        assert storage.recovery_status(asins[1])['outcome']=='completed'
+        assert storage.recovery_batch_progress(run_id)['terminal_count']==2
+        api=PostgresCollectionRepository(DSN,tenant_id=storage.tenant_id)
+        evidence=api.load_evidence('US',asins[0])
+        assert len(evidence)==1 and evidence[0]['error_code']=='recovery_job_budget_exhausted'
+    first=storage.recovery_status(asins[0])
+    assert first['terminal'] and first['attempts']==1 and first['browser_request_count']==240
+
+
 def test_live_agent_refresh_recovers_after_cooldown_without_requeue(monkeypatch,tmp_path):
     import time
     from agent_collection_service import AgentRefreshWorker
