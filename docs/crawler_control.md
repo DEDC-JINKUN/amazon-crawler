@@ -60,6 +60,11 @@ console      http://127.0.0.1:8770
 
 商品任务使用 `--product-only`、`--once` 和PostgreSQL事实源；评论入口仍单独限定stage。一次run可包含多个最多5-ASIN的容量批次，不能按整个清单一次预约2N槽。每次claim和实际请求仍检查租约与持久化预算。单ASIN最终阻断进入冷却；全局暂停跨run/进程保持，不因新建run清零。HTTP429尊重Retry-After，等待前不启动Firefox。
 
+商品Controller现在额外传入`--recover-until-terminal`：`--once`表示一个冻结cohort的有界生命周期，
+不是一次poll后退出。consumer保持到所有样本终态或`-RecoveryMaxSeconds`（默认5400秒），冷却时释放代理容量，
+只读轮询PG；新鲜canary缺失时等待授权，不自行访问Amazon。`-ManifestPath`可指定已冻结的20/100样本文件。
+run API按唯一ASIN计requested/recorded，attempt_actions及attempt_evidence保留所有恢复尝试，不改写历史raw。
+
 生产出口仅接受付费`proxy_sessions`配置；VPN/直连只可作人工诊断对照，不能通过正式Gate。商品广度每ASIN使用独立会话，评论分页对同ASIN保持粘滞。HTTP challenge先允许同槽stock Firefox验证；失败时最多换一个已预约槽做最后一次Firefox验证，不再在该新槽先打HTTP；仍为challenge则隔离。连续2个最终blocked ASIN或20窗口内3个最终blocked触发共享暂停；半开只允许一个逻辑任务，成功才恢复。Firefox CONNECT中继不解密TLS且不保存凭据。
 
 持久化恢复需要显式迁移 `schema/migrations/20260904_recovery.sql`（本轮只在独立测试库执行，生产尚未迁移）。默认每ASIN/stage总claim预算3、HTTP尝试/浏览器导航许可12、Firefox获准资源请求240、deadline24小时；总预算不会被内部重试、换槽、重启或重复refresh清零。初次发现无预算合同的历史evidence保持`legacy_budget_unknown`，必须走独立审计/审批，不能自动给空预算。ZIP partial与variant为不同可解释终态，不归为CAPTCHA。HTTP尝试共享至少5秒间隔（可以配置得更慢），已有抖动保留。恢复状态通过Console `/api/recovery`、Agent `/v1/recovery/status` 和新receipt中的`recovery`查询；它是当前tenant投影，不改写历史run。

@@ -11,7 +11,9 @@ param(
     [string]$JobId,
     [string]$Reason = 'on_demand',
     [switch]$Wait,
-    [int]$TimeoutSeconds = 300
+    [int]$TimeoutSeconds = 300,
+    [string]$ManifestPath = '',
+    [ValidateRange(1,5400)][int]$RecoveryMaxSeconds = 5400
 )
 
 Set-StrictMode -Version Latest
@@ -106,10 +108,10 @@ $arguments = [Collections.Generic.List[string]]::new()
 foreach ($value in @(
     '-NoProfile','-ExecutionPolicy','Bypass','-File',$controller,$Mode,
     '-TenantId',$tenant,
-    '-ManifestPath',"$output\manifest_1093.csv",
+    '-ManifestPath',$(if ($ManifestPath) { $ManifestPath } else { "$output\manifest_1093.csv" }),
     '-ConfigPath',"$output\owned_us_full.toml",
     '-OutputDir',$output,
-    '-Port',[string]$Port
+    '-Port',[string]$Port,'-RecoveryMaxSeconds',[string]$RecoveryMaxSeconds
 )) { $arguments.Add([string]$value) }
 
 if ($Limit -gt 0) {

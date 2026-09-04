@@ -8,6 +8,7 @@ param(
     [string]$ConfigPath = 'data\postgres_real_batch_20260828_500_04\batch500.toml',
     [string]$OutputDir = 'data\postgres_real_batch_20260828_500_04',
     [int]$Port = 8770,
+    [ValidateRange(1,5400)][int]$RecoveryMaxSeconds = 5400,
     [string]$EgressId = 'dataimpulse-us',
     [switch]$ConfirmLargeBatch,
     [switch]$All
@@ -835,6 +836,9 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             '--run-id', $runId, '--capacity-reservation-id', $capacityAuthorization.reservation_id,
             '--live', '--once', '--limit', [string]$ActionLimit, $stageOnlyArgument
         )
+        if ($Mode -ne 'reviews') {
+            $workerArguments += @('--recover-until-terminal','--consumer-max-seconds',[string]$RecoveryMaxSeconds)
+        }
         Write-JsonAtomic ([ordered]@{
             python = $python
             working_directory = $projectRoot
@@ -950,6 +954,9 @@ function Start-Crawl([string]$Mode, [int]$ActionLimit, [string]$ResolvedManifest
             unrequested_actions = $quality.unrequested_actions
             traffic = $quality.traffic
             recovery = $recoveryProjection
+            recovery_batch = if ($null -ne $finalSnapshot.run -and $finalSnapshot.run.PSObject.Properties.Name -contains 'recovery_batch') { $finalSnapshot.run.recovery_batch } else { $null }
+            attempt_actions = if ($null -ne $finalSnapshot.run -and $finalSnapshot.run.PSObject.Properties.Name -contains 'attempt_actions') { $finalSnapshot.run.attempt_actions } else { $null }
+            capacity_authorizations = if ($null -ne $finalSnapshot.run -and $finalSnapshot.run.PSObject.Properties.Name -contains 'capacity_authorizations') { $finalSnapshot.run.capacity_authorizations } else { @($capacityAuthorization) }
             proxy_session_pool = if ($null -ne $finalSnapshot.run) { $finalSnapshot.run.proxy_session_pool } else { $null }
             capacity_authorization = $capacityAuthorization
             proxy_connectivity = $observability.proxy_connectivity

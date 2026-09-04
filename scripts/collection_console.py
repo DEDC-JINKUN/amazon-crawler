@@ -138,6 +138,18 @@ def project_amazon_business(
     }
 
 
+def latest_cohort_evidence(rows):
+    latest={}; attempts={}
+    for value in rows:
+        row=dict(value); asin=row['asin']; latest[asin]=row
+        attempts.setdefault(asin,[]).append({key:row.get(key) for key in (
+            'id','run_id','http_status','transfer_bytes','retrieved_at','source_type','content_hash','raw_html_path','block_reason','error_code')})
+    for asin,row in latest.items():
+        row['attempt_evidence']=attempts[asin]
+        row['attempt_count']=len(attempts[asin])
+    return list(latest.values())
+
+
 def _explicit_sibling_identity(row: dict[str, Any]) -> bool:
     identity = _context_value(row).get("identity") or {}
     if not isinstance(identity, dict):
@@ -791,6 +803,11 @@ class PostgresConsoleRepository:
                     (tenant_id, limit),
                 )
                 ledger_rows = {str(row["run_id"]): dict(row) for row in cursor.fetchall()}
+            batch_ids=sorted({str(row['run_id']) for row in evidence_rows if _context_value(row).get('recovery_batch_id')})
+            batches={}
+            if batch_ids:
+                cursor.execute('SELECT * FROM amazon_us.recovery_batch WHERE tenant_id=%s AND run_id=ANY(%s)',(tenant_id,batch_ids))
+                batches={str(row['run_id']):dict(row) for row in cursor.fetchall()}
         grouped: dict[str, list[dict[str, Any]]] = {}
         for row in evidence_rows:
             grouped.setdefault(str(row["run_id"]), []).append(row)
@@ -799,14 +816,18 @@ class PostgresConsoleRepository:
         results: list[dict[str, Any]] = []
         for run_id, rows in grouped.items():
             ledger = ledger_rows.get(run_id) or {}
+            batch=batches.get(run_id) or (ledger.get('receipt_json') or {}).get('recovery_batch')
+            all_rows=rows
+            if any(_context_value(row).get('recovery_batch_id')==run_id for row in rows):
+                rows=latest_cohort_evidence(rows)
             outcomes = {"completed": 0, "variant_redirect": 0, "failed": 0, "blocked": 0}
             for row in rows:
                 outcomes[classify_evidence_outcome(row)] += 1
-            observed_start = min((row["retrieved_at"] for row in rows), default=None)
-            observed_end = max((row["retrieved_at"] for row in rows), default=None)
+            observed_start = min((row["retrieved_at"] for row in all_rows), default=None)
+            observed_end = max((row["retrieved_at"] for row in all_rows), default=None)
             started_at = ledger.get("started_at") or observed_start
             ended_at = ledger.get("finished_at") or observed_end
-            requested = int(ledger.get("requested_actions") or len(rows))
+            requested = len(batch['asins']) if batch else int(ledger.get("requested_actions") or len(rows))
             recorded = len(rows)
             status = str(ledger.get("status") or ("legacy_blocked" if outcomes["blocked"] else "legacy_complete"))
             duration_projection = project_run_durations(ledger, observed_start, observed_end)
@@ -818,6 +839,8 @@ class PostgresConsoleRepository:
                 "command": ledger.get("command") or "legacy",
                 "requested_actions": requested,
                 "recorded_actions": recorded,
+                "attempt_actions":len(all_rows),
+                "recovery_batch":batch,
                 "evidence_actions": recorded,
                 "unique_asins": len({row["asin"] for row in rows}),
                 "product_succeeded": outcomes["completed"],
@@ -826,7 +849,7 @@ class PostgresConsoleRepository:
                 "blocked": outcomes["blocked"],
                 "pending": max(0, requested - recorded),
                 "running": max(0, requested - recorded) if status == "running" else 0,
-                "known_transfer_bytes": sum(int(row.get("transfer_bytes") or 0) for row in rows),
+                "known_transfer_bytes": sum(int(row.get("transfer_bytes") or 0) for row in all_rows),
                 "http_actions": sum(row.get("source_type") == "http_html" for row in rows),
                 "firefox_actions": sum(row.get("source_type") == "selenium_dom" for row in rows),
                 "started_at": started_at,
@@ -971,6 +994,12 @@ class PostgresConsoleRepository:
                 )
                 ledger_row = cursor.fetchone()
                 ledger = dict(ledger_row) if ledger_row is not None else None
+            batch=((ledger or {}).get('receipt_json') or {}).get('recovery_batch')
+            if not batch and any(_context_value(row).get('recovery_batch_id')==run_id for row in evidence_rows):
+                cursor.execute('SELECT * FROM amazon_us.recovery_batch WHERE tenant_id=%s AND run_id=%s',(tenant_id,run_id))
+                value=cursor.fetchone()
+                batch=dict(value) if value else None
+            all_evidence_rows=list(evidence_rows)
             if not evidence_rows and ledger is None:
                 return None
             if not evidence_rows:
@@ -983,6 +1012,8 @@ class PostgresConsoleRepository:
                     "run_id": run_id,
                     "requested_actions": int(ledger.get("requested_actions") or 0),
                     "recorded_actions": 0,
+                    "attempt_actions":0,
+                    "recovery_batch":batch,
                     "inferred_actions": 0,
                     "terminal_status": ledger.get("status"),
                     "capacity_authorization": ledger.get("capacity_authorization_json"),
@@ -994,6 +1025,10 @@ class PostgresConsoleRepository:
                 }
             started_at = min(row["retrieved_at"] for row in evidence_rows)
             ended_at = max(row["retrieved_at"] for row in evidence_rows)
+            if batch:
+                if any(row['asin'] not in batch['asins'] for row in evidence_rows):
+                    raise RuntimeError('cohort_evidence_scope_mismatch')
+                evidence_rows=latest_cohort_evidence(evidence_rows)
             evidence_asins = {row["asin"] for row in evidence_rows}
             items: list[dict[str, Any]] = []
             for row in evidence_rows:
@@ -1020,16 +1055,16 @@ class PostgresConsoleRepository:
             )
             for row_value in cursor.fetchall():
                 row = dict(row_value)
-                if row["asin"] in evidence_asins:
+                if batch or row["asin"] in evidence_asins:
                     continue
                 outcome = "blocked" if row.get("block_reason") else "failed" if row.get("last_error") else row.get("current_status")
                 items.append({**row, "outcome": outcome, "attribution": "time_window_inference"})
         items.sort(key=lambda item: (item.get("retrieved_at") or item.get("updated_at"), item["asin"]))
-        traffic_summary = summarize_traffic(evidence_rows)
+        traffic_summary = summarize_traffic(all_evidence_rows)
         context_quality_counts = summarize_context_quality(evidence_rows)
         proxy_session_pool = latest_proxy_session_pool(evidence_rows)
         authorization = (ledger or {}).get("capacity_authorization_json") or latest_capacity_authorization(evidence_rows)
-        requested_actions = int((ledger or {}).get("requested_actions") or len(evidence_rows))
+        requested_actions = len(batch['asins']) if batch else int((ledger or {}).get("requested_actions") or len(evidence_rows))
         recorded_actions = len(evidence_rows)
         duration_projection = project_run_durations(ledger, started_at, ended_at)
         effective_started_at = duration_projection.pop("effective_started_at")
@@ -1042,8 +1077,13 @@ class PostgresConsoleRepository:
             "ended_at": effective_finished_at,
             "requested_actions": requested_actions,
             "recorded_actions": recorded_actions,
+            "attempt_actions":len(all_evidence_rows),
+            "recovery_batch":batch,
+            "capacity_authorizations":list({(_context_value(row).get('capacity_authorization') or {}).get('reservation_id'):
+                _context_value(row).get('capacity_authorization') for row in all_evidence_rows
+                if _context_value(row).get('capacity_authorization')}.values()),
             "inferred_actions": sum(1 for item in items if item["attribution"] == "time_window_inference"),
-            "known_transfer_bytes": sum(int(item.get("transfer_bytes") or 0) for item in evidence_rows),
+            "known_transfer_bytes": sum(int(item.get("transfer_bytes") or 0) for item in all_evidence_rows),
             "traffic": traffic_summary,
             "context_quality_counts": context_quality_counts,
             "proxy_session_pool": proxy_session_pool,
@@ -1052,7 +1092,7 @@ class PostgresConsoleRepository:
                 items,
                 requested_actions=requested_actions,
                 recorded_actions=recorded_actions,
-                unrequested_actions=(proxy_session_pool or {}).get("unrequested_count"),
+                unrequested_actions=max(0,requested_actions-recorded_actions) if batch else (proxy_session_pool or {}).get("unrequested_count"),
             ),
             "outcome_counts": {
                 outcome: sum(item["outcome"] == outcome for item in items)

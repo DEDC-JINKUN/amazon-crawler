@@ -43,6 +43,7 @@ def main() -> int:
                 root = Path(__file__).resolve().parents[1]
                 conn.execute((root / 'schema/postgres_schema.sql').read_text(encoding='utf-8'))
                 conn.execute((root / 'schema/migrations/20260904_recovery.sql').read_text(encoding='utf-8'))
+                conn.execute((root / 'schema/migrations/20260904_bounded_consumer.sql').read_text(encoding='utf-8'))
         print(json.dumps({"test_database": DATABASE, "isolated": True}), flush=True)
         if sys.argv[1:] == ["--provision-only"]:
             return 0

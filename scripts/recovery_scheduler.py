@@ -132,6 +132,7 @@ class RecoveryScheduler:
                     AND r.status='queued' ORDER BY requested_at,job_id LIMIT 1
                 ) r ON true
                 WHERE s.tenant_id=%s AND s.subject_type=%s AND s.marketplace='US'
+                  AND (%s::text[] IS NULL OR s.asin=ANY(%s))
                   AND NOT(s.asin=ANY(%s))
                   AND (%s::text IS NULL OR s.task_stage=%s)
                   AND (s.lease_expires_at IS NULL OR s.lease_expires_at <= CURRENT_TIMESTAMP)
@@ -143,7 +144,7 @@ class RecoveryScheduler:
                        AND j.request_count < j.max_requests AND j.browser_request_count<240 AND j.deadline>CURRENT_TIMESTAMP
                        AND (j.next_retry_at IS NULL OR j.next_retry_at<=CURRENT_TIMESTAMP)))
                 ORDER BY s.updated_at,s.asin FOR UPDATE OF s SKIP LOCKED LIMIT 1
-            ''', (refresh_only, tenant, subject, sorted(getattr(self.storage,'_recovery_excluded_asins',set())), stage, stage, refresh_only, refresh_only))
+            ''', (refresh_only, tenant, subject,getattr(self.storage,'_recovery_allowed_asins',None),getattr(self.storage,'_recovery_allowed_asins',None), sorted(getattr(self.storage,'_recovery_excluded_asins',set())), stage, stage, refresh_only, refresh_only))
             row = cur.fetchone()
             if not row:
                 self.last_denial = 'recovery_no_due_work'

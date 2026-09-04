@@ -116,3 +116,16 @@
 未验收：生产schema部署、真实Amazon/stock Firefox实际页面表现、固定20成本/稳定性、供应商计费差额。
 下一阶段先审查并批准生产迁移与预算，保持已声明的cohort不替换；新canary Gate通过后由主控测试。
 回滚必须先停采集，保留预算和历史；不启动忽略新预算的旧Worker。测试库保留供复验。
+
+## 12:21后的上线纠偏补丁
+
+基础提交`951a2b52bf5906e6467a4ba01bf9114ec1b523d4`保留；用户要求14:00前完整发布包，
+17:00 Go/No-Go、18:00目标上线。普通批次缺存活consumer的P1不能以存储层已有due claim替代。
+现补一个固定cohort有界consumer：持久化ASIN集合/deadline，最多5-ASIN分批，冷却后自动恢复；
+Controller与Agent存活消费的真实PG+硬禁网fixture通过。恢复后的run以唯一ASIN计分母，所有attempt raw/hash/授权保留。
+部署操作、正式目录用户文档冲突、迁移dry-run/回滚、服务/Agent、固定20与100命令见
+`docs/production_release_20260904.md`。本补丁不执行生产迁移或真实Amazon。
+
+最终存活consumer补丁验证：代码tree `b559b2ff4072441c280de45da2bc744b465897cd`，
+528 passed/28 skipped，独立库28 passed；compileall、Node语法/行为4项、PowerShell AST、diff/凭据扫描通过。
+独立审查APPROVE，5400秒上限已统一。本阶段交付候选，不宣称17:00真实Go/No-Go或18:00上线已经完成。

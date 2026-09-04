@@ -3638,13 +3638,23 @@ def run_postgres_actions(storage: Any, adapter: Any, config: dict[str, Any], *,
                          limit: int | None = None, run_id: str | None = None,
                          worker_id: str = "amazon-us-worker", lease_seconds: int = 600,
                          product_only: bool = False, reviews_only: bool = False,
-                         capacity_reservation_id: str | None = None) -> int:
+                         capacity_reservation_id: str | None = None,
+                         keep_alive: bool = False, consumer_max_seconds: int = 5400) -> int:
     from proxy_capacity_gate import capacity_batch_actions
     target = min(limit, int(config["max_actions_per_run"])) if limit else int(config["max_actions_per_run"])
     run_id = run_id or f"run-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
     begin_recovery = getattr(storage,"begin_recovery_run",None)
     if callable(begin_recovery):
         begin_recovery()
+    if keep_alive:
+        if reviews_only or not product_only:
+            raise ValueError('bounded recovery consumer requires product-only scope')
+        if limit is not None and limit>int(config['max_actions_per_run']):
+            raise ValueError('consumer_limit_exceeds_config_budget')
+        from recovery_consumer import consume_batch
+        return consume_batch(storage,adapter,config,run_id=run_id,target=target,worker_id=worker_id,
+                             lease_seconds=lease_seconds,max_seconds=consumer_max_seconds,
+                             reservation_id=capacity_reservation_id,run_once=_run_reserved_postgres_actions)
     done = 0
     while done < target:
         fact_reader = getattr(storage,"load_latest_proxy_capacity",None)
@@ -3712,7 +3722,10 @@ def _run_reserved_postgres_actions(
     reservation_id = str(reservation["reservation_id"])
     bind_recovery = getattr(storage,"bind_recovery_authorization",None)
     if callable(bind_recovery):
-        bind_recovery(reservation)
+        if config.get('_recovery_batch_deadline'):
+            bind_recovery(reservation,deadline_limit=config['_recovery_batch_deadline'])
+        else:
+            bind_recovery(reservation)
     expected_hash = capacity_config_hash(config)
     expected_generation = str(config.get("proxy_credential_generation") or "")
     expected_reserved_slots = reservation_slots_for(config, max_actions)
@@ -3835,6 +3848,8 @@ def build_parser() -> argparse.ArgumentParser:
     stage_group.add_argument("--reviews-only", action="store_true", help="claim only review-stage PostgreSQL tasks")
     parser.add_argument("--run-id", help="explicit run identifier for logs and evidence")
     parser.add_argument("--capacity-reservation-id", help="controller-created proxy capacity reservation")
+    parser.add_argument("--recover-until-terminal", action="store_true", help="keep one frozen product cohort consumer alive through bounded cooldown")
+    parser.add_argument("--consumer-max-seconds",type=int,default=5400)
     return parser
 
 
@@ -3855,6 +3870,7 @@ def run(args: argparse.Namespace) -> int:
             from postgres_worker_storage import PostgresWorkerStorage
         with manifest.open("r", encoding="utf-8-sig", newline="") as handle:
             manifest_rows = list(csv.DictReader(handle))
+        config['manifest_asins']=[str(row['asin']).strip().upper() for row in manifest_rows]
         storage = PostgresWorkerStorage(
             dsn, tenant_id=args.tenant_id, subject_type=args.subject_type,
             default_lease_seconds=args.lease_seconds,
@@ -3878,6 +3894,8 @@ def run(args: argparse.Namespace) -> int:
                 lease_seconds=args.lease_seconds, product_only=args.product_only,
                 reviews_only=args.reviews_only, run_id=args.run_id,
                 capacity_reservation_id=args.capacity_reservation_id,
+                keep_alive=getattr(args,'recover_until_terminal',False),
+                consumer_max_seconds=getattr(args,'consumer_max_seconds',5400),
             )
             return 3 if action_result == -1 else 0
         finally:
@@ -3910,6 +3928,8 @@ def run(args: argparse.Namespace) -> int:
 
 
 def validate_runtime_args(args: argparse.Namespace) -> None:
+    if not 1<=getattr(args,'consumer_max_seconds',5400)<=5400:
+        raise ValueError('consumer_max_seconds must be between 1 and 5400')
     if args.live and args.backend != "postgres":
         raise ValueError("SQLite live collection is disabled; production collection requires PostgreSQL capacity gating")
     if args.product_only and args.backend != "postgres":

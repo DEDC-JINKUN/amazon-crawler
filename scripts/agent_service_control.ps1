@@ -71,6 +71,7 @@ function Get-AgentRuntimeFingerprint {
         $proxyCapacityGateScript,
         $proxyConnectRelayScript,
         (Join-Path $PSScriptRoot 'recovery_scheduler.py'),
+        (Join-Path $PSScriptRoot 'recovery_consumer.py'),
         (Join-Path $PSScriptRoot 'http_deadline.py'),
         (Join-Path $PSScriptRoot 'proxy_tunnel_auth.py'),
         $collectionApiScript,

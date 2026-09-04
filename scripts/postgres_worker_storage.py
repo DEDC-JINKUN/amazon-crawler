@@ -65,6 +65,22 @@ class PostgresWorkerStorage:
 
     def begin_recovery_run(self) -> None:
         self._recovery_excluded_asins = set()
+        self._recovery_allowed_asins = None
+
+    def prepare_recovery_batch(self, run_id, target, manifest_asins, max_seconds):
+        from recovery_consumer import prepare_batch
+        return prepare_batch(self,run_id,target,manifest_asins,max_seconds)
+
+    def recovery_batch_progress(self, run_id):
+        from recovery_consumer import batch_progress
+        return batch_progress(self,run_id)
+
+    def finish_recovery_batch(self, run_id,status,reason=None):
+        from recovery_consumer import finish_batch
+        finish_batch(self,run_id,status,reason)
+
+    def begin_recovery_pass(self):
+        self._recovery_excluded_asins=set()
 
     def before_recovery_request(self, task: Mapping[str, Any]) -> float:
         if self._recovery is None or not task.get("recovery"):
@@ -74,9 +90,10 @@ class PostgresWorkerStorage:
     def recovery_active_task(self):
         return getattr(self._recovery,"current_task",None)
 
-    def bind_recovery_authorization(self, authorization: Mapping[str, Any]) -> None:
+    def bind_recovery_authorization(self, authorization: Mapping[str, Any],deadline_limit=None) -> None:
         if self._recovery is not None:
-            self._recovery.authorization_expires_at = authorization.get("fact_expires_at")
+            expiries=[value for value in (authorization.get("fact_expires_at"),deadline_limit) if value]
+            self._recovery.authorization_expires_at = min(expiries,key=lambda value:datetime.fromisoformat(value)) if expiries else None
 
     def abort_recovery(self, evidence=None) -> None:
         if self._recovery is not None:
