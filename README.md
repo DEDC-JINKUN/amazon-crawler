@@ -2,6 +2,12 @@
 
 面向 Amazon.com 自有 ASIN 和竞品 ASIN 的统一网页采集 MVP。
 
+## 团队评审入口
+
+请先阅读 [技术方案评审稿（2026-09-08）](docs/technical_design_review_20260908.md)，了解架构、Agent/API、批次与Worker分工、已验证范围及待解决问题。详细设计和历史记录见 [主报告](docs/main_report.md)；历史部署描述不代表当前运行状态。
+
+公司协作仓库以本地主线 `2bef259` 为导入基线并保留其提交历史。外部返回包尚未合入；提交代码不代表生产部署或性能验收完成。团队修改请通过主题分支和PR评审。
+
 当前版本：`0.3.0`（PostgreSQL 正式 Worker）。
 
 本机`main`已包含：[美国站采集与简明控制台](docs/develop_us_marketplace_20260904.md)。
