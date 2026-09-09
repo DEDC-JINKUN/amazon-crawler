@@ -29,6 +29,9 @@ proxy_rotate_max_per_run = 5
 proxy_rotate_cooldown_seconds = 90
 # 轮换预算耗尽（疑似指纹集群被标记）：静默 10 分钟等标记衰减后重置预算续跑
 proxy_storm_backoff_seconds = 600
+# 关闭 HTTP 路径的美国位置 cookie 流程：美国出口下该流程会毒化会话导致商品页
+# 100% captcha（2026-09-09 同 IP 二分实验证实）；美国 IP 下 Amazon 自己种全套 cookie
+http_setup_delivery_context = false
 # 屏图（代理计费场景开，省 ~85% 流量；数据不受影响——媒体 URL 从 HTML 解析）
 block_images = true
 # per-worker 速率 0.1 req/s（≈10s/页）；2 worker × 0.1 站稳，视被拦率再逐级上调

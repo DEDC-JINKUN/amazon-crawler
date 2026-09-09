@@ -46,13 +46,31 @@ def read_local_env() -> dict[str, str]:
     env: dict[str, str] = {}
     with open(ROOT / ".env", encoding="utf-8") as f:
         for line in f:
-            m = re.match(r"^\s*(ZOOPROXY_HOST|ZOOPROXY_USERNAME|ZOOPROXY_PASSWORD)\s*=\s*(.+)$", line)
+            m = re.match(
+                r"^\s*(ZOOPROXY_HOST|ZOOPROXY_USERNAME|ZOOPROXY_PASSWORD|DATAIMPULSE_HOST|DATAIMPULSE_USERNAME|DATAIMPULSE_PASSWORD)\s*=\s*(.+)$",
+                line,
+            )
             if m:
                 env[m.group(1)] = m.group(2).strip()
-    missing = [k for k in ("ZOOPROXY_HOST", "ZOOPROXY_USERNAME", "ZOOPROXY_PASSWORD") if k not in env]
-    if missing:
-        raise SystemExit(f"本地 .env 缺 {missing}")
     return env
+
+
+def build_server_env(db_password: str) -> str:
+    local = read_local_env()
+    lines = [
+        "# 服务器端环境（systemd EnvironmentFile；chmod 600）",
+        f"AMAZON_US_POSTGRES_DSN=host=127.0.0.1 port=5432 dbname=amazon_us user=crawler password={db_password}",
+        f"POSTGRES_PASSWORD={db_password}",
+    ]
+    for src, dst in (
+        ("ZOOPROXY_USERNAME", "ZOO_PROXY_USERNAME"),
+        ("ZOOPROXY_PASSWORD", "ZOO_PROXY_PASSWORD"),
+        ("DATAIMPULSE_USERNAME", "DATAIMPULSE_PROXY_USERNAME"),
+        ("DATAIMPULSE_PASSWORD", "DATAIMPULSE_PROXY_PASSWORD"),
+    ):
+        if src in local:
+            lines.append(f"{dst}={local[src]}")
+    return "\n".join(lines) + "\n"
 
 
 def connect(host: str, user: str, password: str | None = None, use_key: bool = True) -> paramiko.SSHClient:
@@ -141,18 +159,6 @@ def upload_bundle(sftp: paramiko.SFTPClient) -> int:
                  "amazon_us_20260909.dump", "proxy_probe.py"):
         put_file(DEPLOY / name, f"{REMOTE_APP}/deploy/{name}")
     return count
-
-
-def build_server_env(db_password: str) -> str:
-    local = read_local_env()
-    lines = [
-        "# 服务器端环境（systemd EnvironmentFile；chmod 600）",
-        f"AMAZON_US_POSTGRES_DSN=host=127.0.0.1 port=5432 dbname=amazon_us user=crawler password={db_password}",
-        f"POSTGRES_PASSWORD={db_password}",
-        f"ZOO_PROXY_USERNAME={local['ZOOPROXY_USERNAME']}",
-        f"ZOO_PROXY_PASSWORD={local['ZOOPROXY_PASSWORD']}",
-    ]
-    return "\n".join(lines) + "\n"
 
 
 def main() -> int:

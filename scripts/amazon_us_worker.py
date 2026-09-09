@@ -2209,24 +2209,37 @@ class SeleniumFirefoxAdapter:
 
 
 _PROXY_SID_RE = re.compile(r"-sid-[^-]+-t-\d+")
+# DataImpulse 参数段以 _ 分隔（_session-XXX_country-us），值以 _ 为界
+_PROXY_SESSION_RE = re.compile(r"_session-[^_]+")
 
 
-def _rewrite_proxy_session_id(username: str, worker_id: str, nonce: int = 0, sticky_minutes: int = 120) -> str:
+def _rewrite_proxy_session_id(
+    username: str, worker_id: str, nonce: int = 0, sticky_minutes: int = 120, proxy_url: str = ""
+) -> str:
     """按 worker 派生独立代理粘滞会话 ID。
 
-    ZooProxy 用户名的 -sid-XXX-t-N 段控制粘滞会话：不同 sid = 不同住宅出口 IP。
-    多 worker 共享同一 sid 会把全部并发压力叠到单个 IP 上（等同单 IP 高频），
-    每个 worker 用自己的 sid 才是真正的多 IP 并行。已实测 6 sid 并发 = 6 独立 IP。
-    nonce 用于运行中轮换：CAPTCHA 被拦时 nonce+1 重建 adapter = 立刻换新 IP。
+    ZooProxy 用户名的 -sid-XXX-t-N 段、DataImpulse 的 _session-XXX 段都控制粘滞会话：
+    不同会话 ID = 不同住宅出口 IP。多 worker 共享同一会话 ID 会把全部并发压力叠到
+    单个 IP 上（等同单 IP 高频），每个 worker 用自己的会话才是真正的多 IP 并行。
+    已实测 6 sid 并发 = 6 独立 IP（ZooProxy）。nonce 用于运行中轮换：CAPTCHA 被拦时
+    nonce+1 重建 adapter = 立刻换新 IP。
 
-    sticky_minutes 默认 120：t-10 短粘滞曾让单 worker 每 10 分钟在保留 cookie 的
-    情况下被换出口 IP（09:50/09:59/10:09 三次 captcha 恰好落在窗口边界）——
-    cookie 与 IP 不匹配是明确的机器人特征；t-120 让一个 worker 两小时内锁一个 IP。
+    sticky_minutes 仅对 ZooProxy 生效（t-N 段）；DataImpulse 会话 TTL 由其平台管理。
+    DataImpulse 基名无 _session- 段时追加（无段=每请求轮换 IP，粘滞设计需要段存在）。
+
+    cookie 与 IP 不匹配是明确的机器人特征（t-10 短粘滞三次 captcha 全落窗口边界），
+    长粘滞让一个 worker 长时间锁一个 IP。
     """
     seed = hashlib.sha256(f"zoo-{worker_id}-{nonce}".encode("utf-8")).hexdigest()[:10]
-    minutes = max(1, int(sticky_minutes or 120))
-    new_username, n = _PROXY_SID_RE.subn(f"-sid-{seed}-t-{minutes}", username, count=1)
-    return new_username if n else username
+    new_username, n = _PROXY_SID_RE.subn(f"-sid-{seed}-t-{max(1, int(sticky_minutes or 120))}", username, count=1)
+    if n:
+        return new_username
+    new_username, n = _PROXY_SESSION_RE.subn(f"_session-{seed}", username, count=1)
+    if n:
+        return new_username
+    if "dataimpulse" in (proxy_url or "").lower():
+        return f"{username}_session-{seed}"
+    return username
 
 
 class HttpFirstAdapter:
@@ -2269,6 +2282,7 @@ class HttpFirstAdapter:
                         str(self.config.get("worker_id") or ""),
                         int(self.config.get("proxy_session_nonce") or 0),
                         int(self.config.get("proxy_sticky_minutes") or 120),
+                        proxy_url,
                     )
                 self._opener_handlers.append(ProxyTunnelAuthHTTPSHandler(username, password))
                 self._proxy_auth_configured = True
