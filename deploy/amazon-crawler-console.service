@@ -1,0 +1,17 @@
+[Unit]
+Description=Amazon crawler console (127.0.0.1:8771)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/amazon-crawler
+EnvironmentFile=/opt/amazon-crawler/.env
+ExecStart=/opt/amazon-crawler/.venv/bin/python scripts/collection_console.py --host 127.0.0.1 --port 8771 --tenant-id amazon_us_main
+Restart=always
+RestartSec=10
+StandardOutput=append:/opt/amazon-crawler/logs/console.log
+StandardError=append:/opt/amazon-crawler/logs/console.log
+
+[Install]
+WantedBy=multi-user.target

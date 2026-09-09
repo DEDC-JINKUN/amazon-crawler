@@ -1,0 +1,68 @@
+# 类人类节奏批次配置（直连单出口，模拟单个真实用户连续浏览）
+# 频率预算：平均 0.1 req/s（10.75s/页含 jitter）× 1093 条 ≈ 3.3h + 会话休息 ≈ 4h
+[worker]
+request_timeout_seconds = 30
+http_max_attempts = 2
+http_retry_backoff_seconds = 0.5
+http_accept_encoding = "gzip"
+headless = true
+max_actions_per_run = 1200
+max_attempts = 3
+review_page_limit = 0
+agent_name = "amazon-us-worker"
+user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0 Agent/amazon-us-worker"
+geckodriver_path = "tools/geckodriver.exe"
+firefox_binary = "C:/Program Files/Mozilla Firefox/firefox.exe"
+proxy_url = ""
+proxy_username_env = ""
+proxy_password_env = ""
+# 每 worker 派生独立代理粘滞会话（独立住宅 IP）——多 worker 并行的前提
+proxy_session_per_worker = true
+# 粘滞时长 120 分钟：t-10 短粘滞曾让 worker 每 10 分钟带着旧 cookie 被换出口 IP，
+# cookie/IP 不匹配是明确机器人特征（09:50/09:59/10:09 三次 captcha 全落在窗口边界）
+proxy_sticky_minutes = 120
+# CAPTCHA 被拦时轮换会话（换 IP）续跑，条目回队 120s 后由任意 IP 重试；
+# 不进全局熔断门（门为单出口设计）。
+# 预算 5 次 + 每次轮换后静默冷却 90s：10:14 风暴实测"同指纹集群被整体标记后
+# 立即换 IP 重试仍 100% 被拦"，硬轮换只会把整池信誉越烧越低
+proxy_rotate_session_on_block = true
+proxy_rotate_retry_seconds = 120
+proxy_rotate_max_per_run = 5
+proxy_rotate_cooldown_seconds = 90
+# 轮换预算耗尽（疑似指纹集群被标记）：静默 10 分钟等标记衰减后重置预算续跑
+proxy_storm_backoff_seconds = 600
+# 关闭 HTTP 路径的美国位置 cookie 流程（搜索页预热 + address-change）：
+# 该流程为非美国出口设计；美国出口下实测会毒化会话——流程种下的 cookie 状态
+# 让后续商品页 100% captcha（2026-09-09 直连同 IP 二分：带流程 cookie→captcha，
+# 全新 jar→干净全页）。美国 IP 下页面天然美国本地化，Amazon 自己种全套 cookie。
+http_setup_delivery_context = false
+# 屏图（代理计费场景开，省 ~85% 流量；数据不受影响——媒体 URL 从 HTML 解析）
+block_images = false
+# per-worker 速率 0.1 req/s（≈10s/页）：6 worker × 0.2 的聚合速率曾在 2 分钟内
+# 触发集群级标记（71 抓后全灭）；先 2 worker × 0.1 站稳，视被拦率再逐级上调
+global_requests_per_second = 0.1
+egress_requests_per_second = 0.1
+rate_burst = 1
+egress_id = "direct"
+# 主档 ±15% 抖动（安全半边：令牌间隔上追加 0~15% 随机延迟）
+request_jitter_fraction = 0.15
+# 类人会话：连续浏览 200-320 个商品页后休息 5-15 分钟（对齐真人阅读节奏）
+human_pause_every_actions_min = 200
+human_pause_every_actions_max = 320
+human_pause_seconds_min = 300
+human_pause_seconds_max = 900
+
+[paths]
+manifest = "amazon_us_asin_manifest.csv"
+state = "state/amazon_us.sqlite3"
+output_dir = "data/amazon_us"
+
+[collection]
+marketplace = "US"
+stop_on_block = true
+save_media = "url_and_metadata_only"
+
+[context]
+expected_country = "US"
+expected_currency = "USD"
+postal_code = "90001"

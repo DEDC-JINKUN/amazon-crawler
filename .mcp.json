@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "amazon-crawler": {
+      "command": "c:\\Users\\PC\\Desktop\\amazon-crawler-main\\.venv\\Scripts\\python.exe",
+      "args": [
+        "c:\\Users\\PC\\Desktop\\amazon-crawler-main\\scripts\\crawler_mcp_server.py"
+      ],
+      "env": {
+        "CRAWLER_CONSOLE_URL": "http://127.0.0.1:8771",
+        "CRAWLER_TENANT": "amazon_us_main"
+      }
+    }
+  }
+}

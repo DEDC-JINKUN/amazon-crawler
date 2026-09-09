@@ -1,0 +1,604 @@
+# Changelog
+
+## 1.0.0 - 2026-09-09
+
+首个云端部署版本：批次调度、代理多 IP 并行、控制台与 Agent 调用层就绪（含此前 Unreleased 全部条目）。
+
+- 新增批次调度器 `batch_coordinator.py`：多 worker 错峰启动、canary 探针评估、重启退避（30s）、worker 退出码 int32 钳制；批次状态全程落 PostgreSQL，协调器崩溃安全。
+- 新增批次任务存储 `batch_store.py`：`FOR UPDATE SKIP LOCKED` 原子领取、租约过期自动回收、variant 跳转独立终态（attempts 置满防重复领取）、failed 未耗尽重试自动回队。
+- Worker 熔断改为进程内睡眠：CAPTCHA 日 2 次硬拦触发 6 小时暂停，睡眠中每 300 秒重读熔断门文件支持手动清门提前唤醒；协调器 30 秒重启退避，彻底消除重启风暴烧尽 worker 上限。
+- 代理多 IP 并行：每 worker 派生独立粘滞会话（默认 t-120 分钟），CAPTCHA 触发会话轮换换 IP 续跑；轮换预算（5 次/run）+ 轮换冷却 + 风暴退避（预算耗尽静默 600s 等待 IP 标记衰减），被拦条目回队 120s 后重试。
+- 每条目全新 HTTP 会话（`begin_action` 重建 cookie jar）：Amazon 对透明标识 UA 按会话限流（首请求放行、同会话后续大面积拦截），换新会话后合规标识与通过率兼得（直连序列实测 6/8 被拦 → 0/8）。
+- 新增 `http_setup_delivery_context` 开关（默认关闭）：美国出口（VPN 美国节点/美国住宅代理）下搜索页预热+address-change 会毒化会话导致商品页 100% captcha；该流程仅非美国出口需要。
+- Collection Console 托管协调器生命周期（stdout 落 `state/coordinator.log`），新增 worker 数在线调节（1-8）与协调器重启 API；控制台展示批次进度、被拦率、流量与出口证据。
+- 新增 Agent 调用层：`crawler_mcp_server.py`（overview/批次/条目/CAPTCHA 门等 9 个 MCP 工具，注册于 `.mcp.json`）与项目技能 `amazon-crawler-ops`。
+- 新增云部署包 `deploy/`：paramiko 全自动 deploy.py（上传→安装→自检）、systemd 单元、Linux 类人类配置、数据库快照一键导入。
+- 新增竞品扩池 `link_competitor_relations.py`：从已爬商品页 carousel/similar-items 提取竞品 ASIN，支持 `--force` 刷新候选池。
+- 修复 PowerShell 5.1 `Set-Content -Encoding UTF8` 写入 BOM 导致 tomllib 解析失败的问题：所有配置写入改为 `[System.IO.File]::WriteAllText` 显式无 BOM。
+
+## Unreleased
+
+- 新增 loopback-only、PostgreSQL只读的 Amazon Collection Console，集中展示批次、任务异常、商品、媒体URL、top reviews、内容模块、evidence和流量；前端5秒刷新不访问Amazon。
+- PostgreSQL Worker新增显式 `--product-only` 阶段过滤；SQLite后端现在拒绝该不兼容参数，不再静默处理评论任务。
+- 商品canonical校验兼容Amazon `/clp/{同ASIN}`，仍拒绝跳转到不同ASIN。
+- 出口探针、Worker和解析器统一识别HTTP 202 AWS WAF挑战页，避免把挑战误报为健康或普通字段缺失。
+- 控制台新增按 `run_id` 的“本次运行结果”，区分长期任务与本次action；网络失败也写不可变run evidence，旧缺口以明确的时间推断标记补充。
+- 成功商品事务强制清除历史 `last_error`、`block_reason` 和 `next_retry_at`，避免成功任务继续显示旧错误。
+- 新增Windows统一入口 `crawler.ps1`：probe/run/status/console/stop、显式run_id、preflight、PID+StartTime单实例锁、日志、receipt和大批量确认门禁。
+- 快捷入口使用named mutex消除并发竞态、Windows kill-on-close Job Object托管完整进程树，并通过Console `/readyz`校验tenant/raw目录；preflight诊断持久化到run目录。
+
+## 0.3.0 - 2026-08-28
+
+- 正式 Worker 改为直接使用 PostgreSQL：任务领取采用 `FOR UPDATE SKIP LOCKED`，支持租约令牌、租约过期回收、租户与自有/竞品隔离。
+- 商品 evidence、历史快照、媒体、内容模块、评论摘要、评论记录和任务状态在 PostgreSQL 事务内写入；SQLite 不再进入正式 Windows 运行链路。
+- Collection API 刷新请求可被 Worker 原子领取；新增 PostgreSQL 陈旧快照定时入队并防止重复活跃任务。
+- 正式预检校验 PostgreSQL schema、Firefox、geckodriver 和 ZIP；Windows 正式配置固定使用 `90001`。
+- 修复 PostgreSQL 严格类型下空字符串写 integer、配送 ZIP 弹窗未真正提交、浏览器失败误标来源、空标题伪成功和评论失败丢失断点的问题。
+- 本机 PostgreSQL 17.10 真实验证双 Worker 不重复领取；真实 ASIN 商品页落库得到 5 条 bullets、34 条媒体和 23 个内容模块。
+- Amazon 独立评论页仍可能返回 200 空 DOM；系统保留评论断点并标记 `empty_review_page`，不伪造成功。
+
+## 0.2.13 - 2026-08-28
+
+- 采集指标和成本报告新增 `--all-runs`，可汇总同一 SQLite 状态库中的多轮续跑，不再只看最新 run。
+- 统一运行回执同步支持 `--all-runs`，回执同时报告页面、ASIN、数据库记录和字段值口径。
+- 修复 all-runs 分支连接关闭后访问 SQLite 的回归问题。
+
+## 0.2.12 - 2026-08-28
+
+- 流量成本回报扩展 `scale_estimates`，同时报告页面、ASIN、数据库标准化记录和非空字段值四种口径。
+- 每种口径都提供观测值、每个成功 ASIN 平均值和目标规模外推值；字段值未定义时不自动假设。
+
+## 0.2.11 - 2026-08-28
+
+- 主报告一周验收产物新增 Collection API `/readyz` 就绪回执，与当前服务实现对齐。
+
+## 0.2.10 - 2026-08-28
+
+- 实际验证 `--require-api-key`：无 Key 拒绝启动，有 Key 时健康路由 200、业务路由未授权 401、授权请求 200。
+- 补充 Collection API 安全验收记录。
+
+## 0.2.9 - 2026-08-28
+
+- Collection API 新增 `--require-api-key`，生产可强制校验 API Key 环境变量后才启动。
+- 补充缺少 API Key 时的启动失败回归，不影响默认本地开发。
+
+## 0.2.8 - 2026-08-28
+
+- 实际对账当前 SQLite 与 `amazon_us_qa` 租户：状态和刷新队列一致，20 个 ASIN 样本无差异。
+- 将 QA 租户对账命令和 `ok=true` 结果写入对账模板。
+
+## 0.2.7 - 2026-08-28
+
+- Collection API 业务路由的数据库异常统一返回 `database_unavailable`，不回显回驱动、DSN 或凭证详情。
+- 保留 `invalid_request` 的业务校验提示，仅对后端异常做脱敏处理。
+- 增加业务路由异常脱敏回归。
+
+## 0.2.6 - 2026-08-28
+
+- PostgreSQL Collection API 的 `/readyz` 成功响应返回 `tenant_id`，便于多 Agent 监控核对；`/healthz` 保持不暴露租户。
+- 增加 readyz 租户标识回归。
+
+## 0.2.5 - 2026-08-28
+
+- 实际访问 QA PostgreSQL tenant-scoped Collection API 的 `/readyz`，返回 HTTP 200 `ok=true`。
+- 补充就绪检查端到端验收记录。
+
+## 0.2.4 - 2026-08-28
+
+- Collection API 新增 `/readyz`，区分进程存活的 `/healthz` 与数据库/schema 可用的就绪状态。
+- 数据库断连、schema 缺失或未知驱动异常均返回 HTTP 503，不把故障误报为健康。
+- 增加 readyz 成功和数据库异常回归。
+
+## 0.2.3 - 2026-08-28
+
+- 实际验证 Collection API 错误租户访问同一 ASIN 返回 404，确认不会跨租户泄露。
+- 补充 tenant isolation 的 HTTP 路由验收记录。
+
+## 0.2.2 - 2026-08-28
+
+- `replay_postgres.ps1` 新增 `-TenantId`，并将租户同时传给 SQLite 回放和 PostgreSQL 验收。
+- 补充 Windows 回放入口的租户隔离回归。
+
+## 0.2.1 - 2026-08-28
+
+- 实际启动 PostgreSQL tenant-scoped Collection API，验证状态和单 ASIN HTTP 路由均只返回指定租户数据。
+- 补充本机 `amazon_us_qa` 端到端 API 验证记录。
+
+## 0.2.0 - 2026-08-28
+
+- PostgreSQL repository 、Collection API、验收和对账链路全部支持显式 `tenant_id`，完成多 Agent/多回放批次的读写隔离。
+- Collection API CLI 新增 `--tenant-id`，PostgreSQL 启动命令改用环境变量 DSN，不在命令示例中嵌入密码。
+
+## 0.1.99 - 2026-08-27
+
+- PostgreSQL repository 和对账工具新增显式 `tenant_id`，所有快照、任务、证据、历史和刷新请求按租户过滤，防止多 Agent 之间串数据。
+- `verify_postgres.py` 支持 `--tenant-id`，QA 回放与历史默认租户可分开验收。
+
+## 0.1.98 - 2026-08-27
+
+- `verify_postgres.py` 对未知数据库异常统一脱敏输出类型和错误码，不打印 DSN、密码或未处理堆栈。
+- 增加 PostgreSQL CLI 异常边界回归。
+
+## 0.1.97 - 2026-08-27
+
+- PostgreSQL schema 契约不完整时停止业务查询，仅输出缺失字段并返回非零，避免后续错误掩盖根因。
+- 保留正常 schema 下的任务和单 ASIN 查询行为。
+
+## 0.1.96 - 2026-08-27
+
+- `verify_postgres.py` 新增 schema 契约检查，在业务查询前确认 `next_retry_at`、`context_json` 和 `transfer_bytes`。
+- 本机默认库和独立 QA 库均通过 schema 检查，数据状态对账仍单独处理。
+
+## 0.1.95 - 2026-08-27
+
+- 补充本机独立 `amazon_us_qa` 回放模板和成功结果，明确不覆盖旧默认租户。
+- 对账文档记录 `transfer_bytes` 在新 schema 中可正常查询。
+
+## 0.1.94 - 2026-08-27
+
+- 补充本机 PostgreSQL 只读对账结果：旧租户状态和解析产物与当前 SQLite 不一致时，对账必须失败，不将历史回放当成生产基线。
+- 对账文档增加租户、清单、回放时间和解析器版本核对要求。
+
+## 0.1.93 - 2026-08-27
+
+- 统一回执的 `action_items` 新增 `failure_details`，包含 ASIN、状态、尝试次数、最后错误和阻断原因。
+- 验收摘要新增 failed 数量，方便运营快速判断待处理量。
+
+## 0.1.92 - 2026-08-27
+
+- 校准开发基线，同时保留 17.60 MB 原始 evidence 口径和 15.54 MB 重复文件去重口径，明确成本分母只计 9 个通过商品页校验的 ASIN。
+
+## 0.1.91 - 2026-08-27
+
+- 配置加载时限制 `http_accept_encoding` 为已实现的 `gzip` 或 `identity`，避免误配不支持的压缩格式。
+- 增加不支持压缩配置的启动回归。
+
+## 0.1.90 - 2026-08-27
+
+- SQLite/PostgreSQL 只读对账新增最新 evidence `transfer_bytes` 比对，后端丢失流量证据时不再误报一致。
+- 增加传输字节丢失的对账回归。
+
+## 0.1.89 - 2026-08-27
+
+- 增加 Windows 三个入口的脚本路径和错误阶段回归，防止部署文件丢失或错误码被覆盖。
+- 回执在旧/损坏状态库下返回清晰错误码，不输出未捕获堆栈。
+
+## 0.1.88 - 2026-08-27
+
+- 增加版本一致性回归，自动核对 `VERSION`、README 和 CHANGELOG 首个发布条目。
+- 实测报告改为标注“记录时版本”，避免后续发布后重复产生版本漂移。
+
+## 0.1.87 - 2026-08-27
+
+- 主报告新增“一周验收产物”，明确探针、小批量数据、统一回执和代理账单外推的交付标准。
+- 不再以理论并发数或页面体积作为生产成本承诺。
+
+## 0.1.86 - 2026-08-27
+
+- 更新 live 探针报告的当前版本引用，避免把 v0.1.81 误标为最新实现。
+
+## 0.1.85 - 2026-08-27
+
+- 验收结果新增失败/阻断 ASIN 详细清单，统一回执直接提供可重排队的行动项。
+- 保留重试耗尽 ASIN 单独列表，与普通 failed 和 blocked 区分。
+- 增加回执行动项回归测试。
+
+## 0.1.84 - 2026-08-27
+
+- 增加统一回执从新建 SQLite 到 JSON 文件的离线端到端回归，确保首次初始化也可生成合法回执。
+- 回归使用项目内部临时目录，避免 Windows 受限临时目录权限导致假失败。
+
+## 0.1.83 - 2026-08-27
+
+- `verify_windows.bat` 也自动生成统一运行回执，手动验收失败时仍保留可审计结果。
+- 验收入口优先返回物化或验收原始错误码，回执错误不隐藏上游失败。
+
+## 0.1.82 - 2026-08-27
+
+- 更新 `live_probe_report.md`，将历史重试问题与当前 v0.1.81 实现分开，补充 9/10 成功基线、gzip/transfer_bytes、出口探针和外部前置。
+- 明确旧 CSV 缺少 `transfer_bytes` 时需重新物化，不能当作生产验收通过。
+
+## 0.1.81 - 2026-08-27
+
+- 统一运行回执改为临时文件原子替换，读库或构建失败时不截断旧回执。
+- 增加回执文件原子写入回归测试。
+
+## 0.1.80 - 2026-08-27
+
+- Windows 人工单批入口同样自动保存 `run_receipt.json`，定时和手动测试共用统一回执格式。
+- 手动入口的 worker/验收错误码优先返回，回执失败不会隐藏原始失败。
+
+## 0.1.79 - 2026-08-27
+
+- Windows 定时采集脚本自动生成 `data/amazon_us/run_receipt.json`，保留每次运行的验收、流量和成本回执。
+- 回执失败不会覆盖原始 worker/验收错误码，定时脚本依然返回真正的失败原因。
+
+## 0.1.78 - 2026-08-27
+
+- 新增只读 `run_receipt.py`，一次合并结构验收、采集指标、传输字节和可选代理成本。
+- 回执明确分开 `verification.ok` 与成本结果，旧 CSV 头不匹配时返回非零。
+- 实际 1,892 清单测试发现旧输出缺少 `transfer_bytes`，已按门禁处理，不自动兼容为通过。
+
+## 0.1.77 - 2026-08-27
+
+- Collection API 单 ASIN 和 evidence 查询现在返回新证据的 `transfer_bytes`，与传输流量指标口径一致。
+- 补充旧 SQLite 无 `transfer_bytes` 字段时的 API 兼容说明和回归。
+
+## 0.1.76 - 2026-08-27
+
+- 在一周 MVP 计划文档中增加“计划不等于已上线”状态标注，并对齐当前实现、实测基线和外部前置。
+- 主报告与开发计划统一引用已验证的出口探针、gzip 和流量成本口径。
+
+## 0.1.75 - 2026-08-27
+
+- 主报告补充“200 元千万级”的数据单位、实测基线和代理账单验证口径，区分本地 HTML 体积与计费流量。
+- 主报告同步 gzip/identity A/B 、HTTP/评论/Firefox 分组和成功 ASIN 口径。
+
+## 0.1.74 - 2026-08-27
+
+- live preflight 在配置付费代理时自动执行出口探针，探针失败则禁止批量启动。
+- 直连 POC 没有 `proxy_url` 时继续跳过网络探针，避免影响离线开发。
+- 增加 live proxy 配置下的自动探针回归测试。
+
+## 0.1.73 - 2026-08-27
+
+- 出口探针增加 Amazon 另外两种挑战文案识别：`Enter the characters` 和 `Sorry, we just need to make sure you're not a robot`。
+- 增加挑战文案探针回归。
+
+## 0.1.72 - 2026-08-27
+
+- `preflight.py` 新增显式 `--probe-egress` 门禁，可在 live 启动前实际调用出口探针；探针失败时直接拒绝运行。
+- 默认 preflight 仍保持离线，避免本地 POC 意外访问网络。
+- 增加 preflight 探针成功/失败回归测试。
+
+## 0.1.71 - 2026-08-27
+
+- 出口探针增加 200 页面中的 Robot Check/CAPTCHA/访问拒绝识别，以及空响应分类，避免代理误放行。
+- 增加探针挑战页和空响应回归测试。
+
+## 0.1.70 - 2026-08-27
+
+- 新增付费出口上线前探针 `check_egress.py`，安全输出状态、耗时和响应字节，并区分网络、认证、403/429 失败。
+- 仅允许不带内嵌凭据的明确 HTTP(S) 代理 URL，账号和密码只从环境变量读取。
+
+## 0.1.69 - 2026-08-27
+
+- `collection_metrics.py` 不再要求 raw HTML 目录才统计 `transfer_bytes`，网络传输量与本地证据体积独立报告。
+- 增加无 raw HTML 目录时的传输字节回归测试，保证旧 evidence 和新 evidence 可分别识别。
+
+## 0.1.68 - 2026-08-27
+
+- HTTP 单次 fetch 累计多次传输字节，包含可重试响应的部分内容，避免重试请求使流量被低估。
+- 增加重试累计传输字节的回归测试。
+
+## 0.1.67 - 2026-08-27
+
+- HTTP 请求默认协商 gzip，解压后仍保持原始 HTML 和哈希可验证。
+- evidence 新增 `transfer_bytes`，记录压缩后 HTTP 响应体字节，同步 CSV、SQLite 升级、PostgreSQL 回放和 API 查询。
+- 流量报告同时输出保存体积与已知传输体积，旧 evidence 无传输字节时显示未知。
+- HTTP 单次 fetch 累计多次传输，包含可重试的部分响应，不因重试低估流量。
+
+## 0.1.66 - 2026-08-27
+
+- 429 响应优先采用数字秒数或 HTTP-date 形式 `Retry-After`，上限 24 小时；无效、过期或缺失时继续使用配置冷却时间。
+- 增加代理流量/成本验证方法和 `traffic_cost_report.py`，区分本地 HTML 体积与代理商计费流量。
+- 采集指标增加通过商品页校验的唯一成功 ASIN 数，成本外推不再把失败或仅评论页成功的 ASIN 算入分母。
+- 代理用量输入统一为 bytes，并支持实际费用差和分摊固定费用，避免 GB/GiB、月租或阶梯价导致成本低估。
+- 备用评论 URL 或浏览器降级返回阻断时，保留实际响应并进入 429 冷却/阻断流程。
+- 修复 Firefox 适配器未保存配置、导致 ZIP 上下文初始化访问空属性的问题。
+
+## 0.1.65 - 2026-08-27
+
+- 429 限流任务增加 `next_retry_at` 冷却时间，默认 1 小时内不重复领取。
+- 同步 SQLite/PostgreSQL schema、迁移和回归测试，避免限流后紧密重试。
+
+## 0.1.64 - 2026-08-27
+
+- 增加 worker→raw HTML→evidence→health audit 端到端哈希回归，确认新文件可完整校验。
+
+## 0.1.63 - 2026-08-27
+
+- 清洗 Buy Box 配送文本，截断 Add to List/Unable to add 等界面噪声。
+- 真实 HTML 的配送字段现输出 `Delivering to Portland 97218 - Update location`。
+
+## 0.1.62 - 2026-08-27
+
+- Buy Box 配送字段增加 `Delivering to` 文案识别，继续保留原文并对缺失字段保持空值。
+
+## 0.1.61 - 2026-08-27
+
+- 修复品牌字段误取 Amazon 店铺 CTA（如 `Visit the Eyourlife Store`），归一化为真实品牌文本。
+- 增加品牌归一化回归测试，并用真实 HTML 验证输出为 `Eyourlife`。
+
+## 0.1.60 - 2026-08-27
+
+- 在开发计划集中记录真实 10/30 条批次、离线解析吞吐和生产接入阻碍，明确下一阶段验收门槛。
+
+## 0.1.59 - 2026-08-27
+
+- 增加竞品候选发现→运营批准→正式 manifest 的端到端离线集成测试。
+
+## 0.1.58 - 2026-08-27
+
+- README 增加 evidence 健康检查和 collection metrics 的交接命令入口。
+
+## 0.1.57 - 2026-08-27
+
+- 补齐 evidence 健康检查工具及测试的发布提交，确保源 HTML 缺失/哈希不一致可复现检查。
+
+## 0.1.56 - 2026-08-27
+
+- 原始 HTML 本地存储改用 UTF-8 字节原子写入，确保 evidence SHA-256 与文件内容一致。
+- 健康检查继续报告旧历史文件的真实哈希不一致，不自动覆盖或修正原始证据。
+
+## 0.1.55 - 2026-08-27
+
+- 修复 SQLite→PostgreSQL 旧 evidence `context_json=NULL` 和子表可空整数空串迁移错误。
+- 独立本机 PostgreSQL 租户实际迁移 1,892 条任务成功，旧记录上下文以 `{}` 表示未知。
+
+## 0.1.54 - 2026-08-27
+
+- 在本机 PostgreSQL 17 执行幂等 schema 升级并确认 `collection_evidence.context_json` 为 jsonb。
+- 明确 schema 变更不会重建已有表；公司数据库仍待正式迁移窗口。
+
+## 0.1.53 - 2026-08-27
+
+- SQLite CollectionRepository 兼容旧 evidence schema：缺少 `context_json` 时返回 null，不阻断 API。
+- 增加旧库只读查询回归测试，避免 schema 升级顺序导致服务不可用。
+
+## 0.1.52 - 2026-08-27
+
+- 增加 Collection API evidence 的 `context_json` 回归断言，确认 Agent 可读取 ZIP/国家/币种上下文。
+
+## 0.1.51 - 2026-08-27
+
+- 抽出 `RawHtmlStore` 接口和本地原子写入实现，为后续 S3 兼容对象存储替换保留稳定边界。
+- 增加本地 raw HTML 存储回归测试，不改变当前目录和 evidence key。
+
+## 0.1.50 - 2026-08-27
+
+- 增加区域上下文迁移回归，验证 `context_json` 从 SQLite evidence 保留到 PostgreSQL payload。
+
+## 0.1.49 - 2026-08-27
+
+- evidence 增加 `context_json`，记录采集时 ZIP、国家和币种上下文，并同步 SQLite/CSV/PostgreSQL 回放。
+- 增加区域上下文审计回归测试，避免价格和配送结果无法追溯来源区域。
+
+## 0.1.48 - 2026-08-27
+
+- 对齐运营字段落点：页面显示的 BSR/类目保留在 `specs_json`，卖家/Coupon/配送保留在 Buy Box JSON；页面未显示时不推断。
+
+## 0.1.47 - 2026-08-27
+
+- 竞品候选发现支持 Amazon 搜索卡片的 `data-asin` 属性，不再只依赖 `/dp/` 链接。
+- 增加 `data-asin` 去重回归测试；详情页无候选时保持 0，不静默推断。
+
+## 0.1.46 - 2026-08-27
+
+- Buy Box JSON 在保留原文基础上增加可选 `seller`、`coupon`、`delivery` 字段，便于运营字段统计。
+- 增加 Coupon/配送文本解析回归测试，不伪造页面未显示的字段。
+
+## 0.1.45 - 2026-08-27
+
+- 价格字段优先读取可访问价格，并归一化重复视觉节点，保留页面原始币种，不做汇率转换。
+- 真实页面 `$23.99 $ 23 . 99` 现输出为 `$23.99`，增加价格归一化回归测试。
+
+## 0.1.44 - 2026-08-27
+
+- 增加竞品候选审核入池工具，要求独立批准 ASIN 文件，防止未审核候选进入采集任务。
+- 增加批准清单缺失/重复和标准 manifest 输出回归测试。
+
+## 0.1.43 - 2026-08-27
+
+- 增加离线竞品 ASIN 候选发现工具，记录关键词/来源 URL/发现时间并去重，候选默认进入 `candidate`。
+- 增加 Amazon.com 链接过滤和候选发现回归测试。
+
+## 0.1.42 - 2026-08-27
+
+- 重入队工具增加 `--dry-run` 预览模式和 selected/updated 数量，确认前不修改状态或历史。
+
+## 0.1.41 - 2026-08-27
+
+- 完成本机 SQLite 测试结果的 Collection API 端到端验证：健康、任务状态、单 ASIN 和批量查询均通过。
+
+## 0.1.40 - 2026-08-27
+
+- 完成评论分页离线回放：2,000 个模拟页耗时 1.42 秒，最终 2 条唯一评论。
+- 明确该基准只衡量本地去重/写入，不代表 Amazon 网络吞吐。
+
+## 0.1.39 - 2026-08-27
+
+- 增加评论增量回归：同一 review_id 幂等去重，编辑内容更新旧记录，分页游标保持连续。
+
+## 0.1.38 - 2026-08-27
+
+- 补充测试副本验收命令：显式传入 manifest、state、output-dir 和 verification，避免默认路径误判。
+- 记录 `ok=true` 与 `phase=collecting` 的区别：结构验收通过不代表全量任务完成。
+
+## 0.1.37 - 2026-08-27
+
+- 修正主报告与实际实现的表述：HTTP worker 使用 Python urllib opener，HTTP 会话不持久化 Cookie Jar。
+
+## 0.1.36 - 2026-08-27
+
+- 评论备用 `product-reviews` 入口为空时也保存独立 evidence，支持审计两个入口均已尝试。
+- 增加备用入口 evidence 回归断言，避免空页结论缺少证据。
+
+## 0.1.35 - 2026-08-27
+
+- 在真实 CAPTCHA 测试副本完成人工确认后的重入队演练：blocked ASIN 恢复 pending，历史原因和其他任务状态保持可追溯。
+
+## 0.1.34 - 2026-08-27
+
+- 增加离线 HTML 解析吞吐基准，区分真实文件测量与合成重复压测。
+- 11 个真实 HTML（15.78 MB）解析约 2.63 页/秒；5 倍重复约 2.64 页/秒，用于拆分解析瓶颈与网络瓶颈。
+
+## 0.1.33 - 2026-08-27
+
+- 增加人工复核重入队工具 `requeue_tasks.py`：默认只处理 failed，blocked 必须显式确认。
+- 重入队会清零连续失败次数、恢复商品/评论阶段并写入 state_history，不删除原始 evidence。
+
+## 0.1.32 - 2026-08-27
+
+- 增加 CAPTCHA 阻断批次回归测试：停止当前批次，未领取任务保持 pending。
+- 记录阻断恢复边界，避免把验证码当作普通失败继续放大请求。
+
+## 0.1.31 - 2026-08-27
+
+- 补齐 30 条容量测试配置文件的版本提交，确保报告中的复现命令在远端可用。
+
+## 0.1.30 - 2026-08-27
+
+- HTTP 错误响应正文断片不再导致 worker 崩溃，保留状态码并进入正常错误处理。
+- 全新 30 条美国 VPN/90001 容量测试在第 1 个 ASIN 遇到 `captcha` 后按设计停止，记录真实阻断而不绕过。
+
+## 0.1.29 - 2026-08-27
+
+- 补齐评论入口降级实现及测试提交，确保 `portal/customer-reviews` 空页时实际尝试 `product-reviews`。
+
+## 0.1.28 - 2026-08-27
+
+- 增加 `collection_metrics.py`，按 run_id 统计请求、有效页面、记录数、字节数、耗时和吞吐。
+- 用美国 VPN/90001 的 10 条真实批次验证指标：17.60 MB、29 秒、0.3793 页面/秒、9 条商品快照。
+
+## 0.1.27 - 2026-08-27
+
+- 评论入口为 `portal/customer-reviews` 且返回空页时，自动尝试稳定的 `product-reviews` 入口。
+- 增加评论入口降级回归测试，避免误判评论为空。
+
+## 0.1.26 - 2026-08-27
+
+- HTTP 大页面传输错误增加最多 2 次受控尝试和 0.5 秒退避；403/429 等 HTTP 响应不进入传输重试。
+- 10 条美国 VPN/90001 回归耗时 32.99 秒，9 条商品页成功、1 条 ASIN 不匹配，`IncompleteRead` 从 7 条降为 0。
+
+## 0.1.25 - 2026-08-27
+
+- 记录 description 解析修复后的 10 条美国 VPN 回归：3 条商品页成功，7 条因 HTTP `IncompleteRead` 进入可重试失败。
+- 明确网络传输样本不足时不输出字段解析结论，避免把网络失败误判为解析器效果。
+
+## 0.1.24 - 2026-08-27
+
+- 修复 malformed/重复容器页面下 `productDescription` 吸收后续模块文本的问题。
+- 增加空 description 容器回归测试；覆盖率报告和解析结果现在可区分页面未提供与解析错误。
+
+## 0.1.23 - 2026-08-27
+
+- 覆盖率报告支持 `--raw-html-dir`，区分 bullets/description 在原始 HTML 中为 `present`、`empty` 或 `uninspectable`。
+- 修正字段容器报告的嵌套误判，支持定位页面未提供字段与解析器问题。
+
+## 0.1.22 - 2026-08-27
+
+- 对齐运营需求：明确竞品 ASIN 的四类来源及运营审核入池流程。
+- 明确当前 POC 的 HTML 源文件使用本地 raw_html 目录，对象存储仅作为生产替换项。
+- 明确基础商品采集默认使用一个 ZIP，多区域仅按需启用。
+
+## 0.1.21 - 2026-08-27
+
+- 完成美国 VPN/ZIP 90001 下全新 SQLite 状态库 10 条小批量验证：9 条商品页成功，1 条 ASIN 不匹配被拦截。
+- 记录字段覆盖率：身份、商业、规格、Buy Box、评分/评论数 100%；bullets 55.56%，描述 44.44%。
+
+## 0.1.20 - 2026-08-27
+
+- 美国 VPN 下在全新空状态库完成 1 条美西 live 采集：HTTP 200、美国上下文通过并写入商品快照。
+- HTTP 传输断片在配置 ZIP 时自动尝试 Firefox 兜底，失败仍保留断点和错误证据。
+
+## 0.1.19 - 2026-08-27
+
+- HTTP chunked 响应断片统一归类为可重试的 `AdapterFetchError`，不会再使 worker 进程崩溃。
+- 增加美西 live 小批量测试配置和结果记录；验证失败时保留 evidence，不写入错误区域快照。
+
+## 0.1.18 - 2026-08-27
+
+- 补齐 v0.1.17 文档对应的 worker 实现：区域上下文不匹配时设置 ZIP 并使用 Firefox 重新采集。
+- 修复发布时实现文件未被纳入提交的问题。
+
+## 0.1.17 - 2026-08-27
+
+- 区域上下文不匹配时自动触发 Firefox 设置 ZIP 并重新采集，成功结果才允许写入商品快照。
+- 增加 HKD/香港页面转美国上下文的 worker 回归测试。
+
+## 0.1.16 - 2026-08-27
+
+- HTTP 页面出现区域上下文不匹配时，Firefox 兜底会在隔离会话中设置配置的美国 ZIP 后重新采集。
+- 实测验证 `90001`（洛杉矶）、`60601`（芝加哥）、`10001`（纽约）可在 Amazon 页面切换并显示对应配送城市；补充区域验证边界说明。
+
+## 0.1.15 - 2026-08-27
+
+- Firefox 动态兜底继承同一显式 HTTP(S) 代理出口，避免 HTTP→Firefox 降级时意外直连。
+- 增加 Firefox 代理配置和非法代理端口回归测试；Firefox 认证代理仍需供应商环境实测。
+
+## 0.1.14 - 2026-08-27
+
+- 付费代理认证支持从成对的环境变量读取，不在配置文件或代理 URL 中保存凭证。
+- preflight 增加认证环境变量成对检查，补充 HTTP worker 代理认证回归测试。
+
+## 0.1.13 - 2026-08-27
+
+- preflight 增加代理配置门禁：仅接受明确 HTTP(S) 出口，拒绝 URL 内嵌凭证且不在诊断信息中泄露密码。
+
+## 0.1.12 - 2026-08-27
+
+- 增加只读 SQLite/PostgreSQL 后端对账工具，比较任务状态、刷新请求状态和 ASIN 样本结果。
+- 增加对账工具说明及假仓储回归测试，避免仅凭迁移脚本退出码判断数据一致。
+
+## 0.1.11 - 2026-08-27
+
+- SQLite 新增商品历史快照保存，Collection API 增加 `/history` 查询。
+- PostgreSQL 历史快照回放映射和测试完成。
+
+## 0.1.10 - 2026-08-27
+
+- 美国 live preflight 只接受 5 位 ZIP 或 ZIP+4 格式。
+- 增加空 ZIP、非法 ZIP 的回归测试。
+
+## 0.1.9 - 2026-08-27
+
+- `preflight --require-live` 现在要求美国上下文配置 `postal_code`。
+- Windows 定时任务改用严格 live preflight，未固定美国 ZIP 时不会启动采集。
+- 57 项测试通过，记录区域上下文保护门禁。
+
+## 0.1.8 - 2026-08-27
+
+- 增加美国国家/币种上下文质量门禁，避免 HKD/非美国配送结果写入美国快照。
+- 增加 `context_mismatch` evidence 和任务失败记录及回归测试。
+
+## 0.1.7 - 2026-08-27
+
+- 修复 PostgreSQL `datetime/date` 返回值导致 Collection API JSON 序列化失败的问题。
+- 完成本机 PostgreSQL 后端 Collection API 健康、任务汇总和 ASIN 查询验证。
+
+## 0.1.6 - 2026-08-27
+
+- 记录真实探针返回 HKD/香港配送上下文的业务限制。
+- 明确美国价格、可售和配送数据必须固定美国 ZIP/配送上下文后再验收。
+
+## 0.1.5 - 2026-08-27
+
+- 修复媒体、内容、评论等子表回放时 `marketplace/asin` 主键字段丢失的问题。
+- 完成 1,892 条补货 ASIN 到本机 PostgreSQL 的实际回放和 repository 查询验证。
+
+## 0.1.4 - 2026-08-27
+
+- 修复 SQLite→PostgreSQL 回放时 JSONB 字段无法适配 psycopg `%s` 参数的问题。
+- 增加 JSONB 参数回归测试。
+
+## 0.1.3 - 2026-08-27
+
+- 增加交互式 SQLite→PostgreSQL 回放脚本和 PostgreSQL repository 验证命令。
+- 回放脚本通过临时 `PGPASSWORD` 接收密码，不写入仓库或持久化环境变量。
+- 补充 PostgreSQL 连接和回放操作文档。
+
+## 0.1.2 - 2026-08-27
+
+- 增加交互式 PostgreSQL schema 初始化脚本，不保存数据库密码。
+- 增加独立开发依赖，测试不再依赖系统 Python 全局包。
+- Windows 安装脚本支持缺少 `py` 启动器时回退到 `python`。
+- 固定 Firefox/geckodriver 运行路径和版本检查说明。
+
+## 0.1.1 - 2026-08-27
+
+- 固定 Windows geckodriver 0.37.1 安装路径并校验下载包 SHA-256。
+- 修正 Windows 安装脚本在缺少 `py` 启动器时回退到 `python`。
+- 补充 Firefox/Selenium live preflight 和单 ASIN HTTP 真实探针记录。
+- 确认本机 PostgreSQL 17 服务位置；Docker Compose 保留为可选开发环境。
+- 交接文档改为使用固定 geckodriver 安装脚本，不依赖 Selenium Manager 在线下载。

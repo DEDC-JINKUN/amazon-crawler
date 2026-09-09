@@ -1,0 +1,40 @@
+# Adjustable settings only. No credentials, cookies, tokens, or browser profiles.
+[worker]
+request_timeout_seconds = 30
+http_max_attempts = 2
+http_retry_backoff_seconds = 0.5
+# gzip lowers proxy bandwidth; set to identity only for an A/B baseline.
+http_accept_encoding = "gzip"
+headless = true
+max_actions_per_run = 10
+max_attempts = 3
+review_page_limit = 0
+agent_name = "amazon-us-worker"
+# If set, this must contain Agent/<agent_name> for transparency.
+user_agent = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0 Agent/amazon-us-worker"
+geckodriver_path = "tools/geckodriver.exe"
+firefox_binary = "C:/Program Files/Mozilla Firefox/firefox.exe"
+# Optional production-only approved egress. Leave empty for the Windows POC.
+proxy_url = ""
+proxy_username_env = ""
+proxy_password_env = ""
+# Set these only after an approved live-collection budget is agreed.
+global_requests_per_second = 0
+egress_requests_per_second = 0
+rate_burst = 1
+egress_id = "direct"
+
+[paths]
+manifest = "amazon_us_asin_manifest.csv"
+state = "state/amazon_us.sqlite3"
+output_dir = "data/amazon_us"
+
+[collection]
+marketplace = "US"
+stop_on_block = true
+save_media = "url_and_metadata_only"
+
+[context]
+expected_country = "US"
+expected_currency = "USD"
+postal_code = ""

@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""Probe one approved HTTP(S) egress without exposing credentials or body data."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from urllib.parse import urlsplit
+from typing import Any
+
+try:
+    from proxy_tunnel_auth import ProxyTunnelAuthHTTPSHandler
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from proxy_tunnel_auth import ProxyTunnelAuthHTTPSHandler
+
+
+def _validate_proxy_url(value: str) -> str:
+    parts = urlsplit(value.strip())
+    if parts.scheme not in {"http", "https"} or not parts.hostname or parts.username or parts.password:
+        raise ValueError("proxy_url must be an explicit http(s) URL without embedded credentials")
+    return value.strip()
+
+
+def _classify_body(status: int, body: bytes) -> str | None:
+    if not body:
+        return "empty_response"
+    text = body[:1_000_000].decode("utf-8", errors="ignore").lower()
+    if any(marker in text for marker in ("awswafcookiedomainlist", "awswafintegration", "token.awswaf.com")):
+        return "waf_challenge"
+    for phrase, reason in (
+        ("robot check", "robot"),
+        ("captcha", "captcha"),
+        ("enter the characters", "captcha"),
+        ("sorry we just need to make sure you're not a robot", "robot"),
+        ("automated access", "automated_access"),
+        ("access denied", "access_denied"),
+        ("too many requests", "too_many_requests"),
+    ):
+        if phrase in text:
+            return reason
+    return f"http_{status}" if status in {403, 429} else None
+
+
+def probe(
+    proxy_url: str,
+    target_url: str,
+    *,
+    timeout_seconds: int = 15,
+    user_agent: str = "amazon-us-egress-probe/1.0",
+    username: str | None = None,
+    password: str | None = None,
+    opener_factory: Any | None = None,
+) -> dict[str, Any]:
+    proxy_url = _validate_proxy_url(proxy_url)
+    target = urlsplit(target_url)
+    if target.scheme not in {"http", "https"} or not target.hostname:
+        raise ValueError("target_url must be an explicit http(s) URL")
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+    handlers: list[Any] = [urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})]
+    if (username is None) != (password is None):
+        raise ValueError("proxy username and password must be supplied together")
+    if username is not None and target.scheme != "https":
+        raise ValueError("authenticated proxy probes require an HTTPS target")
+    if username is not None:
+        handlers.append(ProxyTunnelAuthHTTPSHandler(username, password or ""))
+    opener = (opener_factory or urllib.request.build_opener)(*handlers)
+    request = urllib.request.Request(
+        target_url,
+        headers={"Accept": "text/plain,text/html;q=0.9", "Accept-Encoding": "identity", "User-Agent": user_agent},
+        method="GET",
+    )
+    started = time.monotonic()
+    try:
+        with opener.open(request, timeout=timeout_seconds) as response:
+            body = response.read()
+            status = int(response.getcode() or 200)
+    except urllib.error.HTTPError as exc:
+        status = int(exc.code)
+        try:
+            body = exc.read()
+        except Exception:
+            body = b""
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return {
+            "schema_version": "amazon-us-egress-probe-v1",
+            "ok": False,
+            "status": None,
+            "block_reason": "network_error",
+            "error_type": type(exc).__name__,
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+            "response_bytes": 0,
+        }
+    block_reason = _classify_body(status, body)
+    return {
+        "schema_version": "amazon-us-egress-probe-v1",
+        "ok": 200 <= status < 300 and block_reason is None,
+        "status": status,
+        "block_reason": block_reason,
+        "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+        "response_bytes": len(body),
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--proxy-url", required=True)
+    parser.add_argument("--target-url", default="https://www.amazon.com/robots.txt")
+    parser.add_argument("--timeout-seconds", type=int, default=15)
+    parser.add_argument("--proxy-username-env")
+    parser.add_argument("--proxy-password-env")
+    args = parser.parse_args(argv)
+    try:
+        if bool(args.proxy_username_env) != bool(args.proxy_password_env):
+            raise ValueError("proxy username and password environment names must be supplied together")
+        result = probe(
+            args.proxy_url,
+            args.target_url,
+            timeout_seconds=args.timeout_seconds,
+            username=os.environ.get(args.proxy_username_env) if args.proxy_username_env else None,
+            password=os.environ.get(args.proxy_password_env) if args.proxy_password_env else None,
+        )
+    except (ValueError, OSError) as exc:
+        print(json.dumps({"schema_version": "amazon-us-egress-probe-v1", "ok": False, "block_reason": "configuration_error", "error": str(exc)}, ensure_ascii=False, indent=2))
+        return 2
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result["ok"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

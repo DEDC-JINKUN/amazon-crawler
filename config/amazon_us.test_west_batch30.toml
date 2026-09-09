@@ -1,0 +1,35 @@
+# 30-ASIN live capacity validation only; do not use as the production default.
+[worker]
+request_timeout_seconds = 30
+http_max_attempts = 2
+http_retry_backoff_seconds = 0.5
+headless = true
+max_actions_per_run = 30
+max_attempts = 3
+review_page_limit = 0
+agent_name = "amazon-us-worker-test-west-batch30"
+user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0 Agent/amazon-us-worker-test-west-batch30"
+geckodriver_path = "tools/geckodriver-v0.37.1/geckodriver.exe"
+firefox_binary = "C:/Program Files/Mozilla Firefox/firefox.exe"
+proxy_url = ""
+proxy_username_env = ""
+proxy_password_env = ""
+global_requests_per_second = 0
+egress_requests_per_second = 0
+rate_burst = 1
+egress_id = "direct"
+
+[paths]
+manifest = "amazon_us_asin_manifest.csv"
+state = "state/amazon_us.sqlite3"
+output_dir = "data/amazon_us"
+
+[collection]
+marketplace = "US"
+stop_on_block = true
+save_media = "url_and_metadata_only"
+
+[context]
+expected_country = "US"
+expected_currency = "USD"
+postal_code = "90001"

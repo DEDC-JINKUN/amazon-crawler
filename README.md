@@ -1,0 +1,152 @@
+# Amazon US 商品网页爬虫
+
+面向 Amazon.com 自有 ASIN 和竞品 ASIN 的统一网页采集 MVP。
+
+当前版本：`1.0.0`（云端部署版：批次调度 + 代理多 IP + 控制台 + Agent 调用层）。
+
+本地测试结果可用 `scripts/evidence_health.py` 检查源 HTML 存在性和哈希；用 `scripts/collection_metrics.py` 按 `run_id` 查看请求数、流量和有效吞吐。
+代理流量和成本实测见 [`docs/traffic_cost_validation.md`](docs/traffic_cost_validation.md)，并用 `scripts/traffic_cost_report.py` 结合代理商后台的用量差值出具报告。
+付费出口批量前探针见 [`docs/egress_probe.md`](docs/egress_probe.md)。
+一次运行的结构、流量和成本回执见 [`docs/run_receipt.md`](docs/run_receipt.md)。
+
+## 当前开发边界
+
+- HTTP 优先获取公开 HTML；页面字段不足时再使用 Firefox 渲染。
+- PostgreSQL 是正式任务、断点、结果和历史的唯一事实源；SQLite 仅保留给历史回放和离线回归测试。
+- 原始 HTML、采集时间、来源和解析器版本必须可追溯。
+- PostgreSQL 使用租约和 `FOR UPDATE SKIP LOCKED` 支持多个 Worker 安全领取；当前 Windows 默认仍以单 Worker 小批量运行。
+- 生产阶段再接入经过批准的 IP 代理池和受控 Worker Pool。
+- 不读取个人浏览器 Profile、Cookie、Token 或密码，不绕过验证码和访问控制。
+
+## 目录
+
+```text
+amazon-scraping/
+├── scripts/              # 采集、解析、验收代码
+├── tests/                # 单元、回归和页面 fixture
+├── config/               # Windows 与示例配置
+├── docs/                 # 需求、技术设计、数据契约、流水线和验收说明
+├── schema/               # PostgreSQL 生产库结构
+├── *.bat                 # Windows 启动、定时和验收脚本
+├── data/                 # 本地导出（不提交真实数据）
+└── state/                # 历史 SQLite 回放数据（不进入正式运行）
+```
+
+## 快速检查
+
+```powershell
+python -m pytest tests -q
+```
+
+`setup_windows.bat` 会同时安装 `requirements-dev.txt`，保证测试不依赖系统 Python 的全局包。
+
+首次运行 `setup_windows.bat` 时，如果根目录没有业务清单，会自动复制两条记录的 `amazon_us_asin_manifest.example.csv` 作为离线开发样例。接入真实采集前，必须用经过确认的业务清单替换 `amazon_us_asin_manifest.csv`；真实清单不会提交到 Git。
+
+## 正式 PostgreSQL 运行
+
+完整步骤、环境变量和故障说明见 [`docs/postgres_production_worker.md`](docs/postgres_production_worker.md)。正式入口不会读取 SQLite，也不会把数据库密码写入仓库。
+
+Windows本机推荐使用统一控制入口：
+
+```powershell
+.\crawler.ps1 probe
+.\crawler.ps1 run -Limit 10
+.\crawler.ps1 status
+.\crawler.ps1 console
+.\crawler.ps1 stop
+```
+
+它自动处理隐藏密码、preflight、run_id、单实例锁、日志、receipt和只读控制台。超过100个action需要显式 `-ConfirmLargeBatch`。完整说明见 [`docs/crawler_control.md`](docs/crawler_control.md)。
+
+Windows本机推荐使用统一控制入口：
+
+```powershell
+.\crawler.ps1 probe
+.\crawler.ps1 run -Limit 10
+.\crawler.ps1 status
+.\crawler.ps1 console
+.\crawler.ps1 stop
+```
+
+它自动处理隐藏密码、preflight、run_id、单实例锁、日志、receipt和只读控制台。超过100个action需要显式 `-ConfirmLargeBatch`。完整说明见 [`docs/crawler_control.md`](docs/crawler_control.md)。
+
+```powershell
+$env:AMAZON_US_POSTGRES_DSN = 'host=127.0.0.1 port=5432 dbname=postgres user=postgres'
+$env:PGPASSWORD = '仅在当前 PowerShell 会话填写'
+try {
+  .\run_once_windows.bat
+} finally {
+  Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
+}
+```
+
+定时入口 `run_scheduled_windows.bat` 会先将超过 24 小时的 PostgreSQL 商品快照加入刷新队列，再运行一个受限批次。
+
+本机 PostgreSQL 开发环境：
+
+```powershell
+docker compose up -d postgres
+docker compose ps
+```
+
+数据库只绑定本机 `127.0.0.1:5433`，schema 会在首次创建数据卷时自动执行。`.env` 仅用于本机开发并被 Git 忽略；切换公司数据库时只替换 DSN 和凭据，不提交 `.env`。
+
+本机已有 PostgreSQL 服务时，可交互式执行 schema（密码不会写入项目）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\bootstrap_postgres.ps1
+```
+
+PostgreSQL Collection API：
+
+```powershell
+python scripts/collection_api.py --backend postgres --dsn "$env:AMAZON_US_POSTGRES_DSN" --tenant-id amazon_us_local
+```
+
+默认只监听 `127.0.0.1`；Agent 通过它读取快照、任务状态、最近证据并提交按需刷新请求。
+
+本机只读运营控制台：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\run_console_windows.ps1 `
+  -TenantId real_batch_20260828_500_04 `
+  -RawHtmlDir data\postgres_real_batch_20260828_500_04\raw_html
+```
+
+打开 `http://127.0.0.1:8770`。控制台只查询 PostgreSQL 和本地 evidence，不访问 Amazon，也不提供任务修改操作。完整说明见 [`docs/collection_console.md`](docs/collection_console.md)。
+
+正式运行前检查：
+
+```powershell
+python scripts/preflight.py --require-live --backend postgres --dsn-env AMAZON_US_POSTGRES_DSN
+```
+
+按字段新鲜度自动入队：
+
+```powershell
+python scripts/schedule_postgres_refresh.py --dsn-env AMAZON_US_POSTGRES_DSN --tenant-id amazon_us_local --subject-type own --min-age-hours 24
+```
+
+## 历史 SQLite 分析与迁移
+
+以下命令只用于旧 POC 数据分析、迁移和对账，不进入正式 Worker 运行链路。
+
+采集覆盖率报告：
+
+```powershell
+python scripts/coverage_report.py --db state/amazon_us.sqlite3 --output data/amazon_us/coverage_report.json
+```
+
+后端回放后，用只读对账工具确认 SQLite 与 PostgreSQL 的 API 视图一致（命令和安全的密码传递方式见 [`docs/compare_backends.md`](docs/compare_backends.md)）：
+
+```powershell
+$env:PGPASSWORD = '本机密码'
+try { .venv\Scripts\python.exe scripts\compare_backends.py --sqlite state\amazon_us.sqlite3 --dsn 'host=127.0.0.1 port=5432 dbname=postgres user=postgres' --sample-limit 20 }
+finally { Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue }
+```
+
+SQLite 回放到 PostgreSQL（拿到公司 DSN 后执行）：
+
+```powershell
+python scripts/migrate_sqlite_to_postgres.py --sqlite state/amazon_us.sqlite3 --dsn "$env:AMAZON_POSTGRES_DSN"
+```

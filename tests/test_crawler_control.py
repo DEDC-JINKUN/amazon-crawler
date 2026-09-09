@@ -1,0 +1,487 @@
+import json
+import importlib.util
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "crawler.ps1"
+HOST = ROOT / "scripts" / "crawler_process_host.py"
+
+
+def load_host():
+    spec = importlib.util.spec_from_file_location("crawler_process_host_test", HOST)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_control_script_exposes_small_safe_command_surface():
+    text = SCRIPT.read_text(encoding="utf-8")
+    assert "ValidateSet('egress', 'probe', 'run', 'reviews', 'status', 'console', 'stop', 'help')" in text
+    assert "Read-Host" in text and "-AsSecureString" in text
+    assert "--product-only" in text
+    assert "--reviews-only" in text
+    assert "--run-id" in text
+    assert "--probe-egress" not in text
+    assert "include-blocked" not in text.lower()
+    assert "egress_operation.py" in text
+    assert "operation_ledger.py" in text
+
+
+def test_collection_operations_are_registered_before_console_and_preflight():
+    text = SCRIPT.read_text(encoding="utf-8")
+    body = text[text.index("function Start-Crawl"):text.index("function Stop-Locked")]
+    assert body.index("Start-Operation") < body.index("Ensure-Console")
+    assert body.index("Start-Operation") < body.index("& $python $preflightScript")
+    assert "Mark-OperationPreflight" in body
+    assert "Finish-Operation" in body
+
+
+def test_setup_failures_are_audited_before_paths_limits_and_locks():
+    text = SCRIPT.read_text(encoding="utf-8")
+    main = text[text.index("$exitCode = 0"):]
+    assert main.index("Initialize-CrawlOperation $Command") < main.index("Resolve-ProjectPath $OutputDir")
+    setup = text[text.index("function Initialize-CrawlOperation"):text.index("function Start-Crawl")]
+    assert "Start-Operation" in setup
+    assert "$script:PendingOperationStarted = $true" in setup
+    assert 'Finish-Operation $script:PendingOperationId' in main
+
+
+def test_interrupt_status_is_preserved_by_controller_and_operation_ledgers():
+    text = SCRIPT.read_text(encoding="utf-8")
+    body = text[text.index("function Start-Crawl"):text.index("function Stop-Locked")]
+    assert "$workerExitCode -eq 130" in body
+    assert "$outcome -eq 'interrupted'" in body
+    assert "System.Management.Automation.PipelineStoppedException" in body
+    assert "$failureStatus = if ($isInterrupted) { 'interrupted' } else { 'failed' }" in body
+
+
+def test_egress_command_uses_official_audited_entry_without_collection_run():
+    text = SCRIPT.read_text(encoding="utf-8")
+    egress = text[text.index("function Start-EgressOperation"):text.index("function Start-Crawl")]
+    assert "Start-Operation" in egress
+    assert "$egressOperationScript" in egress
+    assert "Finish-Operation" in egress
+    assert "Start-RunLedger" not in egress
+    assert "requested_actions" not in egress
+
+
+def test_reviews_command_is_bounded_and_selects_only_review_stage():
+    text = SCRIPT.read_text(encoding="utf-8")
+    assert "reviews limit must be between 1 and 3" in text
+    assert "if ($Mode -eq 'reviews') { '--reviews-only' } else { '--product-only' }" in text
+
+
+def test_control_script_has_locks_logs_receipts_and_safe_stop():
+    text = SCRIPT.read_text(encoding="utf-8")
+    for expected in (
+        ".worker.lock.json",
+        ".console.lock.json",
+        "worker.stdout.log",
+        "worker.stderr.log",
+        "receipt.json",
+        "StartTime",
+        "RedirectStandardOutput",
+        "RedirectStandardError",
+        "stop -All",
+        "System.Threading.Mutex",
+        "crawler_process_host.py",
+        "Stop-Process",
+        "/readyz",
+        "preflight.log",
+        "Guid]::NewGuid",
+        "runtime_fingerprint",
+        "Get-ConsoleFingerprint",
+        "Get-FinalRunSnapshot",
+        "Test-ProbeRunQuality",
+        "quality_gate_ok",
+        "quality_failed",
+        "recorded_actions",
+        "completed_actions",
+        "failed_actions",
+        "blocked_actions",
+        "inferred_actions",
+        "run_verification_reason",
+        "Final: {0}/{1}",
+        "unmanaged listener remains",
+        "Get-NetTCPConnection",
+        "postgres_run_ledger.py",
+        "backfill_identity_evidence.py",
+        "owner_pid",
+        "owner_start_time",
+        "amazon-us-control-receipt-v3",
+    ):
+        assert expected in text
+    assert "PGPASSWORD" in text
+    assert "Remove-Item Env:PGPASSWORD" in text
+    assert "123456" not in text
+    normal_finish = text[text.index("$receipt = [ordered]@{"):text.index('Write-Host "Worker finished:')]
+    assert normal_finish.index("Finish-RunLedger") < normal_finish.index("Write-JsonAtomic $receipt")
+    progress_loop = text[text.index("while (-not $process.HasExited)"):text.index("$workerExitCode =")]
+    assert "?tenant=${tenantQuery}" in progress_loop
+
+
+def test_console_reuse_requires_verified_lock_and_matching_runtime_fingerprint():
+    text = SCRIPT.read_text(encoding="utf-8")
+    ensure = text[text.index("function Ensure-Console"):text.index("function Show-Status")]
+    ready = text[text.index("function Get-ConsoleReady"):text.index("function Ensure-Console")]
+    assert ensure.index("Remove-StaleLock") < ensure.index("Get-ConsoleReady")
+    assert "Get-VerifiedProcess" in ready
+    assert "runtime_fingerprint" in ready
+    assert "Port is occupied by an unmanaged or stale Console" in ensure
+    report = text[text.index("function Report-UnmanagedConsoleListener"):text.index("function Show-Help")]
+    assert "Get-NetTCPConnection" in report
+    assert "Stop-Process" not in report
+    assert "raw_html_dir" not in ready
+    assert "ready.tenant_id" not in ready
+    assert "arguments = @($consoleScript,'--host','127.0.0.1'" in ensure
+    assert "data\\console_control" in text
+
+
+def test_probe_quality_function_requires_complete_successful_evidence():
+    powershell = shutil.which("powershell") or shutil.which("powershell.exe")
+    assert powershell is not None
+    script_path = str(SCRIPT).replace("'", "''")
+    command = rf"""
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile('{script_path}', [ref]$tokens, [ref]$errors)
+$fn = $ast.FindAll({{ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-ProbeRunQuality' }}, $true) | Select-Object -First 1
+if ($null -eq $fn) {{ throw 'Test-ProbeRunQuality not found' }}
+Invoke-Expression $fn.Extent.Text
+$completed = @(
+  [pscustomobject]@{{outcome='completed'; attribution='evidence'}},
+  [pscustomobject]@{{outcome='completed'; attribution='evidence'}},
+  [pscustomobject]@{{outcome='completed'; attribution='evidence'}}
+)
+$failed = @(
+  [pscustomobject]@{{outcome='failed'; attribution='evidence'}},
+  [pscustomobject]@{{outcome='failed'; attribution='evidence'}},
+  [pscustomobject]@{{outcome='failed'; attribution='evidence'}}
+)
+$good = Test-ProbeRunQuality ([pscustomobject]@{{recorded_actions=3;inferred_actions=0;items=$completed;traffic=@{{}}}}) 3
+$bad = Test-ProbeRunQuality ([pscustomobject]@{{recorded_actions=3;inferred_actions=0;items=$failed;traffic=@{{}}}}) 3
+$partial = Test-ProbeRunQuality ([pscustomobject]@{{recorded_actions=2;inferred_actions=0;items=$completed[0..1];traffic=@{{}}}}) 3
+[ordered]@{{good=$good;bad=$bad;partial=$partial}} | ConvertTo-Json -Depth 8 -Compress
+"""
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["good"]["quality_gate_ok"] is True
+    assert payload["good"]["recorded_actions"] == 3
+    assert payload["good"]["completed_actions"] == 3
+    assert payload["bad"]["quality_gate_ok"] is False
+    assert payload["bad"]["failed_actions"] == 3
+    assert payload["partial"]["quality_gate_ok"] is False
+    assert "recorded_actions" in payload["partial"]["quality_gate_reason"]
+
+
+def test_normal_run_completeness_requires_requested_evidence_but_allows_terminal_variants():
+    powershell = shutil.which("powershell") or shutil.which("powershell.exe")
+    assert powershell is not None
+    script_path = str(SCRIPT).replace("'", "''")
+    command = rf"""
+$tokens = $null; $errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile('{script_path}', [ref]$tokens, [ref]$errors)
+$fn = $ast.FindAll({{ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-RunCompleteness' }}, $true) | Select-Object -First 1
+Invoke-Expression $fn.Extent.Text
+$short = Test-RunCompleteness ([pscustomobject]@{{recorded_actions=3;inferred_actions=0;items=@([pscustomobject]@{{attribution='evidence'}},[pscustomobject]@{{attribution='evidence'}},[pscustomobject]@{{attribution='evidence'}})}}) 10
+$completeWithVariants = Test-RunCompleteness ([pscustomobject]@{{recorded_actions=2;inferred_actions=0;items=@([pscustomobject]@{{attribution='evidence';outcome='completed'}},[pscustomobject]@{{attribution='evidence';outcome='variant_redirect'}})}}) 2
+[ordered]@{{short=$short;complete=$completeWithVariants}} | ConvertTo-Json -Depth 5 -Compress
+"""
+    result = subprocess.run([powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command], cwd=ROOT, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr or result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["short"]["completion_gate_ok"] is False
+    assert "recorded_actions:3/10" in payload["short"]["completion_gate_reason"]
+    assert payload["complete"]["completion_gate_ok"] is True
+
+
+def test_verified_process_accepts_json_datetime_and_iso_but_rejects_unsafe_locks():
+    powershell = shutil.which("pwsh") or shutil.which("pwsh.exe") or shutil.which("powershell") or shutil.which("powershell.exe")
+    assert powershell is not None
+    script_path = str(SCRIPT).replace("'", "''")
+    command = rf"""
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile('{script_path}', [ref]$tokens, [ref]$errors)
+$fn = $ast.FindAll({{ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-VerifiedProcess' }}, $true) | Select-Object -First 1
+if ($null -eq $fn) {{ throw 'Get-VerifiedProcess not found' }}
+Invoke-Expression $fn.Extent.Text
+$process = Get-Process -Id $PID
+$iso = $process.StartTime.ToUniversalTime().ToString('o')
+$jsonLock = ('{{{{"pid":{{0}},"start_time":"{{1}}"}}}}' -f $PID,$iso) | ConvertFrom-Json
+$stringLock = [pscustomobject]@{{pid=$PID;start_time=[string]$iso}}
+$invalidLock = [pscustomobject]@{{pid=$PID;start_time='not-a-time'}}
+$mismatchLock = [pscustomobject]@{{pid=$PID;start_time=$process.StartTime.ToUniversalTime().AddTicks(1).ToString('o')}}
+$missingProcessLock = [pscustomobject]@{{pid=2147483647;start_time=$iso}}
+[ordered]@{{
+  json_type=$jsonLock.start_time.GetType().FullName
+  json_ok=$null -ne (Get-VerifiedProcess $jsonLock)
+  string_ok=$null -ne (Get-VerifiedProcess $stringLock)
+  invalid_rejected=$null -eq (Get-VerifiedProcess $invalidLock)
+  mismatch_rejected=$null -eq (Get-VerifiedProcess $mismatchLock)
+  missing_process_rejected=$null -eq (Get-VerifiedProcess $missingProcessLock)
+}} | ConvertTo-Json -Compress
+"""
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    # json_type 取决于 PowerShell 版本：7+（Newtonsoft Json.NET）把 ISO 时间戳
+    # 解析为 DateTime；5.1（JavaScriptSerializer）保持 String。
+    # Get-VerifiedProcess 对两种类型都正确验证（见下方 json_ok/string_ok），
+    # 所以这里只断言类型是两者之一，不锁定具体版本。
+    assert payload["json_type"] in {"System.DateTime", "System.String"}
+    assert payload["json_ok"] is True
+    assert payload["string_ok"] is True
+    assert payload["invalid_rejected"] is True
+    assert payload["mismatch_rejected"] is True
+    assert payload["missing_process_rejected"] is True
+
+
+def test_worker_and_console_locks_share_the_same_verified_process_gate():
+    text = SCRIPT.read_text(encoding="utf-8")
+    assert text.count("Get-VerifiedProcess") >= 5
+    assert "Get-VerifiedProcess $worker" in text
+    assert "Get-VerifiedProcess $console" in text
+
+
+def test_run_ledger_receipt_uses_json_file_not_native_stdin_pipe():
+    text = SCRIPT.read_text(encoding="utf-8")
+    start = text.index("function Finish-RunLedger")
+    end = text.index("function Ensure-Console", start)
+    body = text[start:end]
+    assert "--receipt" in body
+    assert "Set-Content -LiteralPath $ledgerReceipt -Encoding UTF8" in body
+    assert "| & $python $runLedgerScript" not in body
+    assert "Remove-Item -LiteralPath $ledgerReceipt" in body
+
+
+def test_controller_does_not_prompt_when_dsn_already_contains_password():
+    text = SCRIPT.read_text(encoding="utf-8")
+    assert "$dsnContainsPassword" in text
+    assert "password\\s*=" in text
+    assert "-not $dsnContainsPassword" in text
+
+
+def test_verified_process_fails_closed_when_start_time_access_throws():
+    powershell = shutil.which("pwsh") or shutil.which("pwsh.exe") or shutil.which("powershell") or shutil.which("powershell.exe")
+    assert powershell is not None
+    script_path = str(SCRIPT).replace("'", "''")
+    command = rf"""
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile('{script_path}', [ref]$tokens, [ref]$errors)
+$fn = $ast.FindAll({{ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-VerifiedProcess' }}, $true) | Select-Object -First 1
+if ($null -eq $fn) {{ throw 'Get-VerifiedProcess not found' }}
+Invoke-Expression $fn.Extent.Text
+$throwingProcess = [pscustomobject]@{{}}
+$throwingProcess | Add-Member -MemberType ScriptProperty -Name StartTime -Value {{ throw 'start time unavailable' }}
+function Get-Process {{ param([int]$Id, $ErrorAction) return $throwingProcess }}
+$lock = [pscustomobject]@{{pid=123;start_time='2026-08-31T04:52:15.7663775Z'}}
+$result = Get-VerifiedProcess $lock
+[ordered]@{{rejected=$null -eq $result}} | ConvertTo-Json -Compress
+"""
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert json.loads(result.stdout.strip().splitlines()[-1]) == {"rejected": True}
+
+
+def test_control_script_defaults_to_current_isolated_tenant():
+    text = SCRIPT.read_text(encoding="utf-8")
+    assert "real_batch_20260828_500_04" in text
+    assert "data\\postgres_real_batch_20260828_500_04\\manifest_500.csv" in text
+    assert "data\\postgres_real_batch_20260828_500_04\\batch500.toml" in text
+
+
+def test_worker_host_waits_for_registration_gate_and_uses_kill_on_close_job():
+    text = HOST.read_text(encoding="utf-8")
+    assert "gate_path" in text
+    assert "cancel_path" in text
+    assert "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE" in text
+    assert "AssignProcessToJobObject" in text
+    assert "return process.wait()" in text
+    assert text.index("open_owner_monitor(") < text.index("wait_for_gate(gate, cancel, owner_monitor=owner_monitor)")
+
+
+def test_managed_host_terminates_worker_when_controller_process_exits():
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        gate = root / "gate"
+        cancel = root / "cancel"
+        heartbeat = root / "heartbeat"
+        child_pid = root / "child.pid"
+        owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            if os.name == "nt":
+                owner_started = subprocess.check_output(
+                    ["powershell", "-NoProfile", "-Command", f"(Get-Process -Id {owner.pid}).StartTime.ToUniversalTime().ToString('o')"],
+                    text=True,
+                ).strip()
+            else:
+                owner_started = ""
+            child_code = (
+                "import os,pathlib,time; "
+                f"pathlib.Path(r'{child_pid}').write_text(str(os.getpid())); "
+                f"p=pathlib.Path(r'{heartbeat}'); "
+                "\nwhile True: p.write_text(str(time.time())); time.sleep(.05)"
+            )
+            request = root / "request.json"
+            request.write_text(json.dumps({
+                "python": sys.executable,
+                "working_directory": str(ROOT),
+                "arguments": ["-c", child_code],
+                "gate_path": str(gate),
+                "cancel_path": str(cancel),
+                "owner_pid": owner.pid,
+                "owner_start_time": owner_started,
+            }), encoding="utf-8")
+            host = subprocess.Popen([sys.executable, str(HOST), "--request", str(request)])
+            gate.touch()
+            deadline = time.time() + 5
+            while time.time() < deadline and not heartbeat.exists():
+                time.sleep(.05)
+            assert heartbeat.exists(), "controlled worker never started"
+            owner.terminate()
+            owner.wait(timeout=5)
+            assert host.wait(timeout=8) != 0
+            before = heartbeat.stat().st_mtime_ns
+            time.sleep(.3)
+            assert heartbeat.stat().st_mtime_ns == before
+            pid = int(child_pid.read_text())
+            if os.name == "nt":
+                probe = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", f"if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 1 }}"],
+                    timeout=5,
+                )
+                assert probe.returncode == 0
+        finally:
+            if owner.poll() is None:
+                owner.kill()
+                owner.wait(timeout=5)
+
+
+def test_owner_loss_finalizes_database_receipt_after_worker_termination():
+    module = load_host()
+    events = []
+
+    class Process:
+        returncode = None
+        def poll(self): return None if not events else -15
+        def terminate(self): events.append("terminated")
+        def wait(self, timeout=None): self.returncode = -15; return -15
+
+    module.owner_is_alive = lambda _monitor: False
+    module.finalize_interrupted_run = lambda lifecycle, worker_exit, python: events.append(
+        (lifecycle["run_id"], worker_exit)
+    )
+
+    assert module.wait_for_process(Process(), object(), {"run_id": "run-owner-loss"}, sys.executable) == 130
+    assert events == ["terminated", ("run-owner-loss", -15)]
+
+
+def test_managed_host_stops_worker_when_controller_heartbeat_stales_but_shell_lives():
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        gate = root / "gate"
+        heartbeat = root / "controller.heartbeat"
+        worker_heartbeat = root / "worker.heartbeat"
+        owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        host = None
+        try:
+            if os.name == "nt":
+                owner_started = subprocess.check_output(
+                    ["powershell", "-NoProfile", "-Command", f"(Get-Process -Id {owner.pid}).StartTime.ToUniversalTime().ToString('o')"],
+                    text=True,
+                ).strip()
+            else:
+                owner_started = "owner"
+            heartbeat.touch()
+            keepalive_stop = threading.Event()
+            def refresh_heartbeat():
+                while not keepalive_stop.is_set():
+                    heartbeat.touch()
+                    time.sleep(.1)
+            keepalive = threading.Thread(target=refresh_heartbeat, daemon=True)
+            keepalive.start()
+            child_code = f"import pathlib,time; p=pathlib.Path(r'{worker_heartbeat}');\nwhile True: p.write_text(str(time.time())); time.sleep(.05)"
+            request = root / "request.json"
+            request.write_text(json.dumps({
+                "python": sys.executable, "working_directory": str(ROOT), "arguments": ["-c", child_code],
+                "gate_path": str(gate), "cancel_path": str(root / "cancel"),
+                "owner_pid": owner.pid, "owner_start_time": owner_started,
+                "owner_heartbeat_path": str(heartbeat), "owner_heartbeat_timeout_seconds": 2.0,
+            }), encoding="utf-8")
+            host = subprocess.Popen([sys.executable, str(HOST), "--request", str(request)])
+            gate.touch()
+            deadline = time.time() + 5
+            while time.time() < deadline and not worker_heartbeat.exists(): time.sleep(.05)
+            assert worker_heartbeat.exists()
+            keepalive_stop.set()
+            keepalive.join(timeout=2)
+            assert host.wait(timeout=10) == 130
+            assert owner.poll() is None, "the shell/controller process should still be alive in this reproduction"
+            before = worker_heartbeat.stat().st_mtime_ns
+            time.sleep(.3)
+            assert worker_heartbeat.stat().st_mtime_ns == before
+        finally:
+            if host is not None and host.poll() is None:
+                host.kill(); host.wait(timeout=5)
+            if owner.poll() is None:
+                owner.kill(); owner.wait(timeout=5)
+
+
+def test_managed_host_aborts_before_gate_when_controller_heartbeat_stales():
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        heartbeat = root / "controller.heartbeat"
+        owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        host = None
+        try:
+            owner_started = subprocess.check_output(
+                ["powershell", "-NoProfile", "-Command", f"(Get-Process -Id {owner.pid}).StartTime.ToUniversalTime().ToString('o')"],
+                text=True,
+            ).strip() if os.name == "nt" else "owner"
+            heartbeat.touch()
+            request = root / "request.json"
+            request.write_text(json.dumps({
+                "python": sys.executable, "working_directory": str(ROOT),
+                "arguments": ["-c", "raise SystemExit('must not start')"],
+                "gate_path": str(root / "never-created-gate"), "cancel_path": str(root / "cancel"),
+                "owner_pid": owner.pid, "owner_start_time": owner_started,
+                "owner_heartbeat_path": str(heartbeat), "owner_heartbeat_timeout_seconds": .4,
+            }), encoding="utf-8")
+            host = subprocess.Popen([sys.executable, str(HOST), "--request", str(request)])
+            assert host.wait(timeout=8) == 130
+            assert owner.poll() is None
+        finally:
+            if host is not None and host.poll() is None:
+                host.kill(); host.wait(timeout=5)
+            if owner.poll() is None:
+                owner.kill(); owner.wait(timeout=5)

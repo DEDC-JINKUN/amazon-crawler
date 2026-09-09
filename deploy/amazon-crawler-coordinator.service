@@ -1,0 +1,18 @@
+[Unit]
+Description=Amazon crawler batch coordinator
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/amazon-crawler
+EnvironmentFile=/opt/amazon-crawler/.env
+ExecStart=/opt/amazon-crawler/.venv/bin/python scripts/batch_coordinator.py run --tenant-id amazon_us_main --subject-type own --workers-per-batch 2 --worker-config config/amazon_us.linux.human.toml
+Restart=always
+RestartSec=20
+# 日志走 journald；轮转由 logrotate/systemd 内建处理
+StandardOutput=append:/opt/amazon-crawler/logs/coordinator.log
+StandardError=append:/opt/amazon-crawler/logs/coordinator.log
+
+[Install]
+WantedBy=multi-user.target
