@@ -1,0 +1,16 @@
+{
+  "requested_asin": "B0FSPVKXP7",
+  "snapshot": {
+    "asin": "B0FSPVKXP7",
+    "price": "$9.99",
+    "specs": {
+      "Best Sellers Rank": "#1,693,662 in Home & Kitchen () See Top 100 in Home & Kitchen #25,305 in Decorative Hanging Ornaments"
+    },
+    "buy_box": {}
+  },
+  "evidence": {
+    "content_hash": "caf7dda56a00d9898da62fa5f7618070c591b1fb17d2effdda4d0b41911bc9d5",
+    "retrieved_at": "2026-09-05T01:00:00+00:00",
+    "parser_version": "offline-field-sample"
+  }
+}

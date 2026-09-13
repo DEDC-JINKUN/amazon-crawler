@@ -1,0 +1,63 @@
+# 真实页面单 ASIN 探针记录
+
+## 运行条件
+
+- 运行日期：2026-08-27
+- 样本：1 条已授权的 FBA 补货 ASIN（临时清单，不进入仓库）
+- 访问方式：HTTP 优先、无登录、无代理、无高并发
+- 运行环境：Python 3.13.14、Selenium 4.47.0、Firefox 154.0.1、geckodriver 0.37.1
+
+## 结果
+
+- worker 退出码：0；
+- 商品状态：`reviews_pending`；
+- evidence：1 条，来源为 `http_html`，阻断原因为空；
+- 商品快照：1 条；
+- 媒体：34 条；
+- 内容模块：23 条；
+- 评论摘要：1 条；评论正文记录：0 条（下一步由分页任务继续）；
+- 原始 HTML：已保存并记录路径。
+
+本次页面核心字段均完成解析，因此没有启动 Firefox 兜底。该结果只能证明单页链路在当前环境可运行，不能推导大规模吞吐、封禁率或评论分页成功率。
+
+## 重要业务限制
+
+探针页面返回了 HKD 价格和“Deliver to Hong Kong”配送提示，说明当前网络或会话的区域上下文不是美国配送环境。该快照不能直接作为美国价格、可售或配送结论；正式采集前必须固定美国 ZIP/配送上下文，并把上下文写入任务维度。
+
+本机 PostgreSQL 回放后，Collection API 已完成端到端只读验证：健康检查通过，任务汇总返回 1,891 个 pending 和 1 个 reviews_pending，指定 ASIN 查询成功，PostgreSQL 的时间字段可正常转换为 JSON。
+
+### 10 条美西小批量（90001）
+
+在原始 SQLite 只读复制出的测试副本上运行清单前 10 条，使用可见 Firefox 和美国 ZIP `90001`。10 条任务均进入可审计失败路径，未覆盖原有有效快照：1 条 `empty_review_page`，6 条 `context_mismatch`，2 条 `IncompleteRead`（已在 v0.1.19 归类为可重试错误），其余为区域上下文不匹配。该结果说明当前网络/页面变体下，Firefox 的配送 ZIP 在跨 ASIN 页面间不能稳定保持；不能据此宣称批量采集成功。测试副本和输出目录不作为生产数据源。
+
+### 美国 VPN 全新空状态库快速重测
+
+为排除旧任务状态影响，创建全新 SQLite 状态库，仅初始化清单后采集首个 ASIN `B00RCPDCQU`。美国 VPN、ZIP `90001` 下 HTTP 返回 200，状态为 `product_done`，价格 `$23.99`、评分 4.0、评论数 17、A+ 标记 1；输出包含媒体 34 条、内容模块 23 条、评论摘要 1 条、评论记录 0 条和证据 1 条。评论页后续 action 为空，状态为 `failed/empty_review_page`；商品快照未被覆盖。该结果证明商品页主链路和美国上下文可用，但不代表评论分页或批量吞吐已验收。
+
+### 美国 VPN/90001 全新 SQLite 10 条小批量
+
+使用可见 Firefox 配置初始化清单后运行前 10 个 ASIN，正式状态库未修改。9 条商品页写入 `product_snapshot`，1 条因 `asin_mismatch` 进入失败证据；本批商品页请求均返回 HTTP 200。覆盖率报告显示身份、价格、可售、规格、Buy Box、评分和评论数均为 100%，bullets 为 5/9（55.56%），描述为 4/9（44.44%）；媒体 360、内容模块 204、评论摘要 9、评论记录 0、证据 11。后续重点是补齐 bullets/描述的页面变体解析，再扩大样本。
+
+### description 修复后的 10 条回归
+
+在全新 SQLite 状态库上重复相同 10 条任务时，只有 3 条完成商品页快照，7 条在 HTTP 大页面传输阶段发生 `IncompleteRead`；未形成足够样本评价 description 覆盖率。该结果归类为网络传输稳定性问题，不作为解析器退化结论；下一步先增加受控 HTTP 重试/传输诊断，再重跑。
+
+### 受控 HTTP 重试后的 10 条回归
+
+设置每个页面最多 2 次 HTTP 尝试、0.5 秒退避后，在全新 SQLite 状态库重复相同 10 条：总耗时 32.99 秒，9 条商品页成功、1 条 `asin_mismatch`，`IncompleteRead=0`，全部商品页由 HTTP 完成且未启动 Firefox。输出商品快照 9、媒体 360、内容模块 204；bullets 5/9、description 4/9。结果恢复到此前 9/10 基线，支持继续扩大到 30 条前先完成评论分页处理。
+
+## 环境结论
+
+Firefox/Selenium 运行依赖已经具备；此前失败的原因是 Selenium Manager 无法在线下载 geckodriver，以及受限目录无法写 SQLite。固定驱动路径和临时状态库后，单页 HTTP 采集已成功。
+
+### 全新 30 条容量测试
+
+使用 `amazon_us.test_west_batch30.toml` 初始化全新 SQLite 状态库后启动 30 个商品 action。第 1 个 ASIN 的 HTTP 200 页面被识别为 `captcha`，worker 按 `stop_on_block=true` 立即停止，耗时约 1.34 秒；任务状态为 `blocked`，没有继续请求后续 ASIN，也未尝试绕过验证码。该结果说明容量测试必须把挑战页和出口冷却作为一等指标，不能按理论并发线性外推。
+
+### 后续版本状态（2026-08-27）
+
+- 受控 HTTP 重试、`Retry-After` 冷却、gzip 解压和 `transfer_bytes` 已实现，该实测记录对应的实现基线为 v0.1.85；后续版本只增加了运行回执和文档护栏，不改变该历史实测结果。
+- 按严格成功口径，10 个 HTTP 2xx 页面中 9 个 ASIN 通过商品页校验，去重后响应体 15,543,610 bytes，5,800 个商品页线性外推约 9.33 GiB；
+- 付费出口仍需通过 `check_egress.py` 和 `preflight --require-live`；配置 `proxy_url` 后 preflight 会自动探针；
+- 定时和手动入口均会生成 `run_receipt.json`，但过去测试副本的旧 CSV 可能缺少 `transfer_bytes`，需重新物化后再做最终验收；
+- 公司代理账单、真实 ASIN 清单和正式 PostgreSQL/Weknora 接入仍是外部前置，不能仅凭本地 POC 宣称生产通过。

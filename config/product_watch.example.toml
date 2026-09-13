@@ -1,0 +1,44 @@
+# Deliberately contains no real ASINs, recipients, credentials or live enablement.
+tenant_id = "replace-with-approved-tenant"
+marketplace = "US"
+
+[rules]
+rule_version = "product-watch-v1"
+price_change_threshold = "1.00"
+rank_change_threshold = 3
+
+[reporting]
+config_version = "watch-reporting-v1"
+timezone = "Asia/Shanghai"
+# Set channel and recipient only after the user approves the actual target.
+# channel = "approved-channel"
+# recipient = "approved-recipient"
+
+[delivery]
+batch_limit = 10
+
+[scheduling]
+# Windows Task Scheduler invokes one bounded pass. It reads completed crawler
+# rows only; it never makes an Amazon request or reopens raw HTML.
+snapshot_batch_limit = 50
+search_batch_limit = 20
+
+[products]
+# Set enabled only after the approved own/competitor mapping is supplied. The
+# bounded Agent refresh worker remains the sole collector.
+enabled = false
+subject_type = "own"
+# Required when enabled; do not use a tenant-wide implicit watch.
+# asins = ["B000000000"]
+max_age_hours = 24
+limit = 5
+
+[keywords]
+# To schedule C's bounded live search, set both this flag and the referenced
+# C config's live_collection_enabled=true, then add explicit [[keywords.jobs]].
+live_collection_enabled = false
+# [[keywords.jobs]]
+# keyword = "approved keyword"
+# target_asins = ["B000000000"]
+# depth = 1
+# search_config_path = "config/search_rank.approved.toml"

@@ -1,0 +1,300 @@
+"""Run-scoped loopback CONNECT relay for stock Firefox proxy authentication.
+
+The relay never terminates TLS. It accepts CONNECT only from loopback, adds the
+upstream Basic proxy credential in memory, and forwards opaque bytes until the
+browser or upstream closes the tunnel.
+"""
+from __future__ import annotations
+
+import base64
+import re
+import select
+import socket
+import socketserver
+import threading
+from typing import Any, Callable, Iterable
+from urllib.parse import urlsplit
+
+
+MAX_HEADER_BYTES = 16 * 1024
+
+
+class _RelayServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = False
+    daemon_threads = False
+    block_on_close = True
+
+
+class ProxyConnectRelay:
+    """Expose an ephemeral loopback proxy that authenticates upstream CONNECT."""
+
+    def __init__(
+        self,
+        upstream_proxy_url: str,
+        username: str,
+        password: str,
+        *,
+        allowed_hosts: Iterable[str] = ("amazon.com", "media-amazon.com", "ssl-images-amazon.com"),
+        connect_timeout_seconds: float = 15.0,
+        max_connections: int = 32,
+        transfer_budget: Callable[[int], bool] | None = None,
+        transport_meter: Any | None = None,
+    ) -> None:
+        upstream = urlsplit(str(upstream_proxy_url or "").strip())
+        if (
+            upstream.scheme != "http" or not upstream.hostname or upstream.username or upstream.password
+            or upstream.path not in {"", "/"} or upstream.query or upstream.fragment
+        ):
+            raise ValueError("upstream proxy must be a credential-free HTTP endpoint")
+        username = str(username or "")
+        password = str(password or "")
+        if not username or not password or ":" in username or any(value in username + password for value in "\r\n"):
+            raise ValueError("proxy relay credentials are invalid")
+        normalized_hosts = tuple(sorted({str(value).lower().strip(".") for value in allowed_hosts if value}))
+        if not normalized_hosts:
+            raise ValueError("at least one CONNECT host suffix is required")
+        self._upstream = (upstream.hostname, upstream.port or 80)
+        self._allowed_hosts = normalized_hosts
+        self._timeout = max(1.0, min(float(connect_timeout_seconds), 120.0))
+        self._max_connections = int(max_connections)
+        self._transfer_budget = transfer_budget
+        self._transport_meter = transport_meter
+        if self._max_connections < 1 or self._max_connections > 64:
+            raise ValueError("proxy relay max_connections must be between 1 and 64")
+        encoded = base64.b64encode(f"{username}:{password}".encode("utf-8"))
+        self._authorization = bytearray(b"Basic " + encoded)
+        self._server: _RelayServer | None = None
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._accepted = 0
+        self._rejected = 0
+        self._active = 0
+        self._client_to_upstream_bytes = 0
+        self._upstream_to_client_bytes = 0
+        self._status = "created"
+        self._client_sockets: set[socket.socket] = set()
+        self._upstream_sockets: set[socket.socket] = set()
+
+    @property
+    def address(self) -> tuple[str, int]:
+        if self._server is None:
+            raise RuntimeError("proxy relay is not started")
+        host, port = self._server.server_address[:2]
+        return str(host), int(port)
+
+    def _allowed(self, host: str) -> bool:
+        value = host.lower().strip(".")
+        return any(value == suffix or value.endswith("." + suffix) for suffix in self._allowed_hosts)
+
+    @staticmethod
+    def _read_headers(sock: socket.socket) -> bytes:
+        data = bytearray()
+        while b"\r\n\r\n" not in data:
+            chunk = sock.recv(min(4096, MAX_HEADER_BYTES - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+            if len(data) >= MAX_HEADER_BYTES:
+                raise ValueError("CONNECT headers exceed the relay limit")
+        return bytes(data)
+
+    @staticmethod
+    def _reply(client: socket.socket, status: int, reason: str) -> None:
+        client.sendall(f"HTTP/1.1 {status} {reason}\r\nConnection: close\r\n\r\n".encode("ascii"))
+
+    def _parse_target(self, request: bytes) -> tuple[str, int]:
+        try:
+            line = request.split(b"\r\n", 1)[0].decode("ascii", errors="strict")
+            method, target, version = line.split(" ")
+            host, port_text = target.rsplit(":", 1)
+            port = int(port_text)
+        except (UnicodeDecodeError, ValueError):
+            raise ValueError("invalid CONNECT request") from None
+        if method != "CONNECT" or version not in {"HTTP/1.0", "HTTP/1.1"}:
+            raise TypeError("CONNECT is required")
+        if port != 443 or not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", host) or not self._allowed(host):
+            raise PermissionError("CONNECT target is not allowed")
+        return host.lower(), port
+
+    def _tunnel(
+        self,
+        client: socket.socket,
+        upstream: socket.socket,
+        transport_generation: int | None,
+    ) -> None:
+        sockets = (client, upstream)
+        while True:
+            readable, _, _ = select.select(sockets, (), (), self._timeout)
+            if not readable:
+                return
+            for source in readable:
+                payload = source.recv(65536)
+                if not payload:
+                    return
+                if self._transfer_budget is not None:
+                    try:
+                        permitted = self._transfer_budget(len(payload))
+                    except Exception:
+                        permitted = False
+                    if not permitted:
+                        return
+                destination = upstream if source is client else client
+                destination.sendall(payload)
+                with self._lock:
+                    if source is client:
+                        self._client_to_upstream_bytes += len(payload)
+                        if self._transport_meter is not None:
+                            self._transport_meter.record_tunnel_client_to_upstream(
+                                len(payload), generation=transport_generation
+                            )
+                    else:
+                        self._upstream_to_client_bytes += len(payload)
+                        if self._transport_meter is not None:
+                            self._transport_meter.record_tunnel_upstream_to_client(
+                                len(payload), generation=transport_generation
+                            )
+
+    def _handle(self, client: socket.socket) -> None:
+        client.settimeout(self._timeout)
+        upstream: socket.socket | None = None
+        counted_active = False
+        with self._lock:
+            rejected = self._status != "running" or len(self._client_sockets) >= self._max_connections
+            if rejected:
+                self._rejected += 1
+            else:
+                self._client_sockets.add(client)
+        if rejected:
+            try:
+                self._read_headers(client)
+                self._reply(client, 503, "Service Unavailable")
+            except OSError:
+                pass
+            return
+        try:
+            request = self._read_headers(client)
+            try:
+                host, port = self._parse_target(request)
+            except TypeError:
+                with self._lock:
+                    self._rejected += 1
+                self._reply(client, 405, "Method Not Allowed")
+                return
+            except (ValueError, PermissionError):
+                with self._lock:
+                    self._rejected += 1
+                self._reply(client, 403, "Forbidden")
+                return
+            upstream = socket.create_connection(self._upstream, timeout=self._timeout)
+            with self._lock:
+                if self._status != "running":
+                    raise OSError("proxy relay is closing")
+                self._upstream_sockets.add(upstream)
+            authorization = bytes(self._authorization)
+            upstream.sendall(
+                f"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n".encode("ascii")
+                + b"Proxy-Connection: Keep-Alive\r\nProxy-Authorization: " + authorization + b"\r\n\r\n"
+            )
+            response = self._read_headers(upstream)
+            status_line = response.split(b"\r\n", 1)[0]
+            if not re.match(br"HTTP/1\.[01] 200(?: |$)", status_line):
+                self._reply(client, 502, "Bad Gateway")
+                return
+            with self._lock:
+                self._accepted += 1
+                self._active += 1
+                counted_active = True
+            client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            generation = getattr(self._transport_meter, "generation", None)
+            observe_tunnel = getattr(self._transport_meter, "record_tunnel_observed", None)
+            if callable(observe_tunnel):
+                observe_tunnel(generation=generation)
+            self._tunnel(client, upstream, generation)
+        except (OSError, ValueError):
+            # Once CONNECT succeeded, only opaque TLS bytes or EOF are legal.
+            # In particular, shutdown must not inject a plaintext 502 into TLS.
+            if not counted_active:
+                try:
+                    self._reply(client, 502, "Bad Gateway")
+                except OSError:
+                    pass
+        finally:
+            if upstream is not None:
+                try:
+                    upstream.close()
+                except OSError:
+                    pass
+            with self._lock:
+                self._client_sockets.discard(client)
+                if upstream is not None:
+                    self._upstream_sockets.discard(upstream)
+                if counted_active:
+                    self._active -= 1
+
+    def start(self) -> None:
+        if self._server is not None:
+            raise RuntimeError("proxy relay is already started")
+        relay = self
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self) -> None:
+                relay._handle(self.request)
+
+        self._server = _RelayServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, name="proxy-connect-relay", daemon=True)
+        self._status = "running"
+        self._thread.start()
+
+    def close(self) -> None:
+        server, thread = self._server, self._thread
+        with self._lock:
+            self._status = "closing"
+            sockets = tuple(self._client_sockets | self._upstream_sockets)
+        if server is not None:
+            server.shutdown()
+        for connection in sockets:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                connection.close()
+            except OSError:
+                pass
+        if server is not None:
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=2)
+        self._server = None
+        self._thread = None
+        for index in range(len(self._authorization)):
+            self._authorization[index] = 0
+        with self._lock:
+            self._active = 0
+            self._client_sockets.clear()
+            self._upstream_sockets.clear()
+            self._status = "closed"
+
+    def audit_summary(self) -> dict[str, int | str]:
+        with self._lock:
+            return {
+                "transport": "loopback_connect_relay",
+                "measurement": "exact_forwarded_tls_payload_bytes",
+                "status": self._status,
+                "accepted_connections": self._accepted,
+                "rejected_connections": self._rejected,
+                "active_connections": self._active,
+                "client_to_upstream_bytes": self._client_to_upstream_bytes,
+                "upstream_to_client_bytes": self._upstream_to_client_bytes,
+                "tunnel_bytes": self._client_to_upstream_bytes + self._upstream_to_client_bytes,
+            }
+
+    def __enter__(self) -> "ProxyConnectRelay":
+        self.start()
+        return self
+
+    def __exit__(self, *_args) -> None:
+        self.close()
+
+
+__all__ = ["ProxyConnectRelay"]

@@ -1,0 +1,19 @@
+# Example only. Replace all values with an approved business search list.
+[search]
+tenant_id = "example-tenant"
+marketplace = "US"
+subject_type = "own"
+search_depth = 3
+language = "en_US"
+device = "desktop"
+delivery_region = "US"
+raw_html_dir = "outputs/search-rank-raw"
+live_collection_enabled = false
+
+[search.rules]
+rank_change_threshold = 5
+rule_version = "product-watch-v1"
+
+# D owns any periodic schedule.  A real one-off run additionally requires both
+# ``--live --permit-live`` and ``live_collection_enabled = true`` in an approved
+# config containing a compatible [worker] proxy/capacity configuration.

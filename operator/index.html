@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>普通爬虫</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body data-csrf="__CSRF__">
+  <main>
+    <header>
+      <p class="eyebrow">Amazon Collection · 本机</p>
+      <h1>普通爬虫</h1>
+      <p class="muted">上传 Excel，确认清单后启动。上传和预览不会访问 Amazon。</p>
+      <div class="portal-links">
+        <a class="portal-link" href="__CONSOLE_URL__" target="_blank" rel="noopener">打开运行大屏</a>
+        <span>长期数据空间：<code>__BUSINESS_TENANT__</code></span>
+      </div>
+    </header>
+
+    <section class="card" aria-labelledby="upload-title">
+      <div class="section-title">
+        <span class="step">1</span>
+        <div><h2 id="upload-title">上传并校验</h2><p>仅支持 .xlsx，最多 5,000 个唯一 ASIN。</p></div>
+      </div>
+      <form id="upload-form">
+        <label class="drop" for="workbook"><strong>选择 Excel 文件</strong><span id="file-name">尚未选择</span></label>
+        <input id="workbook" name="file" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required>
+        <button type="submit">上传并预览</button>
+      </form>
+      <div id="selection" class="selection hidden">
+        <label>工作表<select id="sheet"></select></label>
+        <label>ASIN 列<select id="column"></select></label>
+        <button id="apply-selection" type="button">应用选择</button>
+      </div>
+      <div id="preview" class="hidden" aria-live="polite"></div>
+    </section>
+
+    <section class="card" aria-labelledby="start-title">
+      <div class="section-title">
+        <span class="step">2</span>
+        <div><h2 id="start-title">确认启动</h2><p>选择清单类型；默认单 Worker，双 Worker 为实验选项。</p></div>
+      </div>
+      <div class="controls">
+        <label>清单类型
+          <select id="subject-type">
+            <option value="own">自有 ASIN</option>
+            <option value="competitor">竞品 ASIN</option>
+            <option value="candidate">候选竞品</option>
+          </select>
+        </label>
+        <label>Worker 数
+          <select id="worker-count">
+            <option value="1">1（默认）</option>
+            <option value="2">2（实验性）</option>
+          </select>
+        </label>
+        <button id="start" type="button" disabled>开始采集</button>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="progress-title">
+      <div class="section-title">
+        <span class="step">3</span>
+        <div><h2 id="progress-title">当前批次</h2><p id="batch-summary">暂无批次</p></div>
+      </div>
+      <progress id="progress" max="100" value="0">0%</progress>
+      <div id="metrics" class="metrics"></div>
+      <div class="controls">
+        <button id="stop" class="danger" type="button" disabled>停止当前批次</button>
+        <a id="batch-dashboard" class="portal-link hidden" target="_blank" rel="noopener">查看本批次大屏</a>
+        <div id="downloads" class="downloads"></div>
+      </div>
+      <table>
+        <thead><tr><th>ASIN</th><th>状态</th><th>安全错误</th></tr></thead>
+        <tbody id="items"><tr><td colspan="3" class="empty">暂无数据</td></tr></tbody>
+      </table>
+    </section>
+
+    <p id="notice" class="notice" role="status" aria-live="polite"></p>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
