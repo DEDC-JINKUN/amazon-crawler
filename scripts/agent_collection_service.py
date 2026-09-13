@@ -73,6 +73,22 @@ def effective_worker_count(requested: int, capacity_fact: dict[str, Any] | None,
     return min(requested,process_limit,capacity_limit)
 
 
+def worker_pool_status(worker: Any, processes: list[Any], *, requested: int, effective: int) -> dict[str, Any]:
+    if worker is not None:
+        status = dict(worker.status())
+        alive = 1 if status.get("state") in {"starting", "running", "recovering", "blocked"} else 0
+    else:
+        alive = sum(process.poll() is None for process in processes)
+        status = {"state": "running" if alive == effective else "failed"}
+    status.update({
+        "requested_workers": int(requested),
+        "effective_workers": int(effective),
+        "alive_workers": int(alive),
+        "capacity_backpressure": int(effective) < int(requested),
+    })
+    return status
+
+
 class RefreshOnlyStorageView:
     """Expose refresh claims while making the ordinary task queue unreachable."""
 
@@ -368,9 +384,7 @@ def main(argv: list[str] | None = None) -> int:
     worker = AgentRefreshWorker(storage=storage,adapter_factory=lambda: _build_http_adapter(config),config=config,poll_seconds=args.poll_seconds,lease_seconds=args.lease_seconds) if effective==1 else None
     worker_processes=[]
     def pool_status():
-        if worker is not None: return worker.status()
-        alive=sum(process.poll() is None for process in worker_processes)
-        return {'state':'running' if alive==effective else 'failed','requested_workers':args.worker_count,'effective_workers':effective,'alive_workers':alive,'capacity_backpressure':effective<args.worker_count}
+        return worker_pool_status(worker, worker_processes, requested=args.worker_count, effective=effective)
     reporting_repository = WatchDeliveryRepository(dsn)
     server = None
     console_server = None

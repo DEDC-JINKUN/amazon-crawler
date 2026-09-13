@@ -5,6 +5,7 @@ param(
     [string]$ConfigPath = 'data\owned_us_asin_20260902_full_01\owned_us_full.toml',
     [string]$OutputDir = 'data\owned_us_asin_20260902_full_01',
     [int]$Port = 8765,
+    [ValidateRange(1,8)][int]$WorkerCount = 1,
     [int]$ConsolePort = 8770,
     [string]$ConsoleTenantId = 'amazon_us_main',
     [string]$OperatorBaseUrl = 'http://127.0.0.1:8772'
@@ -16,6 +17,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $python = Join-Path $root '.venv\Scripts\python.exe'
 $hostScript = Join-Path $PSScriptRoot 'crawler_process_host.py'
 $serviceScript = Join-Path $PSScriptRoot 'agent_collection_service.py'
+$campaignWorkerScript = Join-Path $PSScriptRoot 'campaign_worker_process.py'
 $workerScript = Join-Path $PSScriptRoot 'amazon_us_worker.py'
 $proxyPoolScript = Join-Path $PSScriptRoot 'proxy_session_pool.py'
 $proxyCanaryScript = Join-Path $PSScriptRoot 'proxy_canary.py'
@@ -69,10 +71,11 @@ function Get-CredentialGeneration {
     finally { $sha.Dispose() }
 }
 
-function Get-AgentRuntimeFingerprint {
+function Get-AgentRuntimeFingerprint([int]$RuntimeWorkerCount) {
     $resolvedConfig = Resolve-ProjectPath $ConfigPath
     $runtimeFiles = @(
         $serviceScript,
+        $campaignWorkerScript,
         $workerScript,
         $proxyPoolScript,
         $proxyCanaryScript,
@@ -107,6 +110,7 @@ function Get-AgentRuntimeFingerprint {
         "$normalized`n$fileHash"
     }
     $parts += "credential_generation`n$(Get-CredentialGeneration)"
+    $parts += "worker_count`n$RuntimeWorkerCount"
     $parts += "console_tenant_id`n$ConsoleTenantId"
     $parts += "operator_base_url`n$OperatorBaseUrl"
     $sha = [Security.Cryptography.SHA256]::Create()
@@ -139,10 +143,13 @@ function Get-VerifiedHost($Lock) {
     return $process
 }
 
-function Test-CurrentRuntime($Lock) {
+function Test-CurrentRuntime($Lock, [switch]$MatchRequestedWorkerCount) {
     if ($null -eq $Lock -or [string]$Lock.schema -ne 'amazon-us-agent-service-lock-v1') { return $false }
     if ([string]$Lock.tenant_id -ne $TenantId -or [string]$Lock.url -ne $url -or [string]$Lock.console_url -ne $consoleUrl) { return $false }
-    try { $expectedFingerprint = Get-AgentRuntimeFingerprint } catch { return $false }
+    try { $lockedWorkerCount = [int]$Lock.worker_count } catch { return $false }
+    if ($lockedWorkerCount -lt 1 -or $lockedWorkerCount -gt 8) { return $false }
+    if ($MatchRequestedWorkerCount -and $lockedWorkerCount -ne $WorkerCount) { return $false }
+    try { $expectedFingerprint = Get-AgentRuntimeFingerprint $lockedWorkerCount } catch { return $false }
     return [string]$Lock.runtime_fingerprint -eq $expectedFingerprint
 }
 
@@ -242,7 +249,7 @@ if ($null -ne $hostProcess) {
     $consoleLive = Get-ConsoleLive
     $consoleOwner = Get-ListenerOwner $ConsolePort
     if ($consoleLive -and $consoleOwner -ne $hostProcess.Id) { throw 'agent service primary console has an unmanaged listener' }
-    if ($live.Ok -and (Test-CurrentRuntime $lock) -and $consoleLive) { Write-Host "Agent service: already running pid=$($hostProcess.Id) url=$url console=$consoleUrl"; exit 0 }
+    if ($live.Ok -and (Test-CurrentRuntime $lock -MatchRequestedWorkerCount) -and $consoleLive) { Write-Host "Agent service: already running pid=$($hostProcess.Id) url=$url console=$consoleUrl"; exit 0 }
     if ($live.Ok) { $hasLiveManagedEndpoint = $true } else { $hasLiveManagedEndpoint = $consoleLive }
     if ($hasLiveManagedEndpoint) {
         Write-Host "Agent service: restarting stale controlled runtime pid=$($hostProcess.Id)"
@@ -263,7 +270,7 @@ if (Get-ConsoleLive) { throw 'agent service primary console has an unmanaged lis
 Remove-ControlFiles
 $resolvedConfig = Resolve-ProjectPath $ConfigPath
 $resolvedOutput = Resolve-ProjectPath $OutputDir
-foreach ($required in @($python,$hostScript,$serviceScript,$workerScript,$proxyPoolScript,$proxyCanaryScript,$proxyCapacityGateScript,$collectionApiScript,$collectionStorageScript,$postgresStorageScript,$consoleScript,$consoleIndex,$consoleApp,$consoleStyles,$resolvedConfig)) {
+foreach ($required in @($python,$hostScript,$serviceScript,$campaignWorkerScript,$workerScript,$proxyPoolScript,$proxyCanaryScript,$proxyCapacityGateScript,$collectionApiScript,$collectionStorageScript,$postgresStorageScript,$consoleScript,$consoleIndex,$consoleApp,$consoleStyles,$resolvedConfig)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "agent_service_file_missing:$required" }
 }
 [IO.Directory]::CreateDirectory($resolvedOutput) | Out-Null
@@ -273,6 +280,7 @@ $request = [ordered]@{
     arguments = @(
         $serviceScript,'--config',$resolvedConfig,'--output-dir',$resolvedOutput,
         '--tenant-id',$TenantId,'--subject-type','own','--host','127.0.0.1','--port',[string]$Port,
+        '--worker-count',[string]$WorkerCount,
         '--console-port',[string]$ConsolePort,'--console-tenant-id',$ConsoleTenantId,'--operator-base-url',$OperatorBaseUrl
     )
     working_directory = $root
@@ -285,7 +293,7 @@ $hostProcess = Start-Process -FilePath $python -ArgumentList $hostArgumentLine `
     -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $stdoutPath `
     -RedirectStandardError $stderrPath -PassThru
 $hostProcess.Refresh()
-$fingerprint = Get-AgentRuntimeFingerprint
+$fingerprint = Get-AgentRuntimeFingerprint $WorkerCount
 $newLock = [ordered]@{
     schema = 'amazon-us-agent-service-lock-v1'
     pid = $hostProcess.Id
@@ -293,6 +301,7 @@ $newLock = [ordered]@{
     tenant_id = $TenantId
     url = $url
     console_url = $consoleUrl
+    worker_count = $WorkerCount
     runtime_fingerprint = $fingerprint
     stdout = $stdoutPath
     stderr = $stderrPath

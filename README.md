@@ -102,7 +102,7 @@ python scripts/collection_api.py --backend postgres --dsn "$env:AMAZON_US_POSTGR
 
 ## Agent 调用爬虫
 
-生产入口把 Collection API 与一个 `refresh-only` Worker 作为同一受控服务。Agent 只能查询既有数据，或一次提交 1 至 5 个已登记 ASIN 的按需刷新；不能触发全量采集。普通 Agent 命令会先幂等确保本机服务已启动，不需要先跑健康检查。
+生产入口把 Collection API 与容量感知的 `refresh-only` Worker pool 作为同一受控服务。Agent 可查询既有数据、提交 1 至 5 个 ASIN 的按需刷新，或通过 campaign 一次提交最多 5,000 个已登记 ASIN；campaign 支持状态查询、等待终态和取消未开始成员。大批次能力不等于自动放行：服务会按新鲜 canary 容量降低实际 Worker 数，Operator 在请求的 Worker 数不可用时会在提交前拒绝。
 
 Agent 调用使用 DPAPI 派生的 scoped key，子进程不会得到 PostgreSQL DSN、代理密码或服务主密钥：
 
@@ -127,6 +127,8 @@ Agent 调用使用 DPAPI 派生的 scoped key，子进程不会得到 PostgreSQL
 带 `-Wait` 的刷新会等待 PostgreSQL job 进入 `completed`、`failed` 或 `cancelled`，并返回最新商品快照、evidence、请求到终态的耗时及可用流量字段。等待客户端每次只轮询一个job、请求间隔至少1.1秒，并遵守本机API的`Retry-After`；CLI自行以UTF-8输出JSON，不依赖Windows当前代码页。
 
 同一次 Agent 批量的最多5条由一个runner run处理，但容量按当时实际可领取的1至5条计算。商品广度默认每ASIN一个代理会话；同一ASIN的评论分页在该会话内粘滞。`agent-health`分别报告`processed_actions`、`succeeded_actions`、`failed_actions`与`blocked_actions`；兼容字段`completed_actions`只等于成功数，不再表示已处理数。Agent与普通Worker共享原子容量reservation：每次claim和创建新槽前复核TTL，只使用分配给自己的生产槽和最多两个有界替换槽；耗尽内部HTTP重试的transport-bad槽会隔离，下一ASIN不得复用。HTTP challenge最多换一个出口，并只允许一次stock Firefox验证；Firefox仍为challenge即熔断。拒绝事实持久化并通过`/readyz`与Console解释，不做无限轮换、验证码填写/破解、登录或个人Cookie读取。
+
+Agent 服务 Worker 数由 `-AgentWorkerCount 1..8` 请求，并纳入运行指纹。`/readyz` 同时返回 requested/effective/alive Worker 数；若代理容量不足，effective 会自动降低。人工 Operator 与 Agent 都使用同一 `collection_campaign` 事实源，Operator 的 JSON/CSV 只是该 campaign 的本地投影。
 
 本机只读运营控制台：
 

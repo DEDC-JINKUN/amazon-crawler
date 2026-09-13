@@ -59,10 +59,12 @@ class OperatorSettings:
     python_executable: Path | None = None
     powershell_executable: str = "powershell.exe"
     port: int = 8772
+    agent_port: int = 8765
     internal_console_port: int = 8773
     dashboard_port: int = 8770
     business_tenant_id: str = "amazon_us_main"
     recovery_max_seconds: int = 5400
+    campaign_deadline_seconds: int = 86400
     session_seconds: int = 1200
     fake_runner: bool = False
     fake_delay_seconds: float = 0.05
@@ -74,13 +76,15 @@ class OperatorSettings:
         self.config_path = Path(self.config_path).resolve()
         self.vault_path = Path(self.vault_path).resolve()
         self.python_executable = Path(self.python_executable or sys.executable).resolve()
-        if not all(1 <= int(value) <= 65535 for value in (self.port, self.internal_console_port, self.dashboard_port)):
+        if not all(1 <= int(value) <= 65535 for value in (self.port, self.agent_port, self.internal_console_port, self.dashboard_port)):
             raise ValueError("invalid port")
-        if len({int(self.port), int(self.internal_console_port), int(self.dashboard_port)}) != 3:
-            raise ValueError("Operator, dashboard, and internal Console ports must differ")
+        if len({int(self.port), int(self.agent_port), int(self.internal_console_port), int(self.dashboard_port)}) != 4:
+            raise ValueError("Operator, Collection, dashboard, and internal Console ports must differ")
         self.business_tenant_id = str(self.business_tenant_id).strip()
         if not TENANT_RE.fullmatch(self.business_tenant_id):
             raise ValueError("invalid business tenant id")
+        if not 60 <= int(self.campaign_deadline_seconds) <= 604800:
+            raise ValueError("invalid campaign deadline")
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -402,8 +406,9 @@ class BatchManager:
             "-BatchId", str(record["batch_id"]),
             "-WorkerCount", str(record["worker_count"]),
             "-Limit", str(record["requested"]),
+            "-AgentPort", str(self.settings.agent_port),
             "-InternalConsolePort", str(self.settings.internal_console_port),
-            "-RecoveryMaxSeconds", str(self.settings.recovery_max_seconds),
+            "-CampaignDeadlineSeconds", str(self.settings.campaign_deadline_seconds),
             "-PythonPath", str(self.settings.python_executable),
         ]
 
@@ -552,7 +557,11 @@ class BatchManager:
         if record.get('status') in TERMINAL or record.get('status') == 'cleanup_pending':
             return record
         progress = _read_json(batch_dir / "progress.json") or {}
-        allowed = {"status", "requested", "claimed", "completed", "variant", "failed", "blocked", "pending", "latest_error", "items", "finished_at"}
+        allowed = {
+            "status", "requested", "claimed", "completed", "variant", "failed", "blocked", "stopped", "pending",
+            "latest_error", "items", "finished_at", "campaign_id", "campaign_status",
+            "requested_workers", "effective_workers", "alive_workers",
+        }
         for key in allowed:
             if key in progress:
                 if key == "latest_error" and not progress[key]:

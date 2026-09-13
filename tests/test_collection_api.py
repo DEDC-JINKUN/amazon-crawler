@@ -459,6 +459,7 @@ class CollectionApiTests(unittest.TestCase):
 
         class ReadyRepository:
             tenant_id = "tenant-a"
+            subject_type = "competitor"
 
             def load_schema_contract(self):
                 return {"item_state": ["lease_expires_at", "lease_owner", "lease_token", "next_retry_at"], "collection_evidence": ["context_json", "transfer_bytes"]}
@@ -473,6 +474,7 @@ class CollectionApiTests(unittest.TestCase):
             with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/readyz", timeout=2) as response:
                 payload = json.loads(response.read())
             self.assertEqual(payload["tenant_id"], "tenant-a")
+            self.assertEqual(payload["subject_type"], "competitor")
         finally:
             server.shutdown()
             server.server_close()

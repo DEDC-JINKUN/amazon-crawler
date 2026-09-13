@@ -221,6 +221,21 @@ def _agent_product_summary(payload: dict[str, Any]) -> dict[str, Any]:
 class CollectionHandler(BaseHTTPRequestHandler):
     server: "CollectionServer"
 
+    def _discard_auth_body(self, limit: int = 1048576) -> None:
+        """Drain a bounded denied request body so Windows can deliver the JSON error before close."""
+        if self.command not in {"POST", "PUT", "PATCH"}:
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            self.close_connection = True
+            return
+        if length < 0 or length > limit:
+            self.close_connection = True
+            return
+        if length:
+            self.rfile.read(length)
+
     def _send_json(self, status: int, payload: dict[str, Any], headers: dict[str, str] | None = None) -> None:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=_json_default).encode("utf-8")
         self.send_response(status)
@@ -255,6 +270,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 principal = AgentPrincipal(agent_id, self.server.agent_scopes[agent_id])
                 if required_scope in principal.scopes:
                     if not self.server.allow_request(principal.agent_id):
+                        self._discard_auth_body()
                         self._send_json(
                             HTTPStatus.TOO_MANY_REQUESTS, {"error": "rate_limited"},
                             {"Retry-After": str(self.server.retry_after_seconds(principal.agent_id))},
@@ -262,6 +278,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
                         self._audit(principal, action, resource, "rate_limited")
                         return None
                     return principal
+                self._discard_auth_body()
                 self._send_json(HTTPStatus.FORBIDDEN, {"error": "insufficient_scope", "required_scope": required_scope})
                 self._audit(principal, action, resource, "forbidden")
                 return None
@@ -272,12 +289,14 @@ class CollectionHandler(BaseHTTPRequestHandler):
             principal = AgentPrincipal("local-operator", frozenset({"read", "refresh", "watch_write"}))
             if self.server.allow_request(principal.agent_id):
                 return principal
+            self._discard_auth_body()
             self._send_json(
                 HTTPStatus.TOO_MANY_REQUESTS, {"error": "rate_limited"},
                 {"Retry-After": str(self.server.retry_after_seconds(principal.agent_id))},
             )
             self._audit(principal, action, resource, "rate_limited")
             return None
+        self._discard_auth_body()
         self.send_response(HTTPStatus.UNAUTHORIZED)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("WWW-Authenticate", "ApiKey")
@@ -313,6 +332,9 @@ class CollectionHandler(BaseHTTPRequestHandler):
             tenant_id = getattr(self.server.repository, "tenant_id", None)
             if tenant_id:
                 payload["tenant_id"] = tenant_id
+            subject_type = getattr(self.server.repository, "subject_type", None)
+            if subject_type:
+                payload["subject_type"] = subject_type
             status_loader = getattr(self.server, "refresh_worker_status", None)
             if callable(status_loader):
                 worker_status = status_loader()

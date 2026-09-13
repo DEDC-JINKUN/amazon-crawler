@@ -20,9 +20,11 @@ def main(argv=None) -> int:
     parser.add_argument("--stdout", type=Path, required=True)
     parser.add_argument("--stderr", type=Path, required=True)
     parser.add_argument("--port", type=int, choices=range(1, 65536), required=True)
+    parser.add_argument("--agent-port", type=int, choices=range(1, 65536), required=True)
     parser.add_argument("--internal-console-port", type=int, choices=range(1, 65536), required=True)
     parser.add_argument("--dashboard-port", type=int, choices=range(1, 65536), required=True)
     parser.add_argument("--business-tenant-id", required=True)
+    parser.add_argument("--campaign-deadline-seconds", type=int, choices=range(60, 604801), required=True)
     parser.add_argument("--fake-runner", action="store_true")
     args = parser.parse_args(argv)
     python = args.python.resolve()
@@ -39,10 +41,12 @@ def main(argv=None) -> int:
     data_root.mkdir(parents=True, exist_ok=True)
     command = [
         str(service_python), str(service), "--host", "127.0.0.1", "--port", str(args.port),
+        "--agent-port", str(args.agent_port),
         "--data-root", str(data_root), "--config-path", str(config), "--vault-path", str(vault),
         "--internal-console-port", str(args.internal_console_port),
         "--dashboard-port", str(args.dashboard_port),
         "--business-tenant-id", args.business_tenant_id,
+        "--campaign-deadline-seconds", str(args.campaign_deadline_seconds),
         "--worker-python", str(python),
     ]
     if args.fake_runner:

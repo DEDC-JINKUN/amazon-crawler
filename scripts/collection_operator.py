@@ -281,12 +281,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8772)
+    parser.add_argument("--agent-port", type=int, default=8765)
     parser.add_argument("--data-root", type=Path, default=ROOT / "data" / "operator")
     parser.add_argument("--config-path", type=Path, default=ROOT / "config" / "amazon_us.windows.toml")
     parser.add_argument("--vault-path", type=Path, default=ROOT / "data" / "secure" / "amazon_us.secrets.dpapi")
     parser.add_argument("--internal-console-port", type=int, default=8773)
     parser.add_argument("--dashboard-port", type=int, default=8770)
     parser.add_argument("--business-tenant-id", default="amazon_us_main")
+    parser.add_argument("--campaign-deadline-seconds", type=int, default=86400)
     parser.add_argument("--worker-python", type=Path)
     parser.add_argument("--fake-runner", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--fake-delay-seconds", type=float, default=0.05, help=argparse.SUPPRESS)
@@ -301,9 +303,11 @@ def main(argv=None) -> int:
         config_path=args.config_path,
         vault_path=args.vault_path,
         port=args.port,
+        agent_port=args.agent_port,
         internal_console_port=args.internal_console_port,
         dashboard_port=args.dashboard_port,
         business_tenant_id=args.business_tenant_id,
+        campaign_deadline_seconds=args.campaign_deadline_seconds,
         python_executable=args.worker_python,
         fake_runner=args.fake_runner,
         fake_delay_seconds=args.fake_delay_seconds,

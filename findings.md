@@ -30,3 +30,14 @@
 - `D:/woring/爬虫/.worktrees/amazon-integrated-deploy` 包含针对批次证据归属的隔离重构和 722 passed 的现有回归记录，但 Worker/启动器/页面尚未接入新模型，发布矩阵仍为 0/3；其 `.git` 管理目录已丢失，不能直接作为可审计提交源。
 
 当前裁决：可以操控 campaign，但不应启动全量；多 Worker 问题需要在一个权威源码基线上完成统一批次、统一容量和统一终态后再发布。
+
+- 用户已确认公共 seam。采用外置 Git 目录 `D:/woring/爬虫/.codex/recovered-git/amazon-integrated-deploy-20260913` 将当前隔离快照登记为基线，未移动或覆盖损坏的原 `.git` 文件。
+- 第一条纵向修复完成：`agent_service_control.ps1` 和 `run_owned_full_secure.ps1` 可显式传入有界 Worker 数；该值进入 runtime fingerprint 与 lock，避免请求 Worker 数变化后误复用旧单 Worker 服务。
+- 共享模块决策：以既有 `collection_campaign`/`collection_campaign_member`/`refresh_request`/本轮 evidence 作为唯一批次事实源。Operator 不再自行启动 ordinary two-worker Controller；它通过 loopback Collection campaign 接口提交、查询和取消，实际并发由 Agent service 的容量感知 Worker pool 管理。
+- 该 seam 有两个 Adapter：生产使用 `AmazonCollectionClient` 的 loopback HTTP Adapter，测试使用内存 Fake Adapter。Operator 本地 JSON/CSV 仅是 campaign 快照的可下载投影，不再决定终态。
+- Operator runner 在提交前必须校验 readiness 的 tenant 与 `effective_workers/alive_workers`；请求 2W 但服务因容量降为 1W 时拒绝提交，不再让 Worker 1 占槽后才使 Worker 2 失败。
+- Agent 控制脚本使用 lock 中已记录的 WorkerCount 验证既有运行指纹；普通读/状态命令不会因调用方默认值为 1 而把健康的 2W 服务重启成 1W。只有显式 start 才要求当前 WorkerCount 与请求一致。
+- Operator runner 连续三次无法读取 campaign 时尝试取消同一 campaign，持久化固定脱敏错误并失败退出；外部取消/过期不再被标成成功。
+- campaign 成员 `job_status=failed` 但 `item_status=blocked` 或 recovery outcome 为 access control 时，Operator 继续显示 blocked，不合并进普通 failed。
+- `/readyz` 现在公开当前 repository 的 `subject_type`；Operator 与 tenant 一起核对，避免 own/competitor/candidate 误路由。
+- Windows 上认证拒绝前关闭仍有未读请求体的 socket 会偶发 RST；服务端有界 drain 与客户端对 10053/10054 的一次有限重试分别覆盖拒绝响应和幂等 campaign 调用。

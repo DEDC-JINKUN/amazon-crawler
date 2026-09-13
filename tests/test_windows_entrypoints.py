@@ -264,6 +264,7 @@ def test_agent_service_runtime_fingerprint_covers_worker_pool_api_storage_and_co
     assert "function Get-AgentRuntimeFingerprint" in control
     for dependency in (
         "agent_collection_service.py",
+        "campaign_worker_process.py",
         "amazon_us_worker.py",
         "proxy_session_pool.py",
         "proxy_canary.py",
@@ -298,12 +299,42 @@ def test_agent_service_control_manages_primary_console_with_the_api():
     assert "Get-FileHash" not in control
 
 
+def test_agent_service_worker_count_is_a_bounded_fingerprinted_control_setting():
+    control = (ROOT / "scripts" / "agent_service_control.ps1").read_text(encoding="utf-8")
+    wrapper = (ROOT / "run_owned_full_secure.ps1").read_text(encoding="utf-8")
+
+    assert "[ValidateRange(1,8)][int]$WorkerCount = 1" in control
+    assert "'--worker-count',[string]$WorkerCount" in control
+    assert "worker_count = $WorkerCount" in control
+    assert "[ValidateRange(1,8)][int]$AgentWorkerCount = 1" in wrapper
+    assert "'-WorkerCount',[string]$AgentWorkerCount" in wrapper
+    assert "function Get-AgentRuntimeFingerprint([int]$RuntimeWorkerCount)" in control
+    assert '"worker_count`n$RuntimeWorkerCount"' in control
+    status_block = control.split("if ($Mode -eq 'status')", 1)[1].split("if ($Mode -eq 'stop')", 1)[0]
+    start_block = control.split("if ($null -ne $hostProcess)", 1)[1].split("[IO.Directory]::CreateDirectory($controlDir)", 1)[0]
+    assert "-MatchRequestedWorkerCount" not in status_block
+    assert "Test-CurrentRuntime $lock -MatchRequestedWorkerCount" in start_block
+
+
+def test_operator_secure_runner_delegates_to_the_shared_campaign_with_only_the_api_secret():
+    runner = (ROOT / "scripts" / "operator_secure_runner.ps1").read_text(encoding="utf-8")
+
+    assert "operator_campaign_runner.py" in runner
+    assert "operator_controller_host.py" not in runner
+    assert "-SecretNames @('AMAZON_COLLECTION_API_KEY')" in runner
+    assert "AMAZON_US_POSTGRES_DSN" not in runner
+    assert "AMAZON_PROXY_USER" not in runner
+    assert "AMAZON_PROXY_PASS" not in runner
+    assert "[ValidateRange(1,65535)][int]$AgentPort=8765" in runner
+    assert "--base-url \"http://127.0.0.1:$AgentPort\"" in runner
+
+
 def test_agent_service_start_replaces_only_a_verified_ready_stale_runtime():
     control = (ROOT / "scripts" / "agent_service_control.ps1").read_text(encoding="utf-8")
     start_block = control.split("if ($null -ne $hostProcess)", 1)[1]
     start_block = start_block.split("[IO.Directory]::CreateDirectory($controlDir)", 1)[0]
 
-    assert "$live.Ok -and (Test-CurrentRuntime $lock)" in start_block
+    assert "$live.Ok -and (Test-CurrentRuntime $lock -MatchRequestedWorkerCount)" in start_block
     assert "if ($live.Ok)" in start_block
     assert "Stop-Process -Id $hostProcess.Id -Force" in start_block
     assert "Wait-AgentOffline" in start_block

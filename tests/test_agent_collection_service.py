@@ -28,6 +28,23 @@ def test_effective_worker_count_backpressures_to_fresh_capacity_and_process_quot
     assert service.effective_worker_count(12,{'unique_egress_count':50},process_limit=6)==6
 
 
+def test_worker_pool_status_exposes_requested_effective_and_alive_after_capacity_downshift():
+    service = load("agent_collection_service")
+
+    class EmbeddedWorker:
+        def status(self):
+            return {"state": "running", "processed_actions": 3}
+
+    status = service.worker_pool_status(EmbeddedWorker(), [], requested=2, effective=1)
+
+    assert status["state"] == "running"
+    assert status["processed_actions"] == 3
+    assert status["requested_workers"] == 2
+    assert status["effective_workers"] == 1
+    assert status["alive_workers"] == 1
+    assert status["capacity_backpressure"] is True
+
+
 def test_service_parser_exposes_one_managed_primary_console():
     service=load('agent_collection_service')
     args=service.build_parser().parse_args([

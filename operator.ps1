@@ -2,9 +2,11 @@
 param(
     [Parameter(Position=0)][ValidateSet('start','status','stop','open')][string]$Command='status',
     [ValidateRange(1,65535)][int]$Port=8772,
+    [ValidateRange(1,65535)][int]$AgentPort=8765,
     [ValidateRange(1,65535)][int]$InternalConsolePort=8773,
     [ValidateRange(1,65535)][int]$DashboardPort=8770,
     [ValidatePattern('^[A-Za-z0-9_.-]{1,120}$')][string]$BusinessTenantId='amazon_us_main',
+    [ValidateRange(60,604800)][int]$CampaignDeadlineSeconds=86400,
     [string]$DataRoot='data\operator',
     [string]$ConfigPath='config\amazon_us.windows.toml',
     [string]$VaultPath='data\secure\amazon_us.secrets.dpapi',
@@ -168,9 +170,10 @@ try{
     $stderr=Join-Path $control 'operator.stderr.log'
     $startArguments=@($serviceStarter,'--python',$python,'--service',$service,'--working-directory',$root,
         '--data-root',$data,'--config',$config,'--vault',$vault,'--stdout',$stdout,'--stderr',$stderr,
-        '--port',[string]$Port,'--internal-console-port',[string]$InternalConsolePort,
+        '--port',[string]$Port,'--agent-port',[string]$AgentPort,'--internal-console-port',[string]$InternalConsolePort,
         '--dashboard-port',[string]$DashboardPort,
-        '--business-tenant-id',$BusinessTenantId)
+        '--business-tenant-id',$BusinessTenantId,
+        '--campaign-deadline-seconds',[string]$CampaignDeadlineSeconds)
     if($FakeRunner){$startArguments+='--fake-runner'}
     $startResult=& $python @startArguments
     if($LASTEXITCODE-ne0){throw 'Operator service process could not be started.'}

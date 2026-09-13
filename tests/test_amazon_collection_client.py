@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import urllib.error
+import json
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,6 +84,40 @@ def test_request_converts_http_429_retry_after_to_stable_rate_limit_error():
         assert exc.retry_after_seconds == 4.0
     else:
         raise AssertionError("expected AgentRateLimitError")
+
+
+def test_readiness_is_available_through_the_loopback_client(monkeypatch):
+    module = load_client()
+    client = module.AmazonCollectionClient("http://127.0.0.1:8765", "refresh-agent", "key")
+    calls = []
+    monkeypatch.setattr(client, "_request", lambda method, path, payload=None: calls.append((method, path, payload)) or {"ok": True})
+
+    assert client.get_readiness() == {"ok": True}
+    assert calls == [("GET", "/readyz", None)]
+
+
+def test_loopback_connection_abort_is_retried_once_for_idempotent_campaign_calls():
+    module = load_client()
+    client = module.AmazonCollectionClient("http://127.0.0.1:8765", "refresh-agent", "key")
+
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def read(self): return json.dumps({"campaign": {"status": "completed"}}).encode()
+
+    class Opener:
+        def __init__(self): self.calls = 0
+        def open(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise ConnectionAbortedError(10053, "loopback reset")
+            return Response()
+
+    opener = Opener()
+    client._opener = opener
+
+    assert client.get_campaign("campaign-" + "1" * 32)["campaign"]["status"] == "completed"
+    assert opener.calls == 2
 
 
 def test_json_output_forces_utf8_even_when_parent_requests_gbk():

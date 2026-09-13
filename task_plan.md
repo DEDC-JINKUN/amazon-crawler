@@ -29,6 +29,8 @@ queued → canary → reserving → collecting → finalizing → releasing → 
 
 修复顺序：先以隔离 PostgreSQL 和可控适配器跑出失败；再统一批次成员归属与容量预留；最后验证 1/2 Worker 的提交、状态、停止、崩溃恢复和无重复领取。用户确认 seam 前不写新测试或实现。
 
+模块设计：新增一个深模块封装“readiness 校验 → campaign 提交 → 状态投影 → 取消 → 终态回执”。Operator 只调用其单一运行 interface；并发进程只由 Agent service pool 管理，容量降级在 campaign 提交前可见。
+
 ## 进度
 
 - [x] 冻结基线，工作树干净。
@@ -40,7 +42,16 @@ queued → canary → reserving → collecting → finalizing → releasing → 
 - [ ] 同一代码指纹连续三轮全矩阵通过（干净、历史、恢复）。
 - [ ] 审查后部署与非采集运行态验证。
 - [ ] 用户确认 Agent campaign 与 Operator start/status/stop 为本轮公共验收 seam。
-- [ ] 修复多 Worker 容量被首个 Worker独占以及历史结果冒充本轮完成。
+- [x] 用户确认 Agent campaign 与 Operator start/status/stop 为本轮公共验收 seam。
+- [x] 恢复外置 Git 索引基线，保留损坏的原 `.git` 指针不动。
+- [x] Agent 服务安全入口可配置 1–8 个请求 Worker，并把 Worker 数纳入运行指纹。
+- [x] 修复多 Worker 容量被首个 Worker独占以及历史结果冒充本轮完成。
+- [x] 将 Operator runner 切换为 Collection campaign Adapter，删除生产路径对 ordinary two-worker Controller 的依赖。
+- [x] Operator 状态投影保留 campaign ID、请求/实际/存活 Worker 数以及 blocked/failed 区分。
+- [x] Operator 提交前核对 Collection tenant 与 subject scope；campaign 截止时间独立配置。
+- [x] Windows loopback 鉴权响应与幂等 campaign 调用具备有界抗重置处理。
+- [x] 完整非 PG 测试、差异复核与文档一致性验收。
+- [ ] 隔离 PostgreSQL 55444 的 17 个引擎测试（当前环境无法绑定端口）。
 - [ ] 在隔离环境完成 1W/2W 对照；不执行 Amazon live 验证。
 
 ## Errors Encountered
@@ -51,6 +62,13 @@ queued → canary → reserving → collecting → finalizing → releasing → 
 | 工作区根目录 `rg` 遇到若干无权限测试临时目录 | 1 | 后续检索限定到目标仓库并排除 `.worktrees`、pytest 与 outputs。 |
 | 一次 PowerShell 状态组合命令出现 empty pipe parser error | 1 | 拆成简单的 `Test-Path` 命令，未重复原命令。 |
 | 本目录 `.git` 指向已丢失的 worktree 管理目录 | 1 | 将其视为隔离重构快照；暂不做产品改动，先请用户确认公共 seam 和权威源码位置。 |
+| pytest 默认临时目录 `C:/Users/PC/AppData/Local/Temp/pytest-of-PC` 无权限 | 1 | 改用工作区内新的 `--basetemp` 与 cache 目录；同一组测试 3 passed。 |
+| 新增取消测试时把基类方法误插入子类，导致一个完成用例缺少 `submit_campaign` | 1 | 读取测试文件后恢复正确类层级；Operator campaign 测试全部通过。 |
+| 隔离 PostgreSQL 首次启动把 `-o` 参数错误组合成一个 port 值 | 1 | 读取日志确认纯命令参数问题；第二次改为使用集群既有配置。 |
+| 隔离 PostgreSQL 第二次启动被当前执行环境拒绝绑定 `127.0.0.1:55444` | 2 | 日志为 `could not create any TCP/IP sockets: Permission denied`；未尝试生产 55443/5432，改跑无数据库网络的完整回归并把 PG 引擎验收列为未执行。 |
+| 全套回归中的 Collection API 无权限 POST 偶发 WinError 10053 | 1/10 | 根因为拒绝前未读取小请求体；认证拒绝前有界丢弃后连续 20 次通过。 |
+| 第一次请求体丢弃补丁产生 Python 缩进错误 | 1 | 立即读取报错行、修正缩进并先做 `py_compile`；未叠加其他修复。 |
+| campaign cancel 在 Windows loopback 偶发 WinError 10053 | 1 | 在 loopback Client Adapter 对 10053/10054 做一次有限重试；campaign API 场景连续 10 次通过。 |
 
 ## 本轮自测
 

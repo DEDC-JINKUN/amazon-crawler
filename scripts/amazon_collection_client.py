@@ -75,18 +75,25 @@ class AmazonCollectionClient:
 
     def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         data = json.dumps(payload, separators=(",", ":")).encode("utf-8") if payload is not None else None
-        request = Request(
-            f"{self.base_url}{path}", data=data, method=method,
-            headers={"Accept": "application/json", "Content-Type": "application/json", "X-Collection-Agent": self.agent_id, "X-Collection-Agent-Key": self.agent_key},
-        )
-        try:
-            with self._opener.open(request, timeout=self.timeout_seconds) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            if int(exc.code) == 429:
-                retry_after = exc.headers.get("Retry-After") if exc.headers else None
-                raise AgentRateLimitError(_retry_after_seconds(retry_after)) from None
-            raise
+        for attempt in range(2):
+            request = Request(
+                f"{self.base_url}{path}", data=data, method=method,
+                headers={"Accept": "application/json", "Content-Type": "application/json", "X-Collection-Agent": self.agent_id, "X-Collection-Agent-Key": self.agent_key},
+            )
+            try:
+                with self._opener.open(request, timeout=self.timeout_seconds) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                if int(exc.code) == 429:
+                    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                    raise AgentRateLimitError(_retry_after_seconds(retry_after)) from None
+                raise
+            except OSError as exc:
+                socket_error = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
+                if attempt == 0 and socket_error in {10053, 10054}:
+                    continue
+                raise
+        raise OSError("collection loopback request failed")
 
     def get_product(self, asin: str, fields: list[str] | None = None) -> dict[str, Any]:
         suffix = "" if not fields else "?fields=" + ",".join(fields)
@@ -97,6 +104,9 @@ class AmazonCollectionClient:
 
     def get_capabilities(self) -> dict[str, Any]:
         return self._request("GET", "/v1/capabilities")
+
+    def get_readiness(self) -> dict[str, Any]:
+        return self._request("GET", "/readyz")
 
     def submit_campaign(self, asins: list[str], idempotency_key: str, **options: Any) -> dict[str, Any]:
         payload={"asins":asins,"idempotency_key":idempotency_key,**options}

@@ -11,8 +11,10 @@ param(
     [Parameter(Mandatory=$true)][string]$BatchId,
     [ValidateSet(1,2)][int]$WorkerCount=1,
     [ValidateRange(1,5000)][int]$Limit,
+    [ValidateRange(1,65535)][int]$AgentPort=8765,
     [ValidateRange(1,65535)][int]$InternalConsolePort=8773,
     [ValidateRange(1,5400)][int]$RecoveryMaxSeconds=5400,
+    [ValidateRange(60,604800)][int]$CampaignDeadlineSeconds=86400,
     [Parameter(Mandatory=$true)][string]$PythonPath,
     [switch]$SecretsLoaded
 )
@@ -43,7 +45,7 @@ Assert-DirectChild $batch $manifest 'manifest'
 Assert-DirectChild $batch $config 'config'
 $launcher=Resolve-RequiredFile (Join-Path $root 'scripts\secure_dpapi_launcher.ps1')
 $self=Resolve-RequiredFile $PSCommandPath
-$controllerHost=Resolve-RequiredFile (Join-Path $root 'scripts\operator_controller_host.py')
+$campaignRunner=Resolve-RequiredFile (Join-Path $root 'scripts\operator_campaign_runner.py')
 $vault=Resolve-RequiredFile $VaultPath
 
 if(-not$SecretsLoaded){
@@ -51,16 +53,17 @@ if(-not$SecretsLoaded){
     $inner=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$self,
         '-ReleaseRoot',$root,'-OperatorDataRoot',$operatorData,'-BatchDir',$batch,'-ManifestPath',$manifest,'-ConfigPath',$config,
         '-VaultPath',$vault,'-TenantId',$TenantId,'-SubjectType',$SubjectType,'-BatchId',$BatchId,'-WorkerCount',[string]$WorkerCount,
-        '-Limit',[string]$Limit,'-InternalConsolePort',[string]$InternalConsolePort,
-        '-RecoveryMaxSeconds',[string]$RecoveryMaxSeconds,'-PythonPath',$python,'-SecretsLoaded')
-    & $launcher -SecretPath $vault -SecretNames @('AMAZON_PROXY_USER','AMAZON_PROXY_PASS','AMAZON_US_POSTGRES_DSN') `
+        '-Limit',[string]$Limit,'-AgentPort',[string]$AgentPort,'-InternalConsolePort',[string]$InternalConsolePort,
+        '-RecoveryMaxSeconds',[string]$RecoveryMaxSeconds,'-CampaignDeadlineSeconds',[string]$CampaignDeadlineSeconds,
+        '-PythonPath',$python,'-SecretsLoaded')
+    & $launcher -SecretPath $vault -SecretNames @('AMAZON_COLLECTION_API_KEY') `
         -FilePath $shell -ArgumentList $inner
     exit $LASTEXITCODE
 }
 
-if([string]::IsNullOrWhiteSpace($env:AMAZON_US_POSTGRES_DSN)){throw 'secure_environment_unavailable'}
-& $python -B $controllerHost --release-root $root --operator-data-root $operatorData --batch-dir $batch --manifest $manifest --config $config `
-    --tenant-id $TenantId --subject-type $SubjectType --batch-id $BatchId --worker-count $WorkerCount --limit $Limit `
-    --console-port $InternalConsolePort --recovery-seconds $RecoveryMaxSeconds `
-    --powershell ((Get-Process -Id $PID).Path)
+if([string]::IsNullOrWhiteSpace($env:AMAZON_COLLECTION_API_KEY)){throw 'secure_environment_unavailable'}
+& $python -B $campaignRunner --batch-dir $batch --manifest $manifest `
+    --tenant-id $TenantId --subject-type $SubjectType --worker-count $WorkerCount `
+    --expected-count $Limit --deadline-seconds $CampaignDeadlineSeconds `
+    --base-url "http://127.0.0.1:$AgentPort"
 exit $LASTEXITCODE

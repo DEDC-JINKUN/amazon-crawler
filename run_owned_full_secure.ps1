@@ -7,6 +7,7 @@ param(
     [switch]$ConfirmLargeBatch,
     [int]$Port = 8770,
     [int]$AgentPort = 8765,
+    [ValidateRange(1,8)][int]$AgentWorkerCount = 1,
     [string[]]$Asins = @(),
     [string]$JobId,
     [string]$Reason = 'on_demand',
@@ -34,7 +35,8 @@ function Get-AgentControlArguments([string]$ControlMode) {
     return @(
         '-NoProfile','-ExecutionPolicy','Bypass','-File',$agentControl,$ControlMode,
         '-TenantId',$tenant,'-ConfigPath',"$output\owned_us_full.toml",
-        '-OutputDir',$output,'-Port',[string]$AgentPort
+        '-OutputDir',$output,'-Port',[string]$AgentPort,
+        '-WorkerCount',[string]$AgentWorkerCount
     )
 }
 

@@ -316,12 +316,14 @@ def test_service_starter_uses_stable_base_process_and_keeps_worker_runtime(tmp_p
         "--working-directory", str(root), "--data-root", str(tmp_path / "data"),
         "--config", str(config), "--vault", str(vault),
         "--stdout", str(tmp_path / "stdout.log"), "--stderr", str(tmp_path / "stderr.log"),
-        "--port", "8772", "--internal-console-port", "8773", "--dashboard-port", "8770",
-        "--business-tenant-id", "amazon_us_main",
+        "--port", "8772", "--agent-port", "8765", "--internal-console-port", "8773", "--dashboard-port", "8770",
+        "--business-tenant-id", "amazon_us_main", "--campaign-deadline-seconds", "86400",
     ]) == 0
     assert captured["command"][0] == str(base_python.resolve())
     assert captured["command"][captured["command"].index("--worker-python") + 1] == str(worker_python.resolve())
     assert captured["command"][captured["command"].index("--dashboard-port") + 1] == "8770"
+    assert captured["command"][captured["command"].index("--agent-port") + 1] == "8765"
+    assert captured["command"][captured["command"].index("--campaign-deadline-seconds") + 1] == "86400"
     assert json.loads(capsys.readouterr().out)["pid"] == 12345
 
 
@@ -351,6 +353,8 @@ def test_concurrent_start_creates_only_one_batch(tmp_path):
 def test_production_runner_argv_is_fixed_and_contains_no_secret_or_client_command(tmp_path):
     configured = settings(tmp_path)
     configured.fake_runner = False
+    configured.agent_port = 8865
+    configured.campaign_deadline_seconds = 172800
     manager = BatchManager(configured)
     # Build with server-owned values only; this does not launch the command.
     batch_dir = configured.data_root / "batches" / ("batch-" + "0" * 24)
@@ -359,11 +363,46 @@ def test_production_runner_argv_is_fixed_and_contains_no_secret_or_client_comman
     assert isinstance(command, list) and "operator_secure_runner.ps1" in " ".join(command)
     assert "-WorkerCount" in command and "-Limit" in command and "-TenantId" in command
     assert command[command.index("-SubjectType") + 1] == "competitor"
+    assert command[command.index("-AgentPort") + 1] == "8865"
+    assert command[command.index("-CampaignDeadlineSeconds") + 1] == "172800"
     assert command[command.index("-OperatorDataRoot") + 1] == str(configured.data_root)
     assert not any("POSTGRES" in value or "PROXY" in value or "API_KEY" in value for value in command)
     assert not any(value in {"cmd.exe", "/c", "-Command"} for value in command)
     script = (ROOT / "scripts" / "operator_secure_runner.ps1").read_text(encoding="utf-8")
     assert "Start-Process" not in script and "$joined" not in script
+
+
+def test_operator_status_exposes_the_shared_campaign_and_effective_worker_pool(tmp_path):
+    configured = settings(tmp_path)
+    manager = BatchManager(configured)
+    batch_id = "batch-" + "9" * 24
+    batch_dir = configured.data_root / "batches" / batch_id
+    batch_dir.mkdir(parents=True)
+    (batch_dir / "batch.json").write_text(json.dumps({
+        "batch_id": batch_id,
+        "tenant_id": "owned-products",
+        "status": "running",
+        "worker_count": 2,
+        "started_at": "2026-09-13T00:00:00+00:00",
+    }), encoding="utf-8")
+    (batch_dir / "progress.json").write_text(json.dumps({
+        "status": "running",
+        "campaign_id": "campaign-" + "9" * 32,
+        "campaign_status": "active",
+        "requested_workers": 2,
+        "effective_workers": 2,
+        "alive_workers": 2,
+        "requested": 3,
+        "pending": 3,
+    }), encoding="utf-8")
+
+    status = manager.get_batch(batch_id)
+
+    assert status["campaign_id"] == "campaign-" + "9" * 32
+    assert status["campaign_status"] == "active"
+    assert status["requested_workers"] == 2
+    assert status["effective_workers"] == 2
+    assert status["alive_workers"] == 2
 
 
 def test_controller_host_uses_structured_argv_and_propagates_projection_failure(tmp_path, monkeypatch):

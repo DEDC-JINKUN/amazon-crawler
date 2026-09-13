@@ -7,7 +7,7 @@ Collection API 是 Agent 查询采集结果和提交小批按需刷新的统一�
 普通 Agent 直接执行 `agent-get` / `agent-batch` / `agent-refresh -Wait` / `agent-job`；这些命令会先幂等确保固定 tenant 的本机服务已启动。管理员才需要显式使用以下生命周期命令：
 
 ```powershell
-.\run_owned_full_secure.ps1 agent-service
+.\run_owned_full_secure.ps1 agent-service -AgentWorkerCount 2
 .\run_owned_full_secure.ps1 agent-status
 .\run_owned_full_secure.ps1 agent-health
 .\run_owned_full_secure.ps1 agent-stop
@@ -15,7 +15,7 @@ Collection API 是 Agent 查询采集结果和提交小批按需刷新的统一�
 
 锁中的运行时指纹覆盖服务、Worker、代理池、API、存储模块和当前配置文件。只有 PID、StartTime、tenant、URL 均已验证且 `/healthz` 正常的旧版本进程会被受控替换；未知监听器继续 fail closed。
 
-进程身份与业务 readiness 分开：自动确保服务使用 `/healthz`，所以 refresh Worker blocked 后只读查询和 job 回查仍可用；`agent-health` 使用 `/readyz`，新 refresh 也由服务端 readiness Gate 拒绝。refresh Worker健康值分别累计`processed_actions`、`succeeded_actions`、`failed_actions`和`blocked_actions`；兼容字段`completed_actions`只表示成功，不能据此把失败处理误认成商品成功。
+进程身份与业务 readiness 分开：自动确保服务使用 `/healthz`，所以 refresh Worker blocked 后只读查询和 job 回查仍可用；`agent-health` 使用 `/readyz`，新 refresh 也由服务端 readiness Gate 拒绝。readiness 返回 `requested_workers`、`effective_workers`、`alive_workers` 和 `capacity_backpressure`；新鲜 canary 容量不足时 effective 会低于 requested。refresh Worker健康值分别累计`processed_actions`、`succeeded_actions`、`failed_actions`和`blocked_actions`；兼容字段`completed_actions`只表示成功，不能据此把失败处理误认成商品成功。
 
 `agent-refresh -Wait`采用单job轮转、至少1.1秒的轮询间隔，并在本机API返回429时遵守`Retry-After`，因此五个持续等待job也不会自行超过默认60次/分钟限制。客户端强制UTF-8 JSON输出，Windows GBK控制台不再导致国际字符编码异常。
 
@@ -81,7 +81,7 @@ GET /v1/capabilities
 GET /readyz
 ```
 
-`/healthz` 只证明进程存活；`/readyz` 会读取当前租户数据库并检查 PostgreSQL 关键 schema。数据库不可用或 schema 不完整时返回 HTTP 503 `database_unavailable` 或 `schema_not_ready`。PostgreSQL 后端正常时额外返回 `tenant_id`，SQLite 不返回该字段。
+`/healthz` 只证明进程存活；`/readyz` 会读取当前租户数据库并检查 PostgreSQL 关键 schema。数据库不可用或 schema 不完整时返回 HTTP 503 `database_unavailable` 或 `schema_not_ready`。PostgreSQL 后端正常时额外返回 `tenant_id` 和 `subject_type`，SQLite 不返回这两个字段。Operator 提交前同时核对两者，防止把竞品批次交给自有商品 Worker pool。
 
 ### 健康检查
 
@@ -165,6 +165,34 @@ Content-Type: application/json
 
 Agent不得要求manifest路径、DSN、代理凭据或Cookie。SSH仅用于部署和运维；同机Agent访问loopback，远程Agent经受控SSH隧道或位于公司电脑上的Agent网关调用，不能直接把8765暴露公网。
 
+### 提交自然批次 campaign
+
+```http
+POST /v1/campaigns
+Content-Type: application/json
+Idempotency-Key: owned-full-20260913-v1
+
+{
+  "asins": ["B00RCPDCQU", "B00RCPDI50"],
+  "subject_type": "own",
+  "priority": 50,
+  "deadline_seconds": 86400
+}
+```
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `asins` | 是 | 去重后的已登记 ASIN；部署默认最多 5,000 条 |
+| `subject_type` | 否 | `own`、`competitor` 或 `candidate`，必须与服务 Worker scope 一致 |
+| `priority` | 否 | 0–100，默认 50 |
+| `deadline_seconds` | 否 | 60–604800，默认 86400 |
+| `fields` | 否 | 希望采集的字段标签；不改变 Worker 的合规边界 |
+| `freshness_seconds` | 否 | 可选的新鲜度要求 |
+
+同一个幂等键和同一请求返回同一个 `campaign_id`；同键不同请求返回 409。进度使用 `GET /v1/campaigns/{campaign_id}`。取消使用 `POST /v1/campaigns/{campaign_id}/cancel`：只取消尚未开始的成员，已经持有租约的成员继续报告真实终态。
+
+Operator 上传 Excel 后也走这组接口。Operator 先读取 `/readyz`，确认 tenant 以及请求的 Worker 数均已生效，再提交 campaign；本地进度和结果文件只投影该 campaign 的成员状态，不读取历史商品状态推断本批完成。
+
 ### 流量口径
 
 - HTTP compressed response：urllib收到的压缩响应体字节；存在缺失时同时返回`known_bytes`和`unknown_records`，不能把部分已知值称作总量。
@@ -201,7 +229,7 @@ Content-Type: application/json
 ## 当前不支持
 
 - 直接在 API 请求线程中运行爬虫；
-- Agent 触发全量抓取、普通pending队列或超过5条的刷新；
+- Agent 直接触发普通 pending 队列；超过 5 条必须使用有幂等键、截止时间和取消能力的 campaign；
 - 远程公网访问；
 - 无限代理轮换、CAPTCHA/WAF绕过、登录或个人Cookie；已批准粘滞会话仅在配置的有界上限内切换；
 - 直接查询个人 Cookie、Token 或代理凭证。
