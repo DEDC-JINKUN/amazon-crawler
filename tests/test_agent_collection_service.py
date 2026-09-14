@@ -210,6 +210,50 @@ def test_campaign_worker_supervisor_fails_after_restart_budget_and_does_not_rest
     assert blocked["state"] == "blocked" and blocked_spawns == 1
 
 
+def test_campaign_worker_supervisor_restarts_without_unlinking_a_locked_status_file(tmp_path, monkeypatch):
+    service = load("agent_collection_service")
+    status_path = tmp_path / "status" / "worker-1.json"
+
+    class Process:
+        def __init__(self, pid, returncode):
+            self.pid, self.returncode = pid, returncode
+        def poll(self): return self.returncode
+        def terminate(self): self.returncode = 0
+        def wait(self, timeout=None): return self.returncode
+        def kill(self): self.returncode = -9
+
+    processes = []
+    def spawn(_command, **_kwargs):
+        process = Process(4000 + len(processes), 2 if not processes else None)
+        processes.append(process)
+        if len(processes) == 1:
+            status_path.parent.mkdir(parents=True, exist_ok=True)
+            status_path.write_text("{}", encoding="utf-8")
+        return process
+
+    real_unlink = Path.unlink
+    def locked_unlink(path, *args, **kwargs):
+        if path == status_path and path.exists():
+            raise PermissionError(13, "status file is held by a Windows reader")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", locked_unlink)
+    supervisor = service.CampaignWorkerSupervisor(
+        ["python", "campaign_worker_process.py"], count=1, cwd=tmp_path,
+        environment={}, status_dir=status_path.parent, spawn=spawn,
+        monitor_interval=0.01, heartbeat_timeout=1, restart_limit=1,
+    )
+    supervisor.start()
+    try:
+        deadline = time.monotonic() + 2
+        while len(processes) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(processes) == 2
+        assert supervisor.status()["restart_count"] == 1
+    finally:
+        supervisor.stop()
+
+
 def test_service_parser_exposes_one_managed_primary_console():
     service=load('agent_collection_service')
     args=service.build_parser().parse_args([

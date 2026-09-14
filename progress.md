@@ -69,3 +69,5 @@
 - 用户通过ASCII/CRLF自提升启动器激活`e345468`；候选未在45秒内ready，脚本自动回滚pointer/wrapper并重启`592a65a`。备用8875/8870真实启动复现三个子Worker均因状态JSON原子替换WinError 5退出，且监督器耗尽重启预算；诊断服务随后关闭。
 - TDD修复状态文件Windows短暂读锁：旧代码红测1 failed；20×10ms有界`PermissionError`重试与临时文件清理后目标测试1 passed、Agent服务文件28 passed。待全套、PG、独立review和新release。
 - 修复后完整非PG套件730 passed、56 skipped；专用55444矩阵29 passed并fast shutdown；Python编译与diff检查通过。待冻结提交与独立R3 delta review。
+- 独立review对`7c731cf`发现1个P1：监督器重启仍预删可能被Windows锁住的状态文件。新增红测旧代码1 failed；移除非必要unlink并依靠PID匹配fail closed后，相关3 passed。待重新跑全套与最终delta复核。
+- 监督器delta修复后完整非PG 731 passed、56 skipped；专用55444矩阵29 passed并fast shutdown；Python编译与diff检查通过。待冻结提交和最终delta复核。

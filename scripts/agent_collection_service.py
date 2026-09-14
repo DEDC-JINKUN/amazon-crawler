@@ -179,7 +179,6 @@ class CampaignWorkerSupervisor:
 
     def _spawn_locked(self, index: int) -> None:
         path = self._status_path(index)
-        path.unlink(missing_ok=True)
         command = [*self.command, "--status-file", str(path)]
         self._children[index] = self.spawn(
             command,

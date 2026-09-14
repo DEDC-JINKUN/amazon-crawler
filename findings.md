@@ -69,3 +69,4 @@
 - 在备用8875/8870端口复现：三个子Worker均在`campaign_worker_process._write_status -> os.replace`遇到WinError 5。父监督器并发读取`worker-N.json`时Windows短暂锁住目标，子进程将单次锁竞争当成致命错误，重启预算耗尽。
 - 遗留的唯一命名临时文件与堆栈共同证明故障在状态文件原子替换边界，而非PostgreSQL、代理容量、Worker业务线程或Console端口。
 - 修复只对`PermissionError`做20×10ms有界重试并在退出时清理本次临时文件；不扩大重启预算、不吞持续权限错误。
+- 独立delta review发现监督器`_spawn_locked`仍在重启前预删`worker-N.json`；目标被Windows读锁占用时该unlink同样会失败。删除预删是最小修复：新子进程本来就用临时文件原子覆盖，监督器又以PID匹配防止旧状态冒充健康。
