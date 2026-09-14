@@ -170,6 +170,7 @@ class CampaignWorkerSupervisor:
         self._children: dict[int, Any] = {}
         self._states = {index: "created" for index in range(1, self.count + 1)}
         self._restart_counts = {index: 0 for index in range(1, self.count + 1)}
+        self._launch_tokens = {index: "" for index in range(1, self.count + 1)}
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -179,7 +180,13 @@ class CampaignWorkerSupervisor:
 
     def _spawn_locked(self, index: int) -> None:
         path = self._status_path(index)
-        command = [*self.command, "--status-file", str(path)]
+        launch_token = uuid.uuid4().hex
+        self._launch_tokens[index] = launch_token
+        command = [
+            *self.command,
+            "--status-file", str(path),
+            "--launch-token", launch_token,
+        ]
         self._children[index] = self.spawn(
             command,
             cwd=str(self.cwd),
@@ -213,7 +220,10 @@ class CampaignWorkerSupervisor:
                         worker_heartbeat_fresh = self._timestamp_fresh(
                             document.get("worker_heartbeat_at"), now, self.worker_heartbeat_timeout,
                         )
-                        document_matches = int(document.get("pid") or -1) == int(process.pid)
+                        document_matches = (
+                            int(document.get("pid") or -1) == int(process.pid)
+                            and str(document.get("launch_token") or "") == self._launch_tokens[index]
+                        )
                         if (
                             document_matches and heartbeat_fresh
                             and str(document.get("state") or "") == "running"
@@ -270,7 +280,10 @@ class CampaignWorkerSupervisor:
                 worker_heartbeat_fresh = self._timestamp_fresh(
                     document.get("worker_heartbeat_at"), now, self.worker_heartbeat_timeout,
                 )
-                document_matches = int(document.get("pid") or -1) == int(process.pid)
+                document_matches = (
+                    int(document.get("pid") or -1) == int(process.pid)
+                    and str(document.get("launch_token") or "") == self._launch_tokens[index]
+                )
                 reported_state = str(document.get("state") or self._states[index])
                 if reported_state in {"blocked", "failed"}:
                     self._states[index] = reported_state

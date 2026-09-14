@@ -154,10 +154,13 @@ def test_campaign_worker_supervisor_restarts_one_crash_and_requires_fresh_child_
             time.sleep(0.01)
         assert len(factory.processes) == 2
         replacement = factory.processes[-1][1]
+        replacement_command = factory.processes[-1][0]
+        launch_token = replacement_command[replacement_command.index("--launch-token") + 1]
         status_path = tmp_path / "status" / "worker-1.json"
         status_path.write_text(__import__('json').dumps({
             "schema": "amazon-campaign-worker-status-v1",
             "pid": replacement.pid,
+            "launch_token": launch_token,
             "state": "running",
             "last_error": None,
             "heartbeat_at": __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
@@ -169,6 +172,7 @@ def test_campaign_worker_supervisor_restarts_one_crash_and_requires_fresh_child_
         assert status["healthy_workers"] == 1
         assert status["restart_count"] == 1
         assert "--status-file" in factory.processes[-1][0]
+        assert "--launch-token" in factory.processes[-1][0]
     finally:
         supervisor.stop()
 
@@ -254,6 +258,56 @@ def test_campaign_worker_supervisor_restarts_without_unlinking_a_locked_status_f
         supervisor.stop()
 
 
+def test_campaign_worker_supervisor_rejects_fresh_old_status_when_pid_is_reused(tmp_path):
+    service = load("agent_collection_service")
+    status_path = tmp_path / "pid-reuse-status" / "worker-1.json"
+
+    class Process:
+        def __init__(self, returncode):
+            self.pid, self.returncode = 5000, returncode
+        def poll(self): return self.returncode
+        def terminate(self): self.returncode = 0
+        def wait(self, timeout=None): return self.returncode
+        def kill(self): self.returncode = -9
+
+    processes = []
+    def spawn(command, **_kwargs):
+        process = Process(2 if not processes else None)
+        processes.append(process)
+        if len(processes) == 1:
+            token = command[command.index("--launch-token") + 1] if "--launch-token" in command else "legacy"
+            now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+            status_path.parent.mkdir(parents=True, exist_ok=True)
+            status_path.write_text(__import__("json").dumps({
+                "schema": "amazon-campaign-worker-status-v1",
+                "pid": process.pid,
+                "launch_token": token,
+                "state": "running",
+                "heartbeat_at": now,
+                "worker_heartbeat_at": now,
+                "last_error": None,
+            }), encoding="utf-8")
+        return process
+
+    supervisor = service.CampaignWorkerSupervisor(
+        ["python", "campaign_worker_process.py"], count=1, cwd=tmp_path,
+        environment={}, status_dir=status_path.parent, spawn=spawn,
+        monitor_interval=0.01, heartbeat_timeout=2, restart_limit=1,
+    )
+    supervisor.start()
+    try:
+        deadline = time.monotonic() + 2
+        while len(processes) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(processes) == 2
+        status = supervisor.status()
+        assert status["alive_workers"] == 1
+        assert status["healthy_workers"] == 0
+        assert status["state"] == "starting"
+    finally:
+        supervisor.stop()
+
+
 def test_service_parser_exposes_one_managed_primary_console():
     service=load('agent_collection_service')
     args=service.build_parser().parse_args([
@@ -323,6 +377,7 @@ def test_campaign_worker_process_survives_transient_windows_status_replace_lock(
         'campaign_worker_process.py','--config',str(tmp_path/'config.toml'),
         '--output-dir',str(tmp_path/'output'),'--tenant-id','tenant-a','--dsn-env','TEST_WORKER_DSN',
         '--status-file',str(tmp_path/'output'/'control'/'agent-workers'/'worker-1.json'),
+        '--launch-token','1'*32,
     ])
 
     assert process.main()==2
@@ -332,6 +387,7 @@ def test_campaign_worker_process_survives_transient_windows_status_replace_lock(
     assert status['state']=='failed'
     assert status['last_error']=='RuntimeError'
     assert status['pid']==os.getpid()
+    assert status['launch_token']=='1'*32
     assert status['heartbeat_at']
     assert status['worker_heartbeat_at']
 
@@ -347,9 +403,11 @@ def test_supervisor_restarts_process_when_worker_thread_heartbeat_stalls(tmp_pat
         def kill(self): self.returncode = -9
 
     processes = []
-    def spawn(_command, **_kwargs):
+    commands = []
+    def spawn(command, **_kwargs):
         process = Process(3000 + len(processes))
         processes.append(process)
+        commands.append(list(command))
         return process
 
     supervisor = service.CampaignWorkerSupervisor(
@@ -361,10 +419,12 @@ def test_supervisor_restarts_process_when_worker_thread_heartbeat_stalls(tmp_pat
     supervisor.start()
     try:
         first = processes[0]
+        launch_token = commands[0][commands[0].index("--launch-token") + 1]
         now = __import__('datetime').datetime.now(__import__('datetime').timezone.utc)
         (tmp_path / "stalled-status" / "worker-1.json").write_text(__import__('json').dumps({
             "schema": "amazon-campaign-worker-status-v1",
             "pid": first.pid,
+            "launch_token": launch_token,
             "state": "running",
             "heartbeat_at": now.isoformat(),
             "worker_heartbeat_at": (now - __import__('datetime').timedelta(seconds=1)).isoformat(),

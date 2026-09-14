@@ -71,3 +71,5 @@
 - 修复后完整非PG套件730 passed、56 skipped；专用55444矩阵29 passed并fast shutdown；Python编译与diff检查通过。待冻结提交与独立R3 delta review。
 - 独立review对`7c731cf`发现1个P1：监督器重启仍预删可能被Windows锁住的状态文件。新增红测旧代码1 failed；移除非必要unlink并依靠PID匹配fail closed后，相关3 passed。待重新跑全套与最终delta复核。
 - 监督器delta修复后完整非PG 731 passed、56 skipped；专用55444矩阵29 passed并fast shutdown；Python编译与diff检查通过。待冻结提交和最终delta复核。
+- 对`08e381c`复核仍有1个P1：PID复用时旧新鲜状态可能冒充新Worker。新增PID复用红测旧代码1 failed；每次spawn绑定不可复用launch token，子进程状态回传token且监督器同时匹配token/PID后，相关4 passed。
+- launch token修复后完整非PG 732 passed、56 skipped；专用55444矩阵29 passed并fast shutdown；Python编译与diff检查通过。待冻结提交和最终delta复核。

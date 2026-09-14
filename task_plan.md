@@ -78,8 +78,9 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 - [x] 目标tenant事务登记1093条，且无活动campaign/job/lease/reservation。
 - [ ] 管理员运行`outputs/prod-full-rollout-20260914/activate_reviewed_release.ps1`完成release安装与三Worker切换。
 - [x] 真实候选启动复现Windows状态文件原子替换竞态并完成红绿修复。
-- [ ] 对状态文件修复跑全套、独立R3 review并制作新不可变release；`e345468`不得再次激活（两轮全套已过，待最终review/release）。
+- [ ] 对状态文件修复跑全套、独立R3 review并制作新不可变release；`e345468`不得再次激活（三轮全套已过，待最终review/release）。
 - [x] 修复独立review发现的监督器重启预删锁竞态并补红绿测试。
+- [x] 修复复核发现的PID复用旧状态冒认：每次spawn绑定launch token并补红绿测试。
 
 ## Errors Encountered
 

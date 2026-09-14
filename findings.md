@@ -70,3 +70,4 @@
 - 遗留的唯一命名临时文件与堆栈共同证明故障在状态文件原子替换边界，而非PostgreSQL、代理容量、Worker业务线程或Console端口。
 - 修复只对`PermissionError`做20×10ms有界重试并在退出时清理本次临时文件；不扩大重启预算、不吞持续权限错误。
 - 独立delta review发现监督器`_spawn_locked`仍在重启前预删`worker-N.json`；目标被Windows读锁占用时该unlink同样会失败。删除预删是最小修复：新子进程本来就用临时文件原子覆盖，监督器又以PID匹配防止旧状态冒充健康。
+- 后续复核指出PID可能被操作系统复用；仅保留旧状态并核对PID仍可能短暂fail-open。最终采用每次spawn生成32位随机launch token，子进程写入状态，监督器同时匹配token与PID；新子进程首次状态前保持starting。

@@ -28,12 +28,13 @@ def _safe_error(value) -> str | None:
     return text[:120] or None
 
 
-def _write_status(path: Path | None, status: dict) -> None:
+def _write_status(path: Path | None, status: dict, launch_token: str) -> None:
     if path is None:
         return
     payload = {
         "schema": "amazon-campaign-worker-status-v1",
         "pid": os.getpid(),
+        "launch_token": launch_token,
         "state": str(status.get("state") or "unknown"),
         "last_error": _safe_error(status.get("last_error")),
         "heartbeat_at": datetime.now(timezone.utc).isoformat(),
@@ -68,12 +69,15 @@ def main() -> int:
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     parser.add_argument("--lease-seconds", type=int, default=600)
     parser.add_argument("--status-file", type=Path)
+    parser.add_argument("--launch-token", required=True)
     args = parser.parse_args()
     dsn = os.environ.get(args.dsn_env, "").strip()
     if not dsn:
         raise RuntimeError("worker database credential unavailable")
     output_dir = args.output_dir.resolve()
     status_file = args.status_file.resolve() if args.status_file else None
+    if not re.fullmatch(r"[a-f0-9]{32}", args.launch_token):
+        raise RuntimeError("worker launch token is invalid")
     if status_file is not None:
         expected_parent = output_dir / "control" / "agent-workers"
         if status_file.parent != expected_parent or status_file.suffix != ".json":
@@ -110,7 +114,7 @@ def main() -> int:
         while not stopped.wait(1.0):
             status = worker.status()
             last_state = str(status.get("state") or "unknown")
-            _write_status(status_file, status)
+            _write_status(status_file, status, args.launch_token)
             if last_state == "failed":
                 exit_code = 2
                 break
@@ -120,7 +124,7 @@ def main() -> int:
     finally:
         worker.stop()
         if stop_requested and last_state not in {"failed", "blocked"}:
-            _write_status(status_file, {"state": "stopped", "last_error": None})
+            _write_status(status_file, {"state": "stopped", "last_error": None}, args.launch_token)
     return exit_code
 
 
