@@ -166,7 +166,11 @@ def test_campaign_worker_supervisor_restarts_one_crash_and_requires_fresh_child_
             "heartbeat_at": __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
             "worker_heartbeat_at": __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
         }), encoding="utf-8")
+        deadline = time.monotonic() + 2
         status = supervisor.status()
+        while status["state"] != "running" and time.monotonic() < deadline:
+            time.sleep(0.01)
+            status = supervisor.status()
         assert status["state"] == "running"
         assert status["alive_workers"] == 1
         assert status["healthy_workers"] == 1
@@ -345,7 +349,11 @@ def test_campaign_worker_supervisor_accepts_matching_launch_token_from_windows_v
             "last_error": None,
         }), encoding="utf-8")
 
+        deadline = time.monotonic() + 2
         status = supervisor.status()
+        while status["state"] != "running" and time.monotonic() < deadline:
+            time.sleep(0.01)
+            status = supervisor.status()
         assert status["state"] == "running"
         assert status["alive_workers"] == 1
         assert status["healthy_workers"] == 1
@@ -384,17 +392,12 @@ def test_campaign_child_receives_custom_dsn_and_minimal_environment(monkeypatch,
     assert command[command.index("--dsn-env")+1]=="CUSTOM_CAMPAIGN_DSN"
 
 
-def test_campaign_worker_process_survives_transient_windows_status_replace_lock(monkeypatch, tmp_path):
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows file-sharing semantics")
+def test_campaign_worker_process_publishes_status_while_legacy_path_is_locked(monkeypatch, tmp_path):
+    import ctypes
+
     monkeypatch.syspath_prepend(str(ROOT/'scripts'))
     process=load('campaign_worker_process'); events=[]
-    replace_attempts=[]
-    real_replace=process.os.replace
-
-    def replace_with_one_transient_lock(source, destination):
-        replace_attempts.append((source, destination))
-        if len(replace_attempts)==1:
-            raise PermissionError(13, 'status target is temporarily locked by the supervisor')
-        return real_replace(source, destination)
 
     class Worker:
         def __init__(self, **_kwargs): pass
@@ -417,24 +420,371 @@ def test_campaign_worker_process_survives_transient_windows_status_replace_lock(
     monkeypatch.setattr(process,'PostgresWorkerStorage',lambda *_args,**_kwargs:object())
     monkeypatch.setattr(process,'AgentRefreshWorker',Worker)
     monkeypatch.setattr(process.threading,'Event',Event)
-    monkeypatch.setattr(process.os,'replace',replace_with_one_transient_lock)
+    output = tmp_path/'output'
+    status_path = output/'control'/'agent-workers'/'worker-1.json'
+    status_path.parent.mkdir(parents=True)
+    status_path.write_text('{}', encoding='utf-8')
+
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+        ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+    ]
+    kernel32.CreateFileW.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    handle = kernel32.CreateFileW(
+        str(status_path),
+        0x80000000,
+        0x00000001 | 0x00000002,
+        None,
+        3,
+        0x80,
+        None,
+    )
+    assert handle != ctypes.c_void_p(-1).value
     monkeypatch.setattr(sys,'argv',[
         'campaign_worker_process.py','--config',str(tmp_path/'config.toml'),
-        '--output-dir',str(tmp_path/'output'),'--tenant-id','tenant-a','--dsn-env','TEST_WORKER_DSN',
-        '--status-file',str(tmp_path/'output'/'control'/'agent-workers'/'worker-1.json'),
+        '--output-dir',str(output),'--tenant-id','tenant-a','--dsn-env','TEST_WORKER_DSN',
+        '--status-file',str(status_path),
         '--launch-token','1'*32,
     ])
 
-    assert process.main()==2
-    assert len(replace_attempts)==2
+    try:
+        assert process.main()==2
+    finally:
+        kernel32.CloseHandle(handle)
     assert events==['start','stop']
-    status = __import__('json').loads((tmp_path/'output'/'control'/'agent-workers'/'worker-1.json').read_text(encoding='utf-8'))
+    snapshots = list(status_path.parent.glob('worker-1.' + ('1'*32) + '.*.json'))
+    assert len(snapshots)==1
+    status = __import__('json').loads(snapshots[0].read_text(encoding='utf-8'))
     assert status['state']=='failed'
     assert status['last_error']=='RuntimeError'
     assert status['pid']==os.getpid()
     assert status['launch_token']=='1'*32
     assert status['heartbeat_at']
     assert status['worker_heartbeat_at']
+
+
+def test_supervisor_reads_latest_valid_immutable_snapshot_and_serves_cached_status(tmp_path):
+    service = load("agent_collection_service")
+
+    class Process:
+        pid = 4300
+        returncode = None
+        def poll(self): return self.returncode
+        def terminate(self): self.returncode = 0
+        def wait(self, timeout=None): return self.returncode
+        def kill(self): self.returncode = -9
+
+    commands = []
+    def spawn(command, **_kwargs):
+        commands.append(list(command))
+        return Process()
+
+    status_dir = tmp_path / "immutable-status"
+    supervisor = service.CampaignWorkerSupervisor(
+        ["python", "campaign_worker_process.py"], count=1, cwd=tmp_path,
+        environment={}, status_dir=status_dir, spawn=spawn,
+        monitor_interval=0.01, heartbeat_timeout=2, worker_heartbeat_timeout=2,
+    )
+    supervisor.start()
+    try:
+        launch_token = commands[0][commands[0].index("--launch-token") + 1]
+        now = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
+        valid = status_dir / f"worker-1.{launch_token}.{'1':0>20}.json"
+        valid.write_text(__import__('json').dumps({
+            "schema": "amazon-campaign-worker-status-v1",
+            "pid": 9999,
+            "launch_token": launch_token,
+            "sequence": 1,
+            "state": "running",
+            "heartbeat_at": now,
+            "worker_heartbeat_at": now,
+            "last_error": None,
+            "snapshot_backlog_files": 4,
+            "snapshot_backlog_bytes": 1024,
+            "snapshot_cleanup_failures": 1,
+        }), encoding="utf-8")
+        incomplete = status_dir / f"worker-1.{launch_token}.{'2':0>20}.json"
+        incomplete.write_text('{"schema":', encoding="utf-8")
+
+        deadline = time.monotonic() + 2
+        while supervisor.status()["healthy_workers"] != 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        observed = supervisor.status()
+        assert observed["healthy_workers"] == 1
+        assert observed["children"][0]["status_snapshot_backlog_files"] == 4
+        assert observed["children"][0]["status_snapshot_backlog_bytes"] == 1024
+        assert observed["children"][0]["status_snapshot_cleanup_failures"] == 1
+
+        valid.unlink()
+        incomplete.unlink()
+        assert supervisor.status()["healthy_workers"] == 1
+    finally:
+        supervisor.stop()
+
+
+def test_immutable_status_cleanup_is_bounded_and_locked_stale_snapshot_is_nonfatal(monkeypatch, tmp_path):
+    status_protocol = load("campaign_worker_status")
+    path = tmp_path / "status" / "worker-1.json"
+    token = "2" * 32
+    payload = {
+        "pid": 4400,
+        "state": "running",
+        "heartbeat_at": "2026-09-14T10:00:00+00:00",
+        "worker_heartbeat_at": "2026-09-14T10:00:00+00:00",
+        "last_error": None,
+    }
+    for sequence in range(1, 5):
+        status_protocol.publish_status_snapshot(
+            path, payload, launch_token=token, sequence=sequence,
+        )
+    snapshots = sorted(path.parent.glob(f"worker-1.{token}.*.json"))
+    assert len(snapshots) == 3
+    assert [__import__('json').loads(item.read_text(encoding="utf-8"))["sequence"] for item in snapshots] == [2, 3, 4]
+
+    locked = snapshots[0]
+    real_unlink = Path.unlink
+    def locked_unlink(candidate, *args, **kwargs):
+        if candidate == locked:
+            raise PermissionError(13, "stale snapshot is held by a Windows reader")
+        return real_unlink(candidate, *args, **kwargs)
+    monkeypatch.setattr(Path, "unlink", locked_unlink)
+
+    latest = status_protocol.publish_status_snapshot(
+        path, payload, launch_token=token, sequence=5,
+    )
+    assert latest.exists()
+    assert locked.exists()
+    latest_document = __import__('json').loads(latest.read_text(encoding="utf-8"))
+    assert latest_document["snapshot_backlog_files"] == 4
+    assert latest_document["snapshot_backlog_bytes"] == sum(
+        item.stat().st_size for item in path.parent.glob(f"worker-1.{token}.*.json")
+    )
+    assert latest_document["snapshot_cleanup_failures"] == 1
+    assert status_protocol.read_latest_status_snapshot(path, launch_token=token)["sequence"] == 5
+
+
+@pytest.mark.parametrize("invalid_sequence", [True, 1.0])
+def test_immutable_status_rejects_non_integer_sequence_values(tmp_path, invalid_sequence):
+    status_protocol = load("campaign_worker_status")
+    path = tmp_path / "status" / "worker-1.json"
+    token = "3" * 32
+    path.parent.mkdir(parents=True)
+    candidate = path.parent / f"worker-1.{token}.{'1':0>20}.json"
+    candidate.write_text(__import__('json').dumps({
+        "schema": "amazon-campaign-worker-status-v1",
+        "pid": 4500,
+        "launch_token": token,
+        "sequence": invalid_sequence,
+        "state": "running",
+        "heartbeat_at": "2026-09-14T10:00:00+00:00",
+        "worker_heartbeat_at": "2026-09-14T10:00:00+00:00",
+        "last_error": None,
+    }), encoding="utf-8")
+
+    assert status_protocol.read_latest_status_snapshot(path, launch_token=token) is None
+    with pytest.raises(ValueError, match="sequence must be an integer"):
+        status_protocol.publish_status_snapshot(
+            path,
+            {
+                "pid": 4500,
+                "state": "running",
+                "heartbeat_at": "2026-09-14T10:00:00+00:00",
+                "worker_heartbeat_at": "2026-09-14T10:00:00+00:00",
+                "last_error": None,
+            },
+            launch_token=token,
+            sequence=invalid_sequence,
+        )
+
+
+def test_immutable_status_rejects_zero_sequence_on_read_and_publish(tmp_path):
+    status_protocol = load("campaign_worker_status")
+    path = tmp_path / "status" / "worker-1.json"
+    token = "b" * 32
+    path.parent.mkdir(parents=True)
+    candidate = path.parent / f"worker-1.{token}.{'0':0>20}.json"
+    candidate.write_text(__import__('json').dumps({
+        "schema": "amazon-campaign-worker-status-v1",
+        "pid": 4550,
+        "launch_token": token,
+        "sequence": 0,
+        "state": "running",
+        "heartbeat_at": "2026-09-14T10:00:00+00:00",
+        "worker_heartbeat_at": "2026-09-14T10:00:00+00:00",
+        "last_error": None,
+    }), encoding="utf-8")
+
+    assert status_protocol.read_latest_status_snapshot(path, launch_token=token) is None
+    with pytest.raises(ValueError, match="sequence must be positive"):
+        status_protocol.publish_status_snapshot(
+            path,
+            {
+                "pid": 4550,
+                "state": "running",
+                "heartbeat_at": "2026-09-14T10:00:00+00:00",
+                "worker_heartbeat_at": "2026-09-14T10:00:00+00:00",
+                "last_error": None,
+            },
+            launch_token=token,
+            sequence=0,
+        )
+
+
+def test_immutable_status_backlog_is_bounded_across_locked_old_launches(monkeypatch, tmp_path):
+    status_protocol = load("campaign_worker_status")
+    monkeypatch.setattr(status_protocol, "STATUS_SNAPSHOT_MAX_FILES", 3)
+    path = tmp_path / "status" / "worker-1.json"
+    path.parent.mkdir(parents=True)
+    for ordinal in range(3):
+        token = format(ordinal + 4, "x") * 32
+        candidate = path.parent / f"worker-1.{token}.{'1':0>20}.json"
+        candidate.write_text("{}", encoding="utf-8")
+
+    real_unlink = Path.unlink
+    def locked_unlink(candidate, *args, **kwargs):
+        if candidate.parent == path.parent and candidate.name.startswith("worker-1."):
+            raise PermissionError(13, "old launch snapshot remains locked")
+        return real_unlink(candidate, *args, **kwargs)
+    monkeypatch.setattr(Path, "unlink", locked_unlink)
+
+    with pytest.raises(OSError, match="snapshot backlog"):
+        status_protocol.publish_status_snapshot(
+            path,
+            {
+                "pid": 4600,
+                "state": "running",
+                "heartbeat_at": "2026-09-14T10:00:00+00:00",
+                "worker_heartbeat_at": "2026-09-14T10:00:00+00:00",
+                "last_error": None,
+            },
+            launch_token="7" * 32,
+            sequence=1,
+        )
+    assert len(list(path.parent.glob("worker-1.*.json"))) == 3
+
+
+@pytest.mark.parametrize("inventory_failure", ["glob", "stat"])
+def test_status_snapshot_inventory_failure_blocks_capacity_reservation(monkeypatch, tmp_path, inventory_failure):
+    status_protocol = load("campaign_worker_status")
+    path = tmp_path / "status" / "worker-1.json"
+    path.parent.mkdir(parents=True)
+    candidate = path.parent / f"worker-1.{'c'*32}.{'1':0>20}.json"
+    candidate.write_text("{}", encoding="utf-8")
+    real_glob = Path.glob
+    real_stat = Path.stat
+    real_unlink = Path.unlink
+
+    if inventory_failure == "glob":
+        def failed_glob(item, pattern):
+            if item == path.parent:
+                raise PermissionError(13, "snapshot directory cannot be enumerated")
+            return real_glob(item, pattern)
+        monkeypatch.setattr(Path, "glob", failed_glob)
+    else:
+        def locked_unlink(item, *args, **kwargs):
+            if item == candidate:
+                raise PermissionError(13, "snapshot remains locked")
+            return real_unlink(item, *args, **kwargs)
+        def failed_stat(item, *args, **kwargs):
+            if item == candidate:
+                raise PermissionError(13, "snapshot size is unavailable")
+            return real_stat(item, *args, **kwargs)
+        monkeypatch.setattr(Path, "unlink", locked_unlink)
+        monkeypatch.setattr(Path, "stat", failed_stat)
+
+    with pytest.raises(OSError, match="snapshot backlog"):
+        status_protocol.prepare_status_snapshot_launch(path)
+
+
+def test_supervisor_refuses_to_spawn_when_locked_snapshot_backlog_has_no_capacity(monkeypatch, tmp_path):
+    service = load("agent_collection_service")
+    status_protocol = __import__("campaign_worker_status")
+    monkeypatch.setattr(status_protocol, "STATUS_SNAPSHOT_MAX_FILES", 1)
+    status_dir = tmp_path / "status"
+    status_dir.mkdir(parents=True)
+    stale = status_dir / f"worker-1.{'8'*32}.{'1':0>20}.json"
+    stale.write_text("{}", encoding="utf-8")
+
+    real_unlink = Path.unlink
+    def locked_unlink(candidate, *args, **kwargs):
+        if candidate == stale:
+            raise PermissionError(13, "old launch snapshot remains locked")
+        return real_unlink(candidate, *args, **kwargs)
+    monkeypatch.setattr(Path, "unlink", locked_unlink)
+    spawn_calls = []
+    supervisor = service.CampaignWorkerSupervisor(
+        ["python", "campaign_worker_process.py"], count=1, cwd=tmp_path,
+        environment={}, status_dir=status_dir,
+        spawn=lambda *args, **kwargs: spawn_calls.append((args, kwargs)),
+    )
+
+    with pytest.raises(OSError, match="snapshot backlog"):
+        supervisor.start()
+    assert spawn_calls == []
+
+
+def test_supervisor_cleans_up_partial_pool_when_later_worker_has_locked_backlog(monkeypatch, tmp_path):
+    service = load("agent_collection_service")
+    status_protocol = __import__("campaign_worker_status")
+    monkeypatch.setattr(status_protocol, "STATUS_SNAPSHOT_MAX_FILES", 3)
+    status_dir = tmp_path / "status"
+    status_dir.mkdir(parents=True)
+    stale = status_dir / f"worker-2.{'a'*32}.{'1':0>20}.json"
+    stale.write_text("{}", encoding="utf-8")
+
+    real_unlink = Path.unlink
+    def locked_unlink(candidate, *args, **kwargs):
+        if candidate == stale:
+            raise PermissionError(13, "worker-2 old launch snapshot remains locked")
+        return real_unlink(candidate, *args, **kwargs)
+    monkeypatch.setattr(Path, "unlink", locked_unlink)
+
+    class Process:
+        pid = 4800
+        returncode = None
+        def poll(self): return self.returncode
+        def terminate(self): self.returncode = 0
+        def wait(self, timeout=None): return self.returncode
+        def kill(self): self.returncode = -9
+
+    processes = []
+    def spawn(*_args, **_kwargs):
+        process = Process()
+        processes.append(process)
+        return process
+
+    supervisor = service.CampaignWorkerSupervisor(
+        ["python", "campaign_worker_process.py"], count=2, cwd=tmp_path,
+        environment={}, status_dir=status_dir, spawn=spawn,
+    )
+
+    with pytest.raises(OSError, match="snapshot backlog"):
+        supervisor.start()
+    assert len(processes) == 1
+    assert processes[0].returncode == 0
+
+
+def test_immutable_status_rejects_a_snapshot_that_exceeds_total_byte_quota(monkeypatch, tmp_path):
+    status_protocol = load("campaign_worker_status")
+    monkeypatch.setattr(status_protocol, "STATUS_SNAPSHOT_MAX_BYTES", 1)
+    path = tmp_path / "status" / "worker-1.json"
+
+    with pytest.raises(OSError, match="snapshot backlog"):
+        status_protocol.publish_status_snapshot(
+            path,
+            {
+                "pid": 4700,
+                "state": "running",
+                "heartbeat_at": "2026-09-14T10:00:00+00:00",
+                "worker_heartbeat_at": "2026-09-14T10:00:00+00:00",
+                "last_error": None,
+            },
+            launch_token="9" * 32,
+            sequence=1,
+        )
+    assert list(path.parent.glob("worker-1.*.json")) == []
 
 
 def test_supervisor_restarts_process_when_worker_thread_heartbeat_stalls(tmp_path):

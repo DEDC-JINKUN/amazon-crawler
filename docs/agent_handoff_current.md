@@ -1,86 +1,85 @@
 # Amazon Collection 当前 Agent 交接
 
-**观察时间：** 2026-09-14 16:52（Asia/Shanghai）
+**观察时间：** 2026-09-14 20:04（Asia/Shanghai）
+
 **用途：** 新 Agent 的五分钟事实入口。本文是当前快照，不是部署凭证；变化事实必须回到下列权威来源复核。
 
 ## 先说结论
 
-最终代码`4021a56`已完成独立R3审查，备用端口真实三Worker达到3/3/3/3；**生产激活仍失败并已恢复旧版`592a65a`单Worker。** 根因转到计划任务wrapper编码：Windows PowerShell5.1无法读取UTF-8无BOM中的中文路径。目标tenant已有1093条、最新34槽canary 34/34通过，但活动campaign/job/lease/reservation均为0，未开始全量。
+系统级 PowerShell 7.6.6 和两项生产计划任务迁移已经完成。`4021a56`曾成功激活并取得三 Worker 初始3/3/3/3 readiness，但新的3-ASIN业务门禁证明其固定状态文件方案在 Windows 持续读锁下仍会让三个 Worker崩溃；因此20条和1,093条都没有提交，生产pointer已回滚到旧版`592a65a`。
+
+当前工作树已把状态通道重构为不可变快照加Supervisor内存缓存，完整验证与最终独立review已通过，但尚未提交、制作release或重新部署。不得再次激活`4021a56`。
 
 ## 事实矩阵
 
 | 事实面 | 状态 | 当前证据 |
 |---|---|---|
-| 候选代码 | `reviewed-current` | 最终提交与release `4021a56`；独立R3复核P0=0/P1=0 |
-| 线上 Collection | `verified-current` | deploy pointer `592a65a`；旧版单Worker，tenant `local_agent_deployment_20260906`；新凭据下10槽canary通过 |
-| 线上 Operator | `verified-current` | operator pointer `71db26e`；不是候选提交 |
-| 三 Worker | `production-blocked` | 备用端口3/3/3/3通过，34槽canary 34/34通过；计划任务wrapper编码/管理员续接未稳定完成 |
-| 全量 campaign | `protocol available` | MCP/Collection capability 上限 5,000 ASIN；没有因此获得本轮真实采集授权 |
-| PostgreSQL 引擎验收 | `verified-current` | 2026-09-14 直接启动专用55444测试实例，完整矩阵29 passed；随后fast shutdown确认关闭 |
-| 文档 | `changed-and-verified` | `README.md`、`docs/collection_api.md`、`docs/collection_operator.md`、`CHANGELOG.md` 已与候选代码同步 |
-| 生产部署与 live 验证 | `rolled-back` | `4021a56`已安装但pointer恢复`592a65a`；多次激活失败后停止自动重试 |
-| 上线后台campaign | `completed` | `campaign-579718cdd550503aba7e5ea996179b80`：2 succeeded、1 variant、0 failed，证据均晚于请求 |
-| Agent 记忆 | `generated-read-only` | 不直接编辑宿主生成记忆；以本文件作为项目内交接入口 |
+| 候选代码 | `reviewed-ready-to-freeze` | 新增`campaign_worker_status.py`；固定目标覆盖已替换为launch-token/sequence不可变快照；最终独立复核P0=0/P1=0 |
+| 旧候选release | `rejected-by-live-gate` | `4021a56`初始ready，但3-ASIN运行后Worker在`os.replace` WinError 5上耗尽重启；禁止复用 |
+| 线上 Collection | `rolled-back-and-live` | current pointer `592a65a`；`/readyz`最近返回200、tenant `local_agent_deployment_20260906`、单Worker running |
+| 线上 Operator | `rolled-back` | operator pointer `71db26e` |
+| 计划任务运行时 | `migrated-with-ownership-gap` | 两项Action均为`C:/Program Files/PowerShell/7/pwsh.exe`；XML备份和迁移回执存在；回滚后端口进程存活但任务状态显示Ready，下一次发布前须恢复托管为Running |
+| 失败3-ASIN门禁 | `stopped` | `campaign-0fa7b5ae1eb658c58e9ef8bae81ec2c6`曾2 succeeded、1 claimed；回滚后目标tenant状态尚未重新对账，不得当作通过或复用 |
+| 20条与全量campaign | `not-submitted` | 未提交20条；未提交1,093条 |
+| 目标清单 | `verified` | `Amazon Scraping/data/owned_us_asin_20260902_full_01/manifest_1093.csv`共1,093个唯一合法ASIN |
+| 代理容量 | `must-refresh` | 34槽配置曾有32个唯一可用并放行三Worker；该事实现在已过期，下一次发布前必须按同配置重跑非Amazon canary |
+| 默认非PG回归 | `verified-current` | 746 passed、56 skipped、0 failed |
+| 隔离PostgreSQL门禁 | `verified-current` | `127.0.0.1:55444/operator_matrix`两文件29 passed；随后fast shutdown确认关闭 |
+| Windows并发压力 | `verified-current` | 最终P1修复后3个真实子进程、3个被长期读锁的旧固定文件、4,606次并发status调用、持续10秒：alive/healthy=3/3、restart=0、每Worker保留3份快照 |
 
-## 候选实现了什么
+## 当前长期修复
 
-- Agent 服务通过 `-AgentWorkerCount 1..8` 请求 Worker 数，按新鲜 canary 容量计算 effective Worker，并在 `/readyz` 返回 requested/effective/alive。
-- Operator 和 MCP 都使用 `collection_campaign`、campaign member、refresh job 和本轮 evidence；Operator JSON/CSV 只是投影。
-- Operator 提交前核对 tenant、`subject_type` 和 Worker pool。容量不足时不创建 campaign。
-- campaign 取消、外部过期、连续轮询失败、blocked/failed 分类均有明确终态。
-- Windows loopback 10053/10054 抖动有有界处理；没有无限重试。
+- Worker只创建`worker-N.<launch-token>.<20位正整数sequence>.json`，不覆盖固定目标。
+- Supervisor监控线程只接收当前launch token的最新完整快照，并把它缓存到内存。
+- `/readyz`只读Supervisor缓存；最新文件若在写入中或损坏，保留上一份完整快照直到心跳超时。
+- 每个launch通常保留3份快照；跨launch持续清理并设置每Worker 64文件/1 MiB总上限。清理遇到Windows锁只做best-effort，不允许单次清理失败杀死健康Worker；无法为完整3份、每份最大4 KiB的滚动窗口预留容量时必须在领取任务前fail closed。
+- 目录枚举或剩余文件大小统计失败视为容量未知并fail closed；多Worker启动中后续成员失败时会终止已启动成员，不保留部分进程池。
+- `/readyz`子Worker项公开`status_snapshot_backlog_files`、`status_snapshot_backlog_bytes`和`status_snapshot_cleanup_failures`，便于对锁定旧快照告警。
+- 旧`worker-N.json`仅作迁移兼容读取；子进程存活仍由受管`Popen`判断，状态PID仅供诊断。
 
-关键实现：
+关键文件：
 
-- [`scripts/operator_campaign_runner.py`](../scripts/operator_campaign_runner.py)
+- [`scripts/campaign_worker_status.py`](../scripts/campaign_worker_status.py)
+- [`scripts/campaign_worker_process.py`](../scripts/campaign_worker_process.py)
 - [`scripts/agent_collection_service.py`](../scripts/agent_collection_service.py)
-- [`scripts/agent_service_control.ps1`](../scripts/agent_service_control.ps1)
-- [`scripts/collection_api.py`](../scripts/collection_api.py)
-- [`scripts/operator_core.py`](../scripts/operator_core.py)
+- [`tests/test_agent_collection_service.py`](../tests/test_agent_collection_service.py)
+- [`docs/collection_api.md`](collection_api.md)
 
-## 验证证据
+## 已取得的验证证据
 
-- 主非 PG 套件：730 passed、56 skipped、0 failed。
-- 相关模块：124 passed。
-- 专用 `127.0.0.1:55444/operator_matrix` 完整矩阵：29 passed。
-- 新增Worker计数与慢请求拒绝边界：连续10轮均2/2通过。
-- Python 编译、PowerShell AST、`git diff --check`：通过。
+- Windows真实拒绝delete sharing句柄复现旧实现：20次重试后约0.22秒稳定抛`WinError 5`。
+- 新Windows锁回归和Supervisor损坏快照/内存缓存回归：通过。
+- Agent服务文件：44 passed。
+- Agent服务、Collection API、MCP、Windows入口：98 passed。
+- 默认非PG套件：746 passed、56 skipped。
+- 专用55444数据库门禁：29 passed并关闭实例。
+- Python编译与`git diff --check`：通过。
 
-详细过程和未完成项见 [`progress.md`](../progress.md) 与 [`task_plan.md`](../task_plan.md)。
+详细过程见 [`progress.md`](../progress.md)、[`findings.md`](../findings.md) 和 [`task_plan.md`](../task_plan.md)。
 
-## 三 Worker 的现实容量
+## 下一步严格顺序
 
-当前部署配置只有 10 个会话端口，`proxy_session_retry_per_asin=1`，正式商品会话范围是 `per_asin`。该范围下 `proxy_session_max_asins` 不会合并不同 ASIN；每个 Worker 的 5-action pass需要5个生产槽和5个有界替换槽，共10槽。因此三 Worker需要30个通过同配置 canary 的唯一槽。此前文档写成12槽是错误的；配置变化后仍必须调用容量函数重新计算，不能只抄文档。
-
-即使请求 `AgentWorkerCount=3`，容量不够时 effective 仍会降到 2 或 1。生产判断只看 `/readyz` 的实际值，不能只看启动参数。
-
-## 下一步顺序
-
-1. 在管理员PowerShell执行`D:/woring/爬虫/outputs/prod-full-rollout-20260914/activate_reviewed_release.ps1`；脚本会安装`e345468`、备份pointer/wrapper、激活三Worker并在失败时回滚。
-2. 激活后复核目标tenant/subject且`requested_workers=3`、`effective_workers=3`、`alive_workers=3`、`capacity_backpressure=false`。
-3. 候选3-ASIN与20-ASIN受控验收通过后，才提交1,093条单一campaign。
-
-当前网页只允许 1/2 Worker。三 Worker在发布候选后应走 MCP campaign；若业务要求网页选择 3，先扩展 Operator 的 1/2 校验和页面选项并补测试。不要使用旧 `crawler.ps1 run -Limit 1093` 代替 campaign。
+1. 冻结已通过独立P0/P1 review的当前diff并制作新的不可变release；不得覆盖或复用`4021a56`。
+2. 以管理员权限恢复两项计划任务为真正Running托管状态，同时保持系统PowerShell7 Action。
+3. 刷新34槽非Amazon canary，并确认当前配置哈希、有效期和至少30个唯一槽。
+4. 在目标tenant对账并取消/终结失败门禁遗留的claimed成员，确认没有活动campaign/job/lease/reservation。
+5. 激活新release，持续观察三Worker而不是只看一次ready；必须requested/effective/alive/healthy=3/3/3/3、restart=0。
+6. 使用新的幂等键重新执行3-ASIN门禁；全部终态且无failed/blocked后再执行20条，之后才提交1,093条单一campaign。
 
 ## 新 Agent 开场检查
 
 ```powershell
 Set-Location 'D:\woring\爬虫\.worktrees\amazon-integrated-deploy'
 git branch --show-current
-git log -2 --oneline
+git log -3 --oneline
 git status --short
-```
-
-只有任务涉及部署或线上判断时，才只读核对：
-
-```powershell
 Get-Content 'D:\woring\爬虫\deploy\amazon-collection\current-release.txt'
 Get-Content 'D:\woring\爬虫\deploy\amazon-collection\operator-release.txt'
 curl.exe --silent --show-error --max-time 5 http://127.0.0.1:8765/readyz
 ```
 
-开场回复用户四项即可：候选代码状态、线上状态、剩余门禁、建议的下一步。未获得新授权前，不部署、不提交 campaign、不访问生产库或代理凭据。
+开场只汇报：候选diff状态、线上pointer/readiness、失败门禁遗留、下一道放行条件。不得把测试通过等同于已部署，不得复用失败campaign或旧幂等键，不得输出代理凭据。
 
 ## 可直接复制给新 Agent 的提示词
 
-> 在 `D:\woring\爬虫\.worktrees\amazon-integrated-deploy` 接手 Amazon Collection。先完整读取 `AGENTS.md` 和 `docs/agent_handoff_current.md`，再只读核对当前分支、提交、工作区状态；如果任务涉及线上，再核对 deploy pointers 和 `127.0.0.1:8765/readyz`。请先用四项回复我：候选代码状态、线上状态、剩余门禁、建议下一步。不要把提交当成已部署；本轮未明确授权前，不部署、不启动真实采集、不访问生产数据库或代理凭据。
+> 在`D:\woring\爬虫\.worktrees\amazon-integrated-deploy`接手Amazon Collection。先完整读取`AGENTS.md`和`docs/agent_handoff_current.md`，再只读核对分支、提交、工作区、deploy pointers、计划任务状态与`127.0.0.1:8765/readyz`。当前`4021a56`已被3-ASIN生产门禁否决，不得再次激活；先审查未提交的不可变Worker状态快照方案。请用四项回复：候选diff、线上状态、失败门禁遗留、下一放行条件。不要输出凭据，不要跳过3→20→1093门禁。

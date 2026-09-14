@@ -81,3 +81,16 @@
 - 30槽复测28可用被Gate拒绝；34槽配置复测34/34唯一可用且Gate allowed。冻结release备用端口最初因venv父子PID不等保持starting，最终代码工作树备用端口真实达到3/3/3/3。
 - 生产计划任务激活暴露wrapper编码问题：UTF-8无BOM被Windows PowerShell5.1误读中文路径。PowerShell7直接运行生产wrapper时目标tenant三Worker严格ready；管理员BOM续接未形成可靠终态并回到旧pointer。
 - 按多次发布失败停止自动重试。显式恢复并验证线上`592a65a`单Worker ready；目标tenant仍1093条已登记、0 active campaign/job/lease/reservation，全量未提交。
+- 用户拍板长期方案：系统级安装PowerShell7并迁移计划任务，不依赖Codex缓存。已从官方/winget确认稳定WiX版本7.6.6.0，准备带任务XML备份与动作回滚的管理员安装脚本；尚未安装、任务动作未改。
+- 系统级微软签名PowerShell 7.6.6已安装到`C:/Program Files/PowerShell/7/pwsh.exe`；`AmazonCollectionAgentService`和`AmazonCollectionPostgres`均完成XML备份并迁移到固定系统pwsh路径，旧release重启验证通过。
+- 生产激活`4021a56`成功，目标tenant三Worker初始readiness为requested/effective/alive/healthy=3/3/3/3、restart=0，34槽事实中32个唯一槽可用，容量Gate allowed。
+- 新3-ASIN门禁`campaign-0fa7b5ae1eb658c58e9ef8bae81ec2c6`运行中2 succeeded；随后三个Worker都在固定`worker-N.json`的`os.replace`遇到持续WinError 5，至少一个Worker重启且服务最终503。按门禁规则停止20条与1093条提交。
+- 失败候选pointer已回滚到Collection `592a65a`、Operator `71db26e`；旧tenant的API `/readyz`再次返回200 `ok=true`。管理员恢复脚本未形成回执，当前端口进程存活但计划任务显示Ready，计划任务托管状态仍需在下一次发布前恢复为Running。
+- 持续读锁复现稳定得到WinError 5（20次重试总耗时约0.22秒）。独立根因复核同意固定目标覆盖是协议级竞态；长期方案改为不可变launch-token/sequence快照，Supervisor单线程读取并缓存，API只读内存。
+- 新状态协议完成两个TDD纵向切片：Windows持有旧固定文件读锁时Worker仍能发布；最新快照损坏时Supervisor回退到上一完整快照并由缓存响应。Agent服务文件当前35 passed；尚待全套、隔离PG、独立review、新release与重新3/20门禁。
+- 初版长期协议验证为默认非PG 737 passed/56 skipped、隔离55444两文件29 passed并fast shutdown；Windows三真实子进程在3个锁定旧固定文件和8,000次并发status调用下持续15秒保持alive/healthy=3/3、restart=0。
+- 独立review报告2个P1并停止发布：非整数JSON sequence可能被Python相等语义接受；跨launch锁定快照可能无界增长。两项均按TDD修复：sequence读写严格类型校验；每Worker跨launch总配额64文件/1 MiB、单文件4 KiB，启动前预留失败即阻止spawn，清理失败与积压进入readiness。Agent服务文件现39 passed，待重新跑扩大回归与delta复核。
+- P1修复后新鲜验证：Agent服务40 passed；Agent/API/MCP/Windows入口94 passed；默认非PG 742 passed、56 skipped；隔离55444两文件29 passed并fast shutdown；三真实子进程在锁定旧固定文件和3,424次并发status调用下持续10秒保持3/3、restart=0、每Worker 3份快照。Python编译、diff检查通过；待原reviewer delta复核。
+- delta复核原两P1后新增2个P1并继续停止发布：inventory glob/stat失败会低估积压，读取端接受sequence=0。新增红测3 failed；inventory不完整直接计为超限、读写统一正整数后3 passed。主代理自审另补多Worker启动事务性回收红绿，Agent服务现44 passed；待重新跑扩大/全量/PG/压力验证和再次delta复核。
+- 最终P1修复后验证：相关98 passed；默认非PG 746 passed、56 skipped；隔离55444两文件29 passed并fast shutdown；三真实子进程在3个锁定旧固定文件和4,606次并发status调用下持续10秒保持3/3、restart=0、每Worker 3份快照。待最后delta复核。
+- 最终独立delta复核：非整数/零sequence、跨launch无界增长、inventory未知fail-open均关闭；多Worker部分启动回收有效，P0=0、P1=0，建议CONTINUE到冻结提交与新release。审查者独立复跑Agent服务44 passed和diff检查。

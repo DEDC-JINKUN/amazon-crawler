@@ -60,8 +60,8 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 - [x] 隔离 PostgreSQL 55444 的 17 个引擎测试；连同非 PG 矩阵共 29 passed。
 - [x] 独立 R3 差异审查无 P0/P1（最终冻结代码提交`b714556`）。
 - [x] 第三轮修复第二次复审的3个P1，并完成724项非PG与29项隔离PG回归。
-- [ ] 制作并部署不可变 release，保留旧 pointer 作为回滚点（`4021a56`已安装但未激活；自动化多次失败后停止）。
-- [ ] 三 Worker容量与 readiness 通过（备用端口3/3/3通过，计划任务生产激活未通过）。
+- [x] 制作并部署不可变 release，保留旧 pointer 作为回滚点（`4021a56`已安装并曾激活；业务门禁失败后pointer已回滚）。
+- [ ] 三 Worker容量与 readiness 持续通过（`4021a56`初始3/3/3/3通过，但业务运行后固定状态文件竞态导致Worker重启/503，不能算发布通过）。
 - [ ] 3条与20条真实验收通过（旧上线版3条已通过，20条待候选激活）。
 - [ ] 提交1,093条单一全量 campaign。
 - [ ] 第二轮独立复审新增3个P1；按用户“任一门禁失败立即停止”要求，发布流程已停止，等待是否授权第三轮代码修复。
@@ -76,9 +76,14 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 - [ ] 在隔离环境完成 1W/2W 对照；不执行 Amazon live 验证。
 - [x] 用户从DataImpulse Proxy Access取得实际代理凭据；10000与823均CONNECT 200/TLS1.3，10槽与30槽canary通过。
 - [x] 目标tenant事务登记1093条，且无活动campaign/job/lease/reservation。
-- [ ] 管理员运行`outputs/prod-full-rollout-20260914/activate_reviewed_release.ps1`完成release安装与三Worker切换。
+- [x] 管理员运行`outputs/prod-full-rollout-20260914/activate_reviewed_release.ps1`完成`4021a56`安装与初始三Worker切换；3-ASIN业务门禁证伪后已回滚。
 - [x] 真实候选启动复现Windows状态文件原子替换竞态并完成红绿修复。
 - [x] 对状态文件修复跑全套、独立R3 review并制作新不可变release；`e345468`不得再次激活（最终代码`4021a56`、独立review通过）。
+- [x] 长期运行时：机器级安装微软签名PowerShell 7.6.6 WiX/MSI。
+- [x] 备份并迁移AmazonCollectionAgentService/Postgres任务到固定系统pwsh路径与`-NonInteractive`。
+- [x] 用迁移后的计划任务重启旧release验证，再激活`4021a56`并取得初始三Worker readiness；业务门禁随后暴露独立状态协议故障。
+- [x] 完成不可变Worker状态快照与Supervisor内存缓存；全套、隔离PG、Windows持久并发和独立review全部通过（最终P0=0/P1=0）。
+- [ ] 制作新release，恢复计划任务托管为Running，重新执行3条→20条→1093条门禁。
 - [x] 修复独立review发现的监督器重启预删锁竞态并补红绿测试。
 - [x] 修复复核发现的PID复用旧状态冒认：每次spawn绑定launch token并补红绿测试。
 - [x] 修复复核发现的旧failed/blocked跨launch污染，并覆盖三种旧状态。

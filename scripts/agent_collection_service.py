@@ -27,6 +27,7 @@ from amazon_us_worker import (  # noqa: E402
 from collection_api import CollectionServer, LOOPBACK_HOSTS  # noqa: E402
 from collection_console import ConsoleServer, PostgresConsoleRepository  # noqa: E402
 from collection_storage import PostgresCollectionRepository  # noqa: E402
+from campaign_worker_status import prepare_status_snapshot_launch, read_latest_status_snapshot  # noqa: E402
 from postgres_worker_storage import PostgresWorkerStorage  # noqa: E402
 from proxy_canary import reservation_slots_for  # noqa: E402
 from proxy_capacity_gate import evaluate_capacity_fact  # noqa: E402
@@ -171,6 +172,7 @@ class CampaignWorkerSupervisor:
         self._states = {index: "created" for index in range(1, self.count + 1)}
         self._restart_counts = {index: 0 for index in range(1, self.count + 1)}
         self._launch_tokens = {index: "" for index in range(1, self.count + 1)}
+        self._documents: dict[int, dict[str, Any]] = {index: {} for index in range(1, self.count + 1)}
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -180,8 +182,10 @@ class CampaignWorkerSupervisor:
 
     def _spawn_locked(self, index: int) -> None:
         path = self._status_path(index)
+        prepare_status_snapshot_launch(path)
         launch_token = uuid.uuid4().hex
         self._launch_tokens[index] = launch_token
+        self._documents[index] = {}
         command = [
             *self.command,
             "--status-file", str(path),
@@ -199,14 +203,29 @@ class CampaignWorkerSupervisor:
         with self._lock:
             if self._thread is not None:
                 raise RuntimeError("campaign worker supervisor is already started")
-            for index in range(1, self.count + 1):
-                self._spawn_locked(index)
-            self._thread = threading.Thread(
-                target=self._monitor,
-                name="campaign-worker-supervisor",
-                daemon=True,
-            )
-            self._thread.start()
+            try:
+                for index in range(1, self.count + 1):
+                    self._spawn_locked(index)
+                self._thread = threading.Thread(
+                    target=self._monitor,
+                    name="campaign-worker-supervisor",
+                    daemon=True,
+                )
+                self._thread.start()
+            except Exception:
+                processes = list(self._children.values())
+                self._children.clear()
+                self._thread = None
+                for process in processes:
+                    if process.poll() is None:
+                        process.terminate()
+                for process in processes:
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
+                raise
 
     def _monitor(self) -> None:
         while not self._stop.wait(self.monitor_interval):
@@ -214,7 +233,12 @@ class CampaignWorkerSupervisor:
                 for index, process in list(self._children.items()):
                     return_code = process.poll()
                     if return_code is None:
-                        document = self._read_status(self._status_path(index)) or {}
+                        observed = read_latest_status_snapshot(
+                            self._status_path(index), launch_token=self._launch_tokens[index],
+                        )
+                        if observed is not None:
+                            self._documents[index] = observed
+                        document = self._documents[index]
                         now = datetime.now(timezone.utc)
                         heartbeat_fresh = self._timestamp_fresh(document.get("heartbeat_at"), now, self.heartbeat_timeout)
                         worker_heartbeat_fresh = self._timestamp_fresh(
@@ -249,14 +273,6 @@ class CampaignWorkerSupervisor:
                         self._states[index] = "failed"
 
     @staticmethod
-    def _read_status(path: Path) -> dict[str, Any] | None:
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        return value if isinstance(value, dict) else None
-
-    @staticmethod
     def _timestamp_fresh(value: Any, now: datetime, timeout: float) -> bool:
         try:
             observed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
@@ -274,7 +290,7 @@ class CampaignWorkerSupervisor:
                 process = self._children[index]
                 process_alive = process.poll() is None
                 alive += int(process_alive)
-                document = self._read_status(self._status_path(index)) or {}
+                document = self._documents[index]
                 heartbeat_fresh = self._timestamp_fresh(document.get("heartbeat_at"), now, self.heartbeat_timeout)
                 worker_heartbeat_fresh = self._timestamp_fresh(
                     document.get("worker_heartbeat_at"), now, self.worker_heartbeat_timeout,
@@ -293,6 +309,15 @@ class CampaignWorkerSupervisor:
                     process_alive and document_matches and heartbeat_fresh
                     and worker_heartbeat_fresh and reported_state == "running"
                 )
+                snapshot_backlog_files = document.get("snapshot_backlog_files")
+                if type(snapshot_backlog_files) is not int or snapshot_backlog_files < 0:
+                    snapshot_backlog_files = None
+                snapshot_cleanup_failures = document.get("snapshot_cleanup_failures")
+                if type(snapshot_cleanup_failures) is not int or snapshot_cleanup_failures < 0:
+                    snapshot_cleanup_failures = None
+                snapshot_backlog_bytes = document.get("snapshot_backlog_bytes")
+                if type(snapshot_backlog_bytes) is not int or snapshot_backlog_bytes < 0:
+                    snapshot_backlog_bytes = None
                 healthy += int(is_healthy)
                 child_states.append({
                     "index": index,
@@ -305,6 +330,9 @@ class CampaignWorkerSupervisor:
                     "heartbeat_fresh": heartbeat_fresh,
                     "worker_heartbeat_fresh": worker_heartbeat_fresh,
                     "restart_count": self._restart_counts[index],
+                    "status_snapshot_backlog_files": snapshot_backlog_files,
+                    "status_snapshot_backlog_bytes": snapshot_backlog_bytes,
+                    "status_snapshot_cleanup_failures": snapshot_cleanup_failures,
                     "last_error": (
                         "worker_heartbeat_stale"
                         if self._states[index] == "stalled"

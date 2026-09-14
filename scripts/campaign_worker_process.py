@@ -4,21 +4,16 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
-import json
 import os
 from pathlib import Path
 import re
 import signal
 import threading
-import time
-import uuid
 
 from agent_collection_service import AgentRefreshWorker
 from amazon_us_worker import _build_http_adapter, load_config
+from campaign_worker_status import publish_status_snapshot
 from postgres_worker_storage import PostgresWorkerStorage
-
-STATUS_REPLACE_ATTEMPTS = 20
-STATUS_REPLACE_DELAY_SECONDS = 0.01
 
 
 def _safe_error(value) -> str | None:
@@ -28,35 +23,17 @@ def _safe_error(value) -> str | None:
     return text[:120] or None
 
 
-def _write_status(path: Path | None, status: dict, launch_token: str) -> None:
+def _write_status(path: Path | None, status: dict, launch_token: str, sequence: int) -> None:
     if path is None:
         return
     payload = {
-        "schema": "amazon-campaign-worker-status-v1",
         "pid": os.getpid(),
-        "launch_token": launch_token,
         "state": str(status.get("state") or "unknown"),
         "last_error": _safe_error(status.get("last_error")),
         "heartbeat_at": datetime.now(timezone.utc).isoformat(),
         "worker_heartbeat_at": status.get("worker_heartbeat_at"),
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temporary.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
-    try:
-        for attempt in range(STATUS_REPLACE_ATTEMPTS):
-            try:
-                os.replace(temporary, path)
-                return
-            except PermissionError:
-                if attempt + 1 >= STATUS_REPLACE_ATTEMPTS:
-                    raise
-                time.sleep(STATUS_REPLACE_DELAY_SECONDS)
-    finally:
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
+    publish_status_snapshot(path, payload, launch_token=launch_token, sequence=sequence)
 
 
 def main() -> int:
@@ -110,11 +87,13 @@ def main() -> int:
     worker.start()
     exit_code = 0
     last_state = "starting"
+    status_sequence = 0
     try:
         while not stopped.wait(1.0):
             status = worker.status()
             last_state = str(status.get("state") or "unknown")
-            _write_status(status_file, status, args.launch_token)
+            status_sequence += 1
+            _write_status(status_file, status, args.launch_token, status_sequence)
             if last_state == "failed":
                 exit_code = 2
                 break
@@ -124,7 +103,13 @@ def main() -> int:
     finally:
         worker.stop()
         if stop_requested and last_state not in {"failed", "blocked"}:
-            _write_status(status_file, {"state": "stopped", "last_error": None}, args.launch_token)
+            status_sequence += 1
+            _write_status(
+                status_file,
+                {"state": "stopped", "last_error": None},
+                args.launch_token,
+                status_sequence,
+            )
     return exit_code
 
 

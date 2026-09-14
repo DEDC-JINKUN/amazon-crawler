@@ -73,3 +73,19 @@
 - 后续复核指出PID可能被操作系统复用；仅保留旧状态并核对PID仍可能短暂fail-open。最终采用每次spawn生成32位随机launch token，子进程写入状态，监督器同时匹配token与PID；新子进程首次状态前保持starting。
 - 再次复核发现`status()`虽计算launch匹配，却在匹配判断外传播旧文件的failed/blocked到内部状态。最终把running/failed/blocked的读取与传播都置于当前launch匹配之后；旧running/failed/blocked三种PID复用场景均保持starting。
 - 冻结release备用端口真实启动显示Windows venv的`Popen.pid`属于启动器父进程，状态文件PID属于真正执行Worker的子进程；强制PID相等会使健康Worker永久starting。launch token已足以绑定本次spawn，Popen本身负责生命周期；放宽PID等值后备用端口严格readiness为requested/effective/alive/healthy=3/3/3/3、restart=0。
+
+## 2026-09-14 PowerShell 7长期运行时
+
+- 官方稳定WiX/MSI包为`Microsoft.PowerShell 7.6.6.0`；固定机器路径应为`C:/Program Files/PowerShell/7/pwsh.exe`。
+- 已安装微软签名的系统级PowerShell 7.6.6，固定路径为`C:/Program Files/PowerShell/7/pwsh.exe`。
+- 两个生产任务均已备份XML并迁移Action到系统PowerShell7与`-NonInteractive`，原参数、触发器、Principal与Settings保留；旧release和`4021a56`都曾通过该任务动作启动。
+
+## 2026-09-14 生产门禁推翻固定状态文件方案
+
+- `4021a56`生产激活本身通过3/3/3/3 readiness，但3-ASIN业务门禁开始后，三个Worker仍分别在`_write_status -> os.replace(temp, worker-N.json)`遇到WinError 5；20次×10ms重试只延后崩溃，不能消除持续读锁。
+- Windows最小复现以允许读写但不允许delete sharing的真实`CreateFileW`句柄持有`worker-1.json`，旧实现稳定在约0.22秒后抛WinError 5。故根因是覆盖固定目标所依赖的Windows共享语义，不是Amazon页面、代理、PostgreSQL或Worker业务状态。
+- Supervisor监控线程和`/readyz`都曾读取同一个固定文件；外部诊断、杀毒或索引程序也可延长锁。继续增大重试预算仍无法给出上界，且会把状态通道故障升级成采集Worker退出，因此原架构作废。
+- 长期协议使用`worker-N.<launch-token>.<20位sequence>.json`不可变快照。Writer只创建新文件；Supervisor监控线程选择当前token的最新完整快照并缓存，API不再直接读文件。最新文件写入中/损坏时沿用上一完整缓存；旧快照删除失败为非致命best-effort，进程存活仍以受管Popen为权威。
+- 独立review发现两项P1：Python相等语义会让JSON boolean/float sequence冒充integer；锁定旧launch快照缺跨launch总上限。修复后读写两侧都严格要求原生`int`，并对每Worker设置64文件/1 MiB总配额、4 KiB单快照上限；启动前必须为3份滚动快照预留容量，否则fail closed。清理失败与积压数进入readiness子项。
+- delta复核继续发现两个P1：配额目录枚举/文件大小统计失败时把未知当0，以及读取端接受sequence=0。最终把inventory完整性纳入配额判定，glob/stat失败均拒绝spawn/publish；读写两端统一要求正整数。另补启动事务性清理，后续Worker预检失败时终止先前已启动成员。
+- 生产门禁已停止在3条，未提交20条或1093条。失败候选已恢复旧release指针；下一次放量必须重新经过全量测试、Windows三Worker持久并发、独立review和全新的3-ASIN门禁。
