@@ -65,6 +65,11 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 - [ ] 3条与20条真实验收通过。
 - [ ] 提交1,093条单一全量 campaign。
 - [ ] 第二轮独立复审新增3个P1；按用户“任一门禁失败立即停止”要求，发布流程已停止，等待是否授权第三轮代码修复。
+- [ ] 第三轮独立复审仍有3个P1；自动修复循环再次停止：并发降级仍ready、cancel返回completed竞态、completed但成员投影暂缺被记failed。
+- [x] 第四轮TDD：requested/effective不一致时Agent readiness阻断。
+- [x] 第四轮TDD：cancel返回completed时Operator保持completed。
+- [x] 第四轮TDD：权威campaign completed不被本地暂缺成员投影改写为failed。
+- [ ] 第四轮聚焦/全套/隔离PG验证、文档同步和独立R3 delta review（测试与文档已完成，待独立复审）。
 - [ ] 在隔离环境完成 1W/2W 对照；不执行 Amazon live 验证。
 
 ## Errors Encountered
@@ -86,6 +91,14 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 | 先前把三 Worker容量写成12槽 | 1 | 重新按 `per_asin + retry=1 + 5-action pass` 调用链核对：每 Worker 10槽，三 Worker需30个唯一槽；修正文档并以 canary/readiness 实值为放行依据。 |
 | 第二轮独立复审仍有3个P1 | 2 | 按R3与用户门禁立即停止自动发布；保留未提交修复现场，等待用户决定是否继续第三轮代码修复。 |
 | 第三轮中间聚焦测试一次loopback job查询超时并锁住临时SQLite | 1 | 单测复跑通过；最终完整非PG套件724 passed，未修改本轮无关的GET job路径。 |
+| 第三轮独立复审仍有3个P1 | 3 | 按R3收敛规则停止继续修改与发布；保留提交`6b84fa1`和审查证据，等待用户决定是否再开一轮定点修复。 |
+| 当前上线版提交1093条完整campaign返回`asin_not_found` | 1 | 服务与Worker保持运行；请求在建批前原子拒绝，未重试。先查明生产租户ASIN登记/导入入口，再决定是否提交。 |
+| 第四轮完整回归在专用PG门禁文件处出现fixture errors/长等待 | 1–3 | 首次误继承已关闭55444 DSN；随后确认`test_operator_acceptance_matrix.py`与`test_operator_batch_store_v2.py`都按设计主动要求专用PG而非skip。中止无效运行，最终按既有门禁排除这两个文件跑非PG套件，再启动55444单跑二者共29项。 |
+| 候选目录下未找到专用PG数据目录 | 1 | 未启动任何数据库；按既有记录改为核对工作区根`D:/woring/爬虫/.test-tmp/operator-matrix-postgres`，继续确认端口配置后再启动。 |
+| 生产只读Worker诊断首次查询假设了不存在的recovery列 | 1 | PostgreSQL返回`UndefinedColumn/42703`且未执行写操作；改为`to_jsonb(row)`读取实际行结构，再在Python中筛选非敏感状态字段。 |
+| 当前上线版10槽非Amazon canary全部`network_error` | 1 | 10/10 connect/TLS失败、可用/唯一槽均0，容量Gate按设计拒绝；不重试、不访问Amazon，3-ASIN campaign保持queued等待有效容量事实。 |
+| PowerShell 7的HTTP异常对象不支持`GetResponseStream` | 1 | 只读readyz读取失败；改用`curl.exe`同时记录状态码与JSON正文。 |
+| 冻结提交缺少本仓库本地Git作者配置 | 1 | 未生成提交；沿用现有提交作者`Codex <codex@local>`写入仅本仓库配置后重试。 |
 
 ## 本轮自测
 

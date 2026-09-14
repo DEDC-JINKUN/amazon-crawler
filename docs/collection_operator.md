@@ -23,7 +23,7 @@ Operator 是独立的 loopback-only 写入口，默认监听 `127.0.0.1:8772`。
 .\operator.ps1 stop
 ```
 
-`operator.ps1 stop` 只停止 Operator Web 服务，不会误杀已有 campaign。运行中的批次必须在页面点击“停止当前批次”；该操作向同一个 `campaign_id` 发取消请求，尚未开始的成员进入 cancelled，已经持有租约的成员继续到真实终态。原 Runner丢失时，Operator会重新启动受控取消 Runner；后端未确认 cancelled/terminal 前状态保持 `cancel_pending`，页面显示“取消待确认”并阻止下一批。后端已先完成时，completed优先于晚到的停止请求。
+`operator.ps1 stop` 只停止 Operator Web 服务，不会误杀已有 campaign。运行中的批次必须在页面点击“停止当前批次”；该操作向同一个 `campaign_id` 发取消请求，尚未开始的成员进入 cancelled，已经持有租约的成员继续到真实终态。原 Runner丢失时，Operator会重新启动受控取消 Runner；后端未确认 cancelled/terminal 前状态保持 `cancel_pending`，页面显示“取消待确认”并阻止下一批。后端completed是权威终态：无论它发生在停止请求之前还是取消调用返回时，都优先于本地stop意图；本地成员计数投影暂时落后也不能把completed改写为failed。
 
 控制入口使用按规范化 release/data/port 生成的 Windows 命名 mutex 串行化 start 与 stop。stop 在等待超时后只会强制终止再次核验过 PID/启动时间的进程，随后同时确认进程和端口释放，并在删除前确认 lock 仍对应原进程；任何核验失败都会保留 lock 并返回非零。
 

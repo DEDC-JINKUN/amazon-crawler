@@ -129,6 +129,9 @@ def worker_pool_status(
         "alive_workers": int(alive),
         "capacity_backpressure": int(effective) < int(requested),
     })
+    if int(effective) < int(requested) and status.get("state") not in {"failed", "stopped"}:
+        status["state"] = "blocked"
+        status["last_error"] = "worker_capacity_downshifted"
     if capacity_decision is not None:
         status["capacity_decision"] = dict(capacity_decision)
         if capacity_decision.get("status") != "allowed" and status.get("state") not in {"failed", "stopped"}:

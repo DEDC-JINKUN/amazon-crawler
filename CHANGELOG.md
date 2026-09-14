@@ -13,6 +13,7 @@
 - Operator 生产批次改为复用 Collection campaign：Agent 与网页的提交、进度和取消共享 `collection_campaign` 成员事实，不再由 Operator 直接启动旧 ordinary 双 Worker Controller，也不再用历史商品状态推断本轮完成。Agent 服务支持 `-AgentWorkerCount 1..8`，并把 requested/effective/alive Worker 数及容量降级写入 readiness；Operator 请求的并发不可用时在提交前拒绝。Operator runner 只接收 DPAPI 中的 Collection API Key，不再接收 PostgreSQL DSN 或代理凭据；campaign 截止时间独立配置，默认 1 天，不复用旧单 Worker 的 90 分钟恢复时限。
 - Collection readiness 增加 `subject_type`，Operator 与 tenant 一起前置核对。API 在拒绝有请求体的未授权、越权或限流请求前，会有界丢弃已声明的小请求体；loopback 客户端对 Windows 10053/10054 连接重置做一次有限重试，避免短暂本机传输故障覆盖应返回的业务结果。
 - 多进程 campaign Worker新增受监督子进程、进程心跳和业务线程心跳；持续容量事实无效、心跳停滞、重启耗尽或blocked时 `/readyz` 和新任务均fail closed。Operator原Runner丢失后会重新拉起同一幂等campaign的受控取消路径；未确认取消保持`cancel_pending`，已完成campaign不被晚到stop改写。
+- Worker pool只要requested/effective/alive不一致或发生容量降级，`/readyz`与新refresh/campaign即返回503；拒绝带请求体的请求前会有界读取声明长度，避免Windows把结构化503变成10053。Operator停止竞态中后端completed始终优先，本地成员投影暂时落后也不得把权威完成终态改写为failed。
 - Agent 业务命令现在自动确保本机受控服务已启动；Agent refresh Worker 与普通 Worker 统一通过同一 adapter factory，配置时均使用有界 `ProxySessionPool`，同一5-ASIN批量在一个 runner run 内执行。运行时组合指纹覆盖 Worker、代理池、API、存储和配置，受控旧版本可安全替换且未知监听器保持 fail closed；liveness/readiness 分离后，采集熔断不再阻断历史快照和 job 查询。
 - 新增 DataImpulse 有界粘滞会话池：每会话独立 CookieJar/opener，按 ASIN 预算主动换槽，访问控制隔离、单 ASIN 最多一次新会话重试、连续/滑窗/容量熔断，并在 evidence、Console 和 receipt 中保留脱敏会话归因与跨槽流量。
 - 有界会话池的批准端口上限由20提高到40；34槽×3 ASIN 的100商品离线模拟全部完成且保留100条evidence，超过40仍启动前拒绝。

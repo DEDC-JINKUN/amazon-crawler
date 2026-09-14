@@ -151,6 +151,13 @@ class CompletedBeforeStopClient(CompletingCampaignClient):
         raise AssertionError("terminal campaign must not be cancelled")
 
 
+class CompletedDuringCancelClient(CancelledCampaignClient):
+    def cancel_campaign(self, campaign_id):
+        assert campaign_id == self.campaign_id
+        self.cancelled += 1
+        return {"campaign": self._campaign("completed", ["succeeded", "variant", "succeeded"])}
+
+
 class RetryingCancelCampaignClient(CancelledCampaignClient):
     def cancel_campaign(self, campaign_id):
         assert campaign_id == self.campaign_id
@@ -572,4 +579,34 @@ def test_late_stop_does_not_relabel_an_already_completed_campaign(tmp_path):
 
     assert result == 0
     progress = json.loads((batch_dir / "progress.json").read_text(encoding="utf-8"))
+    assert progress["status"] == "completed"
+
+
+def test_cancel_response_completed_wins_over_local_stop_intent(tmp_path):
+    from operator_campaign_runner import CampaignRunSpec, run_campaign
+
+    batch_dir = tmp_path / ("batch-" + "e" * 24)
+    batch_dir.mkdir()
+    manifest = batch_dir / "manifest.csv"
+    write_manifest(manifest, ["B0TEST0001", "B0TEST0002", "B0TEST0003"])
+    client = CompletedDuringCancelClient()
+
+    result = run_campaign(
+        CampaignRunSpec(
+            batch_dir=batch_dir,
+            manifest=manifest,
+            tenant_id="owned-products",
+            subject_type="own",
+            worker_count=2,
+            poll_seconds=0,
+        ),
+        client,
+        sleep=lambda _seconds: None,
+        stop_requested=lambda: True,
+    )
+
+    assert result == 0
+    assert client.cancelled == 1
+    progress = json.loads((batch_dir / "progress.json").read_text(encoding="utf-8"))
+    assert progress["campaign_status"] == "completed"
     assert progress["status"] == "completed"

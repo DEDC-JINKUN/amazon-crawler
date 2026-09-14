@@ -47,3 +47,9 @@
 - 第二轮独立delta复审仍为STOP：业务心跳不能证明Worker线程未卡死；cancel失败仍可能被BatchManager记为stopped；BatchManager可能把已完成campaign被晚到stop改写。按用户门禁停止，未部署、未改生产配置、未提交campaign。
 - 用户授权继续第三轮代码修复。新增Worker线程业务心跳与超时有限重启；取消未确认保持`cancel_pending`且阻止下一批；后端completed优先于晚到stop。第三轮聚焦回归117 passed，尚待全套、PG和独立审查。
 - 第三轮最终非PG套件724 passed、56 skipped、0 failed；隔离PG矩阵29 passed并fast shutdown。一次中间聚焦运行出现旧loopback job查询超时，单测复跑通过，最终全套无复现。
+- 第三轮修复冻结提交`6b84fa1`。独立R3审查仍STOP：requested 3降为effective 1/2时仍可能ready；cancel调用返回completed时Runner仍可能写stopped；campaign_status completed但成员投影暂缺时BatchManager会写failed。另有Supervisor强杀/Job Object/控制文件竞态P2。未发布、未改生产配置、未提交campaign。
+- 用户要求先保持上线爬虫运行再继续修复。核对release `592a65a`：`/healthz`与`/readyz`均200，单Worker为running。1093条清单校验为1093个唯一合法ASIN；使用稳定幂等键提交完整campaign时生产API以`asin_not_found`原子拒绝，未创建campaign。服务继续运行，等待核对现行ASIN导入入口。
+- 未改变生产租户边界；改为对上线版已登记的3个ASIN提交后台campaign `campaign-579718cdd550503aba7e5ea996179b80`。API返回202，状态active，3项queued；release仍为`592a65a`、单Worker，未使用候选代码。
+- 生产只读诊断确认3个refresh/recovery job预算均为new且未暂停；当前唯一容量事实已过期。随后按门禁对10个批准槽执行一次非Amazon canary：10/10为`network_error`，available/unique=0，Gate=`denied:unique_capacity_insufficient`。未访问Amazon、未重复探测；campaign保留queued，不能宣称正在实际抓取。
+- 第四轮针对独立复审3个P1完成TDD：requested/effective/alive降级时API与`/readyz`阻断；cancel返回completed时后端终态优先；BatchManager不再把权威completed因本地成员投影暂缺改成failed。Windows 503拒绝路径补齐有界请求体读取，相关循环20轮稳定。
+- 第四轮验证：相关模块122 passed；完整非PG套件727 passed、56 skipped；专用55444两文件29 passed并fast shutdown，确认55444无监听；Python编译与`git diff --check`通过。待冻结提交与独立R3 delta review。

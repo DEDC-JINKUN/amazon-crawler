@@ -103,10 +103,10 @@ def _project_campaign(campaign: dict[str, Any], *, stopping: bool = False) -> di
     campaign_terminal = campaign_status in {"completed", "cancelled", "expired"} and terminal == total
     if not campaign_terminal:
         operator_status = "running"
-    elif stopping:
-        operator_status = "stopped"
     elif campaign_status == "completed":
         operator_status = "completed"
+    elif stopping:
+        operator_status = "stopped"
     else:
         operator_status = "failed"
     return {

@@ -98,7 +98,7 @@ def test_embedded_worker_readiness_rejects_a_stale_business_heartbeat():
     assert status["last_error"] == "worker_heartbeat_stale"
 
 
-def test_worker_pool_status_exposes_requested_effective_and_alive_after_capacity_downshift():
+def test_worker_pool_status_blocks_requested_effective_capacity_downshift():
     service = load("agent_collection_service")
 
     class EmbeddedWorker:
@@ -107,7 +107,8 @@ def test_worker_pool_status_exposes_requested_effective_and_alive_after_capacity
 
     status = service.worker_pool_status(EmbeddedWorker(), [], requested=2, effective=1)
 
-    assert status["state"] == "running"
+    assert status["state"] == "blocked"
+    assert status["last_error"] == "worker_capacity_downshifted"
     assert status["processed_actions"] == 3
     assert status["requested_workers"] == 2
     assert status["effective_workers"] == 1

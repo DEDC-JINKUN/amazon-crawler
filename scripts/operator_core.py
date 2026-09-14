@@ -702,7 +702,7 @@ class BatchManager:
             and members_terminal
         )
         campaign_status = str(record.get("campaign_status") or "")
-        if campaign_status == "completed" and members_terminal:
+        if campaign_status == "completed":
             record["status"] = "completed"
             record["latest_error"] = None
         elif record.get("stop_requested") and campaign_status == "cancelled" and members_terminal:

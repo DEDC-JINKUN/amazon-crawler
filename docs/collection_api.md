@@ -81,7 +81,7 @@ GET /v1/capabilities
 GET /readyz
 ```
 
-`/healthz` 只证明进程存活；`/readyz` 会读取当前租户数据库并检查 PostgreSQL 关键 schema。数据库不可用或 schema 不完整时返回 HTTP 503 `database_unavailable` 或 `schema_not_ready`。PostgreSQL 后端正常时额外返回 `tenant_id` 和 `subject_type`，SQLite 不返回这两个字段。Operator 提交前同时核对两者，防止把竞品批次交给自有商品 Worker pool。
+`/healthz` 只证明进程存活；`/readyz` 会读取当前租户数据库并检查 PostgreSQL 关键 schema。数据库不可用或 schema 不完整时返回 HTTP 503 `database_unavailable` 或 `schema_not_ready`。PostgreSQL 后端正常时额外返回 `tenant_id` 和 `subject_type`，SQLite 不返回这两个字段。Operator 提交前同时核对两者，防止把竞品批次交给自有商品 Worker pool。若声明了 Worker pool 数量，则只有 `requested_workers == effective_workers == alive_workers` 且没有 `capacity_backpressure` 时才返回200；任何容量降级都返回503并拒绝新的refresh/campaign。拒绝POST前会有界读取已声明的小请求体，保证Windows客户端稳定收到结构化503。
 
 ### 健康检查
 

@@ -41,3 +41,11 @@
 - campaign 成员 `job_status=failed` 但 `item_status=blocked` 或 recovery outcome 为 access control 时，Operator 继续显示 blocked，不合并进普通 failed。
 - `/readyz` 现在公开当前 repository 的 `subject_type`；Operator 与 tenant 一起核对，避免 own/competitor/candidate 误路由。
 - Windows 上认证拒绝前关闭仍有未读请求体的 socket 会偶发 RST；服务端有界 drain 与客户端对 10053/10054 的一次有限重试分别覆盖拒绝响应和幂等 campaign 调用。
+
+## 2026-09-14 第四轮三个P1根因
+
+- Worker降级根因：`effective_worker_count`允许按容量降级，但`worker_pool_status`只把降级记录为`capacity_backpressure=true`，仍保留`state=running`；因此`/readyz`和Collection提交门继续返回可用。生产合同要求requested/effective不一致即fail-closed。
+- 停止竞态根因：`_project_campaign`在确认campaign终态后先判断本地`stopping`，后判断后端`campaign_status=completed`；本地停止意图错误覆盖了权威后端完成事实。
+- 完成投影根因：`BatchManager._finish_record`只在`campaign_status=completed AND members_terminal`时完成，否则落入通用失败分支。后端campaign是批次权威，成员计数是本地投影；权威完成状态不应被暂缺投影改写为失败。
+
+修复假设：保持现有campaign权威架构，只调整三处优先级/门禁，不新增事实源；通过Agent readiness、Operator runner、BatchManager三个已确认公共seam各加一条红测验证。

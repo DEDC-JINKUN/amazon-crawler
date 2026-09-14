@@ -830,6 +830,36 @@ def test_completed_campaign_wins_over_late_operator_stop_at_batch_manager_seam(t
     assert json.loads((batch_dir / "receipt.json").read_text(encoding="utf-8"))["status"] == "completed"
 
 
+def test_backend_completed_campaign_is_not_failed_by_a_lagging_member_projection(tmp_path):
+    manager = BatchManager(settings(tmp_path))
+    batch_id = "batch-" + "9" * 24
+    batch_dir = manager.settings.data_root / "batches" / batch_id
+    batch_dir.mkdir(parents=True)
+    record = {
+        "schema_version": "amazon-operator-batch-v1", "batch_id": batch_id,
+        "tenant_id": "owned-products", "subject_type": "own", "status": "running",
+        "worker_count": 2, "requested": 1, "claimed": 0, "completed": 0,
+        "variant": 0, "failed": 0, "blocked": 0, "pending": 1,
+        "latest_error": None, "stop_requested": False,
+        "started_at": "2026-09-14T00:00:00+00:00", "finished_at": None,
+    }
+    (batch_dir / "batch.json").write_text(json.dumps(record), encoding="utf-8")
+    (batch_dir / "campaign.json").write_text(json.dumps({
+        "campaign_id": "campaign-" + "9" * 32,
+    }), encoding="utf-8")
+    (batch_dir / "progress.json").write_text(json.dumps({
+        **record,
+        "campaign_status": "completed",
+    }), encoding="utf-8")
+
+    manager._finish_record(batch_id, 0)
+
+    result = manager.get_batch(batch_id)
+    assert result["campaign_status"] == "completed"
+    assert result["status"] == "completed"
+    assert result["latest_error"] is None
+
+
 def test_monitor_releases_batch_mutex_when_finalization_raises(tmp_path, monkeypatch):
     manager = BatchManager(settings(tmp_path))
     released = []

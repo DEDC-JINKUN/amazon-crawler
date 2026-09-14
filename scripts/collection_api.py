@@ -339,7 +339,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
             if callable(status_loader):
                 worker_status = status_loader()
                 payload["refresh_worker"] = worker_status
-                if worker_status.get("state") != "running":
+                if not self.server.refresh_worker_ready(worker_status):
                     payload.update({"ok": False, "error": "refresh_worker_unavailable"})
                     self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, payload)
                     return
@@ -513,6 +513,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "watch_reporting_unavailable"})
             return
         if path != "/v1/asin/batch" and not re.fullmatch(r"/v1/campaigns/campaign-[a-f0-9]{32}/cancel",path) and not self.server.can_accept_refresh():
+            self._discard_auth_body()
             self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "refresh_worker_unavailable"})
             self._audit(principal, "request_refresh", path, "worker_unavailable")
             return
@@ -679,7 +680,22 @@ class CollectionServer(ThreadingHTTPServer):
     def can_accept_refresh(self) -> bool:
         if not callable(self.refresh_worker_status):
             return True
-        return self.refresh_worker_status().get("state") == "running"
+        return self.refresh_worker_ready(self.refresh_worker_status())
+
+    def refresh_worker_ready(self, worker_status: dict[str, Any]) -> bool:
+        if worker_status.get("state") != "running":
+            return False
+        if bool(worker_status.get("capacity_backpressure")):
+            return False
+        if "requested_workers" not in worker_status:
+            return True
+        try:
+            requested = int(worker_status.get("requested_workers") or 0)
+            effective = int(worker_status.get("effective_workers") or 0)
+            alive = int(worker_status.get("alive_workers") or 0)
+        except (TypeError, ValueError):
+            return False
+        return requested > 0 and effective >= requested and alive >= requested
 
     def allow_request(self, agent_id: str) -> bool:
         import time
