@@ -49,3 +49,8 @@
 - 完成投影根因：`BatchManager._finish_record`只在`campaign_status=completed AND members_terminal`时完成，否则落入通用失败分支。后端campaign是批次权威，成员计数是本地投影；权威完成状态不应被暂缺投影改写为失败。
 
 修复假设：保持现有campaign权威架构，只调整三处优先级/门禁，不新增事实源；通过Agent readiness、Operator runner、BatchManager三个已确认公共seam各加一条红测验证。
+
+## 2026-09-14 第四轮独立复审新增P1
+
+- 部分Worker计数字段会fail-open：`refresh_worker_ready`在缺少`requested_workers`时直接兼容放行，即使已经报告`effective_workers=3/alive_workers=1`。兼容只应允许“全部计数字段都未提供”的旧单Worker状态；一旦提供任一计数字段，三者必须齐全且满足requested/effective/alive。
+- POST拒绝drain只有1 MiB字节上限，没有墙钟时间上限；客户端可声明合法长度后缓慢发送，占住ThreadingHTTPServer线程。需要固定总deadline而不是每次读取重新续期。

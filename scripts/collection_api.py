@@ -10,6 +10,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -221,20 +222,44 @@ def _agent_product_summary(payload: dict[str, Any]) -> dict[str, Any]:
 class CollectionHandler(BaseHTTPRequestHandler):
     server: "CollectionServer"
 
-    def _discard_auth_body(self, limit: int = 1048576) -> None:
-        """Drain a bounded denied request body so Windows can deliver the JSON error before close."""
+    def _discard_auth_body(self, limit: int = 1048576, timeout_seconds: float = 0.25) -> bool:
+        """Drain a bounded denied body within one fixed deadline."""
         if self.command not in {"POST", "PUT", "PATCH"}:
-            return
+            return True
         try:
             length = int(self.headers.get("Content-Length") or "0")
         except ValueError:
             self.close_connection = True
-            return
+            return False
         if length < 0 or length > limit:
             self.close_connection = True
-            return
-        if length:
-            self.rfile.read(length)
+            return False
+        if not length:
+            return True
+        deadline = time.monotonic() + max(0.01, float(timeout_seconds))
+        previous_timeout = self.connection.gettimeout()
+        remaining = length
+        try:
+            while remaining:
+                seconds_left = deadline - time.monotonic()
+                if seconds_left <= 0:
+                    self.close_connection = True
+                    return False
+                self.connection.settimeout(seconds_left)
+                chunk = self.rfile.read(min(remaining, 65536))
+                if not chunk:
+                    self.close_connection = True
+                    return False
+                remaining -= len(chunk)
+            return True
+        except (OSError, TimeoutError):
+            self.close_connection = True
+            return False
+        finally:
+            try:
+                self.connection.settimeout(previous_timeout)
+            except OSError:
+                self.close_connection = True
 
     def _send_json(self, status: int, payload: dict[str, Any], headers: dict[str, str] | None = None) -> None:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=_json_default).encode("utf-8")
@@ -687,8 +712,12 @@ class CollectionServer(ThreadingHTTPServer):
             return False
         if bool(worker_status.get("capacity_backpressure")):
             return False
-        if "requested_workers" not in worker_status:
+        count_fields = ("requested_workers", "effective_workers", "alive_workers")
+        present = tuple(name in worker_status for name in count_fields)
+        if not any(present):
             return True
+        if not all(present):
+            return False
         try:
             requested = int(worker_status.get("requested_workers") or 0)
             effective = int(worker_status.get("effective_workers") or 0)

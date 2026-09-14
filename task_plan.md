@@ -69,7 +69,9 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 - [x] 第四轮TDD：requested/effective不一致时Agent readiness阻断。
 - [x] 第四轮TDD：cancel返回completed时Operator保持completed。
 - [x] 第四轮TDD：权威campaign completed不被本地暂缺成员投影改写为failed。
-- [ ] 第四轮聚焦/全套/隔离PG验证、文档同步和独立R3 delta review（测试与文档已完成，待独立复审）。
+- [ ] 第四轮聚焦/全套/隔离PG验证、文档同步和独立R3 delta review（修复后测试与文档已完成，待最终delta复审）。
+- [x] 第四轮独立复审新增P1：Worker计数字段部分缺失必须fail closed。
+- [x] 第四轮独立复审新增P1：拒绝POST的请求体drain必须有固定总时间上限。
 - [ ] 在隔离环境完成 1W/2W 对照；不执行 Amazon live 验证。
 
 ## Errors Encountered

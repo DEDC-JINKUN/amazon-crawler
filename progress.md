@@ -53,3 +53,6 @@
 - 生产只读诊断确认3个refresh/recovery job预算均为new且未暂停；当前唯一容量事实已过期。随后按门禁对10个批准槽执行一次非Amazon canary：10/10为`network_error`，available/unique=0，Gate=`denied:unique_capacity_insufficient`。未访问Amazon、未重复探测；campaign保留queued，不能宣称正在实际抓取。
 - 第四轮针对独立复审3个P1完成TDD：requested/effective/alive降级时API与`/readyz`阻断；cancel返回completed时后端终态优先；BatchManager不再把权威completed因本地成员投影暂缺改成failed。Windows 503拒绝路径补齐有界请求体读取，相关循环20轮稳定。
 - 第四轮验证：相关模块122 passed；完整非PG套件727 passed、56 skipped；专用55444两文件29 passed并fast shutdown，确认55444无监听；Python编译与`git diff --check`通过。待冻结提交与独立R3 delta review。
+- 第四轮冻结提交`328e8f9`。独立R3 delta review确认原3个P1已关闭，但新增2个P1：部分Worker计数字段fail-open；拒绝POST drain缺固定总时间上限。按用户“继续修”授权进入定点TDD，仍未部署。
+- 两个复审P1均完成红绿：Worker计数字段全无时才允许旧单Worker兼容，部分出现即503；拒绝body drain使用固定总deadline。新增场景2 passed，Collection API文件25 passed；文档与CHANGELOG同步。
+- 复审修复后的新鲜验证：相关模块124 passed；完整非PG 729 passed、56 skipped；专用55444矩阵29 passed并fast shutdown；两个新增边界连续10轮均2/2通过。待冻结delta并由原独立reviewer复核。

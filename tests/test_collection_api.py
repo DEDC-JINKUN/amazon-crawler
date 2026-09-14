@@ -3,11 +3,13 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import socket
 import sqlite3
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 import unittest
@@ -495,6 +497,62 @@ class CollectionApiTests(unittest.TestCase):
                 urllib.request.urlopen(request, timeout=2)
             self.assertEqual(submit.exception.code, 503)
         finally:
+            server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+    def test_readyz_fails_closed_when_worker_count_projection_is_partial(self):
+        api = load("collection_api")
+
+        class Repository:
+            def load_job_status(self): return {"counts": {}}
+
+        server = api.CollectionServer(
+            ("127.0.0.1", 0), repository=Repository(),
+            refresh_worker_status=lambda: {
+                "state": "running",
+                "effective_workers": 3,
+                "alive_workers": 1,
+            },
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as ready:
+                urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/readyz", timeout=2)
+            self.assertEqual(ready.exception.code, 503)
+        finally:
+            server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+    def test_unready_post_drain_has_a_fixed_wall_clock_deadline(self):
+        api = load("collection_api")
+
+        class Repository:
+            def load_job_status(self): return {"counts": {}}
+
+        server = api.CollectionServer(
+            ("127.0.0.1", 0), repository=Repository(), api_key="master-key",
+            refresh_worker_status=lambda: {"state": "blocked"},
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        client = socket.create_connection(("127.0.0.1", server.server_port), timeout=2)
+        client.settimeout(1.5)
+        try:
+            request = (
+                "POST /v1/campaigns HTTP/1.1\r\n"
+                "Host: 127.0.0.1\r\n"
+                "Content-Type: application/json\r\n"
+                "Content-Length: 1048576\r\n"
+                "X-Collection-API-Key: master-key\r\n"
+                "Connection: close\r\n\r\n"
+            ).encode("ascii") + b"{"
+            started = time.monotonic()
+            client.sendall(request)
+            response = client.recv(4096)
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 1.0)
+            self.assertIn(b"503", response)
+        finally:
+            client.close()
             server.shutdown(); server.server_close(); thread.join(timeout=2)
 
     def test_readyz_converts_unexpected_repository_error_to_503(self):
