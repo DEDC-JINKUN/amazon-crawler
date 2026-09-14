@@ -74,6 +74,7 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 - [x] 第四轮独立复审新增P1：拒绝POST的请求体drain必须有固定总时间上限。
 - [x] 最终delta复核遗留P1：完整Worker计数字段必须严格相等而不是仅大于等于requested。
 - [ ] 在隔离环境完成 1W/2W 对照；不执行 Amazon live 验证。
+- [ ] 用户本机更新被407拒绝的DataImpulse凭据；随后单会话CONNECT验证、新canary和发布门禁。
 
 ## Errors Encountered
 
@@ -103,6 +104,8 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 | PowerShell 7的HTTP异常对象不支持`GetResponseStream` | 1 | 只读readyz读取失败；改用`curl.exe`同时记录状态码与JSON正文。 |
 | 冻结提交缺少本仓库本地Git作者配置 | 1 | 未生成提交；沿用现有提交作者`Codex <codex@local>`写入仅本仓库配置后重试。 |
 | 交接文档观察时间行保留Markdown双空格导致`git diff --check`失败 | 1 | 删除行尾空格后重跑，未生成不合格提交。 |
+| 生成PowerShell凭据轮换入口时JS模板误解释`${...}` | 1 | 文件未写入；改用PowerShell字符串拼接后由`apply_patch`成功创建。 |
+| 交互终端首次指定了不存在的`C:/Program Files/PowerShell/7/pwsh.exe` | 1 | 脚本未运行、vault未修改；改由当前Codex PowerShell宿主直接执行脚本。 |
 
 ## 本轮自测
 

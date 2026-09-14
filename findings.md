@@ -55,3 +55,9 @@
 - 部分Worker计数字段会fail-open：`refresh_worker_ready`在缺少`requested_workers`时直接兼容放行，即使已经报告`effective_workers=3/alive_workers=1`。兼容只应允许“全部计数字段都未提供”的旧单Worker状态；一旦提供任一计数字段，三者必须齐全且满足requested/effective/alive。
 - POST拒绝drain只有1 MiB字节上限，没有墙钟时间上限；客户端可声明合法长度后缓慢发送，占住ThreadingHTTPServer线程。需要固定总deadline而不是每次读取重新续期。
 - 最终delta复核发现完整计数字段仍只校验`effective/alive >= requested`，与文档的三项严格相等合同不一致；任何计数矛盾都必须fail closed。
+
+## 2026-09-14 生产代理阻断根因
+
+- 本机DNS解析正常、`gw.dataimpulse.com:10000` TCP可达、直连非Amazon健康目标返回200。
+- 当前部署vault与旧源码vault各做一次脱敏原始CONNECT检查，网关均明确返回HTTP 407；故障位于代理凭据被供应商拒绝，不是Amazon、DNS、本机网络或TLS证书。
+- 不再重复canary。恢复需要用户在本机隐藏输入新的DataImpulse账号/密码；更新只替换部署vault的代理字段，保留生产DSN/API Key并先生成加密回滚副本。

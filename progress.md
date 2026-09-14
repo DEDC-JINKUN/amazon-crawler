@@ -59,3 +59,4 @@
 - delta提交`55fc6ce`复核确认部分字段与固定drain deadline两个P1均关闭；遗留1个P1：完整计数使用`>=`而非严格相等，发布继续阻断。
 - 最后一个P1完成红绿：完整计数字段改为`requested == effective == alive`。四个readiness/drain边界4 passed；修复后完整非PG 730 passed、56 skipped；专用55444矩阵29 passed并fast shutdown；待最终只读复核。
 - 最终冻结代码提交`b714556`经独立R3复核：P0=0、P1=0，可继续发布门禁。未部署；生产仍为`592a65a`单Worker，3-ASIN campaign因当天10槽非Amazon canary 0/10可用而queued，`/readyz`为503 `canary_fact_denied`。
+- 继续诊断生产容量阻断：DNS、代理TCP和直连非Amazon目标正常；部署vault与旧源码vault分别进行一次脱敏CONNECT，均返回407。根因确定为供应商拒绝现有凭据。已在outputs准备仅替换代理字段的交互式DPAPI轮换入口，尚未运行、未改vault。
