@@ -58,7 +58,7 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 - [x] Windows loopback 鉴权响应与幂等 campaign 调用具备有界抗重置处理。
 - [x] 完整非 PG 测试、差异复核与文档一致性验收。
 - [x] 隔离 PostgreSQL 55444 的 17 个引擎测试；连同非 PG 矩阵共 29 passed。
-- [ ] 独立 R3 差异审查无 P0/P1。
+- [x] 独立 R3 差异审查无 P0/P1（最终冻结代码提交`b714556`）。
 - [x] 第三轮修复第二次复审的3个P1，并完成724项非PG与29项隔离PG回归。
 - [ ] 制作并部署不可变 release，保留旧 pointer 作为回滚点。
 - [ ] 三 Worker容量与 readiness 通过。
@@ -69,7 +69,7 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 - [x] 第四轮TDD：requested/effective不一致时Agent readiness阻断。
 - [x] 第四轮TDD：cancel返回completed时Operator保持completed。
 - [x] 第四轮TDD：权威campaign completed不被本地暂缺成员投影改写为failed。
-- [ ] 第四轮聚焦/全套/隔离PG验证、文档同步和独立R3 delta review（修复后测试与文档已完成，待最终delta复审）。
+- [x] 第四轮聚焦/全套/隔离PG验证、文档同步和独立R3 delta review。
 - [x] 第四轮独立复审新增P1：Worker计数字段部分缺失必须fail closed。
 - [x] 第四轮独立复审新增P1：拒绝POST的请求体drain必须有固定总时间上限。
 - [x] 最终delta复核遗留P1：完整Worker计数字段必须严格相等而不是仅大于等于requested。
@@ -102,6 +102,7 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 | 当前上线版10槽非Amazon canary全部`network_error` | 1 | 10/10 connect/TLS失败、可用/唯一槽均0，容量Gate按设计拒绝；不重试、不访问Amazon，3-ASIN campaign保持queued等待有效容量事实。 |
 | PowerShell 7的HTTP异常对象不支持`GetResponseStream` | 1 | 只读readyz读取失败；改用`curl.exe`同时记录状态码与JSON正文。 |
 | 冻结提交缺少本仓库本地Git作者配置 | 1 | 未生成提交；沿用现有提交作者`Codex <codex@local>`写入仅本仓库配置后重试。 |
+| 交接文档观察时间行保留Markdown双空格导致`git diff --check`失败 | 1 | 删除行尾空格后重跑，未生成不合格提交。 |
 
 ## 本轮自测
 

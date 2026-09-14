@@ -58,3 +58,4 @@
 - 复审修复后的新鲜验证：相关模块124 passed；完整非PG 729 passed、56 skipped；专用55444矩阵29 passed并fast shutdown；两个新增边界连续10轮均2/2通过。待冻结delta并由原独立reviewer复核。
 - delta提交`55fc6ce`复核确认部分字段与固定drain deadline两个P1均关闭；遗留1个P1：完整计数使用`>=`而非严格相等，发布继续阻断。
 - 最后一个P1完成红绿：完整计数字段改为`requested == effective == alive`。四个readiness/drain边界4 passed；修复后完整非PG 730 passed、56 skipped；专用55444矩阵29 passed并fast shutdown；待最终只读复核。
+- 最终冻结代码提交`b714556`经独立R3复核：P0=0、P1=0，可继续发布门禁。未部署；生产仍为`592a65a`单Worker，3-ASIN campaign因当天10槽非Amazon canary 0/10可用而queued，`/readyz`为503 `canary_fact_denied`。
