@@ -72,6 +72,7 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 - [ ] 第四轮聚焦/全套/隔离PG验证、文档同步和独立R3 delta review（修复后测试与文档已完成，待最终delta复审）。
 - [x] 第四轮独立复审新增P1：Worker计数字段部分缺失必须fail closed。
 - [x] 第四轮独立复审新增P1：拒绝POST的请求体drain必须有固定总时间上限。
+- [x] 最终delta复核遗留P1：完整Worker计数字段必须严格相等而不是仅大于等于requested。
 - [ ] 在隔离环境完成 1W/2W 对照；不执行 Amazon live 验证。
 
 ## Errors Encountered

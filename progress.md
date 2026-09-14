@@ -56,3 +56,5 @@
 - 第四轮冻结提交`328e8f9`。独立R3 delta review确认原3个P1已关闭，但新增2个P1：部分Worker计数字段fail-open；拒绝POST drain缺固定总时间上限。按用户“继续修”授权进入定点TDD，仍未部署。
 - 两个复审P1均完成红绿：Worker计数字段全无时才允许旧单Worker兼容，部分出现即503；拒绝body drain使用固定总deadline。新增场景2 passed，Collection API文件25 passed；文档与CHANGELOG同步。
 - 复审修复后的新鲜验证：相关模块124 passed；完整非PG 729 passed、56 skipped；专用55444矩阵29 passed并fast shutdown；两个新增边界连续10轮均2/2通过。待冻结delta并由原独立reviewer复核。
+- delta提交`55fc6ce`复核确认部分字段与固定drain deadline两个P1均关闭；遗留1个P1：完整计数使用`>=`而非严格相等，发布继续阻断。
+- 最后一个P1完成红绿：完整计数字段改为`requested == effective == alive`。四个readiness/drain边界4 passed；修复后完整非PG 730 passed、56 skipped；专用55444矩阵29 passed并fast shutdown；待最终只读复核。

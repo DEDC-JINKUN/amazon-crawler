@@ -522,6 +522,31 @@ class CollectionApiTests(unittest.TestCase):
         finally:
             server.shutdown(); server.server_close(); thread.join(timeout=2)
 
+    def test_readyz_fails_closed_when_complete_worker_counts_disagree(self):
+        api = load("collection_api")
+
+        class Repository:
+            def load_job_status(self): return {"counts": {}}
+
+        server = api.CollectionServer(
+            ("127.0.0.1", 0), repository=Repository(),
+            refresh_worker_status=lambda: {
+                "state": "running",
+                "requested_workers": 3,
+                "effective_workers": 4,
+                "alive_workers": 3,
+                "capacity_backpressure": False,
+            },
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as ready:
+                urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/readyz", timeout=2)
+            self.assertEqual(ready.exception.code, 503)
+        finally:
+            server.shutdown(); server.server_close(); thread.join(timeout=2)
+
     def test_unready_post_drain_has_a_fixed_wall_clock_deadline(self):
         api = load("collection_api")
 

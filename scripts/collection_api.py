@@ -724,7 +724,7 @@ class CollectionServer(ThreadingHTTPServer):
             alive = int(worker_status.get("alive_workers") or 0)
         except (TypeError, ValueError):
             return False
-        return requested > 0 and effective >= requested and alive >= requested
+        return requested > 0 and requested == effective == alive
 
     def allow_request(self, agent_id: str) -> bool:
         import time
