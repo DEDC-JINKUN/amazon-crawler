@@ -60,3 +60,5 @@
 - 最后一个P1完成红绿：完整计数字段改为`requested == effective == alive`。四个readiness/drain边界4 passed；修复后完整非PG 730 passed、56 skipped；专用55444矩阵29 passed并fast shutdown；待最终只读复核。
 - 最终冻结代码提交`b714556`经独立R3复核：P0=0、P1=0，可继续发布门禁。未部署；生产仍为`592a65a`单Worker，3-ASIN campaign因当天10槽非Amazon canary 0/10可用而queued，`/readyz`为503 `canary_fact_denied`。
 - 继续诊断生产容量阻断：DNS、代理TCP和直连非Amazon目标正常；部署vault与旧源码vault分别进行一次脱敏CONNECT，均返回407。根因确定为供应商拒绝现有凭据。已在outputs准备仅替换代理字段的交互式DPAPI轮换入口，尚未运行、未改vault。
+- 用户提供新代理凭据后首次交互轮换在临时文件ACL阶段因PowerShell 7 API兼容失败；原vault未替换。轮换入口改用Windows原生`icacls`，待重新执行。
+- 第二次轮换成功：只替换代理字段，保留生产DSN/API Key，并生成加密回滚副本。新凭据的脱敏CONNECT返回`407 NO_USER`；官方文档确认应使用购买套餐后在Proxy Access生成的代理login/password。未运行canary、未重启服务、未访问Amazon。
