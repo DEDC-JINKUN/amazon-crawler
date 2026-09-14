@@ -77,3 +77,7 @@
 - 旧终态污染修复后完整非PG 734 passed、56 skipped；专用55444矩阵29 passed并fast shutdown；Python编译与diff检查通过。待冻结最终delta和复核。
 - `30fa5ce`冻结release在备用端口显示3个受管Popen均存活、状态心跳也新鲜，但Popen父PID与实际Python子PID不同导致healthy=0。新增PID分层红测旧代码1 failed；以launch token绑定状态、Popen负责生命周期后4 passed。工作树备用8875/8870真实启动达到requested/effective/alive/healthy=3/3/3/3、restart=0、Console 200，随后已关闭。
 - PID分层修复后完整非PG 735 passed、56 skipped；专用55444矩阵29 passed并fast shutdown；Python编译与diff检查通过。待冻结最终提交和只读delta复核。
+- 最终代码`4021a56`独立R3 delta review为P0=0/P1=0。新release archive SHA256 `8981bb73ed5dfd2685b4442cd88be0eb1bf99076bd9d9d6bce03935bed1df2f3`，已安装到受保护releases目录但未激活。
+- 30槽复测28可用被Gate拒绝；34槽配置复测34/34唯一可用且Gate allowed。冻结release备用端口最初因venv父子PID不等保持starting，最终代码工作树备用端口真实达到3/3/3/3。
+- 生产计划任务激活暴露wrapper编码问题：UTF-8无BOM被Windows PowerShell5.1误读中文路径。PowerShell7直接运行生产wrapper时目标tenant三Worker严格ready；管理员BOM续接未形成可靠终态并回到旧pointer。
+- 按多次发布失败停止自动重试。显式恢复并验证线上`592a65a`单Worker ready；目标tenant仍1093条已登记、0 active campaign/job/lease/reservation，全量未提交。

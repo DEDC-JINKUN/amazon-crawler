@@ -1,24 +1,24 @@
 # Amazon Collection 当前 Agent 交接
 
-**观察时间：** 2026-09-14 14:38（Asia/Shanghai）
+**观察时间：** 2026-09-14 16:52（Asia/Shanghai）
 **用途：** 新 Agent 的五分钟事实入口。本文是当前快照，不是部署凭证；变化事实必须回到下列权威来源复核。
 
 ## 先说结论
 
-当前修复候选已完成独立R3代码审查；**候选尚未部署，线上仍是旧版单Worker。** Proxy Access新凭据已通过，旧上线版3-ASIN campaign终态为2 succeeded、1 variant、0 failed；目标tenant已登记1093条，30槽canary为30/30唯一可用。发布包和自动回滚激活脚本均已预检，剩余阻塞是部署目录的管理员ACL，需要用户在管理员PowerShell执行一次激活脚本。
+最终代码`4021a56`已完成独立R3审查，备用端口真实三Worker达到3/3/3/3；**生产激活仍失败并已恢复旧版`592a65a`单Worker。** 根因转到计划任务wrapper编码：Windows PowerShell5.1无法读取UTF-8无BOM中的中文路径。目标tenant已有1093条、最新34槽canary 34/34通过，但活动campaign/job/lease/reservation均为0，未开始全量。
 
 ## 事实矩阵
 
 | 事实面 | 状态 | 当前证据 |
 |---|---|---|
-| 候选代码 | `reviewed-current` | 分支 `codex/multiworker-fix-20260913`，最终冻结代码提交 `b714556`；独立R3复核P0=0/P1=0 |
+| 候选代码 | `reviewed-current` | 最终提交与release `4021a56`；独立R3复核P0=0/P1=0 |
 | 线上 Collection | `verified-current` | deploy pointer `592a65a`；旧版单Worker，tenant `local_agent_deployment_20260906`；新凭据下10槽canary通过 |
 | 线上 Operator | `verified-current` | operator pointer `71db26e`；不是候选提交 |
-| 三 Worker | `activation-pending` | 30槽canary 30/30唯一可用；候选配置与激活脚本已预检，尚未切pointer |
+| 三 Worker | `production-blocked` | 备用端口3/3/3/3通过，34槽canary 34/34通过；计划任务wrapper编码/管理员续接未稳定完成 |
 | 全量 campaign | `protocol available` | MCP/Collection capability 上限 5,000 ASIN；没有因此获得本轮真实采集授权 |
 | PostgreSQL 引擎验收 | `verified-current` | 2026-09-14 直接启动专用55444测试实例，完整矩阵29 passed；随后fast shutdown确认关闭 |
 | 文档 | `changed-and-verified` | `README.md`、`docs/collection_api.md`、`docs/collection_operator.md`、`CHANGELOG.md` 已与候选代码同步 |
-| 生产部署与 live 验证 | `admin-action-required` | archive `release-e345468.zip`与自动回滚激活脚本预检通过；管理员ACL阻止当前有限令牌写release |
+| 生产部署与 live 验证 | `rolled-back` | `4021a56`已安装但pointer恢复`592a65a`；多次激活失败后停止自动重试 |
 | 上线后台campaign | `completed` | `campaign-579718cdd550503aba7e5ea996179b80`：2 succeeded、1 variant、0 failed，证据均晚于请求 |
 | Agent 记忆 | `generated-read-only` | 不直接编辑宿主生成记忆；以本文件作为项目内交接入口 |
 

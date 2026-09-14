@@ -60,8 +60,8 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 - [x] 隔离 PostgreSQL 55444 的 17 个引擎测试；连同非 PG 矩阵共 29 passed。
 - [x] 独立 R3 差异审查无 P0/P1（最终冻结代码提交`b714556`）。
 - [x] 第三轮修复第二次复审的3个P1，并完成724项非PG与29项隔离PG回归。
-- [ ] 制作并部署不可变 release，保留旧 pointer 作为回滚点（ZIP与激活脚本已预检，待管理员执行）。
-- [ ] 三 Worker容量与 readiness 通过（30槽canary已通过，服务readiness待激活）。
+- [ ] 制作并部署不可变 release，保留旧 pointer 作为回滚点（`4021a56`已安装但未激活；自动化多次失败后停止）。
+- [ ] 三 Worker容量与 readiness 通过（备用端口3/3/3通过，计划任务生产激活未通过）。
 - [ ] 3条与20条真实验收通过（旧上线版3条已通过，20条待候选激活）。
 - [ ] 提交1,093条单一全量 campaign。
 - [ ] 第二轮独立复审新增3个P1；按用户“任一门禁失败立即停止”要求，发布流程已停止，等待是否授权第三轮代码修复。
@@ -78,7 +78,7 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 - [x] 目标tenant事务登记1093条，且无活动campaign/job/lease/reservation。
 - [ ] 管理员运行`outputs/prod-full-rollout-20260914/activate_reviewed_release.ps1`完成release安装与三Worker切换。
 - [x] 真实候选启动复现Windows状态文件原子替换竞态并完成红绿修复。
-- [ ] 对状态文件修复跑全套、独立R3 review并制作新不可变release；`e345468`不得再次激活（五轮全套与真实备用启动已过，待最终review/release）。
+- [x] 对状态文件修复跑全套、独立R3 review并制作新不可变release；`e345468`不得再次激活（最终代码`4021a56`、独立review通过）。
 - [x] 修复独立review发现的监督器重启预删锁竞态并补红绿测试。
 - [x] 修复复核发现的PID复用旧状态冒认：每次spawn绑定launch token并补红绿测试。
 - [x] 修复复核发现的旧failed/blocked跨launch污染，并覆盖三种旧状态。
@@ -121,6 +121,9 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 | 首个管理员CMD启动器被`cmd.exe`按LF/UTF-8中文路径错误解析 | 1 | 激活脚本未执行；改成ASCII临时路径、CRLF和PowerShell 7启动器。 |
 | `e345468`三Worker激活45秒内readiness失败 | 1 | 自动回滚成功；备用端口复现子Worker心跳`os.replace` WinError 5，禁止重试旧release。 |
 | 一次PowerShell诊断命令在try/catch后直接管道导致empty pipe parser error | 1 | 拆成变量赋值与最终单次JSON输出，取得真实503状态。 |
+| 新鲜30槽canary仅28个可用 | 1 | Gate以`replacement_capacity_insufficient`拒绝；增加4个批准替换槽后34/34通过，未放宽所需30槽。 |
+| `4021a56`计划任务启动立即退出1 | 1 | 根因为激活脚本将含中文路径的wrapper写成UTF-8无BOM，Windows PowerShell5.1解码乱码；PowerShell7直接运行同wrapper已3/3/3通过。 |
+| BOM续接管理员脚本未产生终态回执且回到旧pointer/服务未启动 | 1 | 立即显式恢复`592a65a`服务并验证ready；达到多次激活失败停止规则，不再自动重试。 |
 
 ## 本轮自测
 
