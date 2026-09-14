@@ -98,3 +98,5 @@
 - 文档回执提交`33fd636`制作不可变release，archive SHA256`98867ce15c695b979dd05b557eee6b462bd2a76fab042cde15fe13e84aa1efa8`，文件集合相对`4021a56`仅新增`campaign_worker_status.py`。首次激活在PostgreSQL半就绪窗口的认证清理连接失败并自动回滚；增加认证只读probe后第二次激活成功。
 - 激活事务先取消旧失败门禁并清零目标active campaign/job/lease/reservation，再刷新34槽canary得到31 available/unique、Gate allowed。两项计划任务均为系统PowerShell7托管Running；三Worker连续30样本及业务期间均3/3、restart=0，快照积压各3、cleanup failure=0。
 - 新3-ASIN campaign`campaign-bd26b05e4b8055a691adc80d42c22561`终态1 succeeded、2 failed并取消。失败为4个canary可用会话到Amazon连接/响应头9–12秒无状态/无字节的transport_error；成功会话返回200/426001 bytes。按规则停止，20与1093未提交；release`33fd636`保持上线空闲。
+- 2026-09-14 22:06用户明确要求开始全量。提交前重新核对release/operator`33fd636`、两项任务Running、三Worker3/3且restart0、31槽capacity allowed、目标tenant 1093 active ASIN和0 active campaign/job/lease/reservation；清单1093条全部唯一合法。
+- 使用稳定幂等键`prod-33fd636-full1093-20260914-v1`一次提交单一后台campaign`campaign-b14bef6a4b39509a9c92e1ff2629386b`，API返回202。首个进度快照为total1093、pending1092、running1、terminal0，Worker仍3/3、restart0；未提交独立20条campaign。已知风险仍是此前3条门禁2/3 transport失败，未将其误报为已解决。

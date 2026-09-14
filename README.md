@@ -5,7 +5,7 @@
 当前版本：`0.3.0`（PostgreSQL 正式 Worker）。
 
 本机`main`已包含：[美国站采集与简明控制台](docs/develop_us_marketplace_20260904.md)。
-`develop`继续用于日常开发；本次没有更新生产配置或数据库，也尚未远程部署。
+日常开发与本机生产运行态分开；当前生产状态、release、campaign和放行风险以[`docs/agent_handoff_current.md`](docs/agent_handoff_current.md)及deploy pointer、`/readyz`为准，不能由分支名或本段文字推断。
 
 本地测试结果可用 `scripts/evidence_health.py` 检查源 HTML 存在性和哈希；用 `scripts/collection_metrics.py` 按 `run_id` 查看请求数、流量和有效吞吐。
 代理流量和成本实测见 [`docs/traffic_cost_validation.md`](docs/traffic_cost_validation.md)，并用 `scripts/traffic_cost_report.py` 结合代理商后台的用量差值出具报告。
@@ -17,7 +17,7 @@
 - HTTP 优先获取公开 HTML；页面字段不足时再使用 stock Firefox 渲染。付费HTTP CONNECT代理认证通过仅监听loopback的临时中继完成：中继只给上游CONNECT增加认证并转发不透明TLS字节，不做MITM、指纹伪装或验证码处理。
 - PostgreSQL 是正式任务、断点、结果和历史的唯一事实源；SQLite 仅保留给历史回放和离线回归测试。
 - 原始 HTML、采集时间、来源和解析器版本必须可追溯。
-- PostgreSQL 使用租约和 `FOR UPDATE SKIP LOCKED` 支持多个 Worker 安全领取；当前 Windows 默认仍以单 Worker 小批量运行。
+- PostgreSQL 使用租约和 `FOR UPDATE SKIP LOCKED` 支持多个 Worker安全领取；源码入口默认仍为单Worker，当前已审核的Windows生产部署显式运行3 Worker，实际数量必须以`/readyz`的requested/effective/alive/healthy字段为准。
 - 正式 PostgreSQL live 入口必须配置已批准粘滞端口，并先有同配置、同credential generation、未过期且状态/计数一致的非Amazon canary。系统在PostgreSQL中原子预约具体`session-NN`槽，跨tenant/Controller/Agent不允许超卖；预约或事实失效时在创建collection run、领取任务和访问Amazon前拒绝。
 - 不读取个人浏览器 Profile、Cookie、Token 或密码，不绕过验证码和访问控制。
 

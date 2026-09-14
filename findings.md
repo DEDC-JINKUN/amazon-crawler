@@ -95,4 +95,5 @@
 - release`33fd636`（reviewed code`8c1d9d7`，archive SHA256`98867ce15c695b979dd05b557eee6b462bd2a76fab042cde15fe13e84aa1efa8`）已激活；两项计划任务均由系统PowerShell7托管Running。激活连续30次ready样本和后续业务运行都保持三Worker alive/healthy=3/3、restart=0；每Worker 3份快照、约1 KiB、cleanup failures=0。长期状态协议的生产故障已关闭。
 - 最新34槽非Amazon canary为31 available/unique、3 connect_failed，容量Gate allowed。新3-ASIN campaign`campaign-bd26b05e4b8055a691adc80d42c22561`最终1 succeeded、2 failed并取消；目标tenant随后active campaign/job/lease/reservation均为0。
 - 两个失败ASIN分别使用session-13/14与session-15/17；这些会话在ipify canary都返回200，但访问Amazon时连接/响应头阶段约9–12秒后无HTTP状态、无传输字节，均记录`transport_error`并隔离。session-23成功返回Amazon 200与426001 bytes。根因面转为“非Amazon可用的住宅出口不保证Amazon稳定”，不是状态文件、Worker重启、PostgreSQL或API。
-- 门禁规则生效：20条与1093条均未提交。当前`33fd636`保持上线空闲；下一步必须改善供应商出口质量，或另行设计跨run的Amazon transport失败会话隔离，再从新的3-ASIN门禁重新开始。
+- 截至2026-09-14 22:00，门禁规则已阻止20条与1093条提交，`33fd636`当时保持上线空闲；该状态随后被用户22:06的全量启动指令取代。
+- 上述“未提交”是22:00前的历史状态。用户于2026-09-14 22:06再次明确要求开始全量；即时预检确认release`33fd636`、三Worker3/3、restart=0、1093条清单唯一合法、目标active campaign/job/lease/reservation均为0后，使用稳定幂等键一次提交全量campaign`campaign-b14bef6a4b39509a9c92e1ff2629386b`。初始状态1093 total、1092 pending、1 running、0 terminal；未创建独立20条campaign。

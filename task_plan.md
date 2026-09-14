@@ -1,6 +1,6 @@
 # Operator 状态链整体验收
 
-长期状态协议代码`8c1d9d7`已随release`33fd636`上线，最终独立review P0=0/P1=0。生产三Worker与计划任务托管健康；新的3-ASIN门禁因2个代理transport失败而终止，20与1093均未提交。
+长期状态协议代码`8c1d9d7`已随release`33fd636`上线，最终独立review P0=0/P1=0。生产三Worker与计划任务托管健康；3-ASIN门禁因2个代理transport失败而终止，用户随后明确要求直接开始全量，1093条单一campaign已于2026-09-14 22:06提交并开始领取。
 
 ## 状态契约
 
@@ -19,9 +19,9 @@ queued → canary → reserving → collecting → finalizing → releasing → 
 
 ## 2026-09-13 续接目标
 
-用户要求由Agent操控全量采集并修复多Worker。已获授权按3→20→1093门禁上线与采集；凭据只经DPAPI注入且不输出，任一门禁失败立即停止。
+用户要求由Agent操控全量采集并修复多Worker。凭据只经DPAPI注入且不输出；原3→20→1093自动放行约束在3条失败时已正确停止，用户随后以“开始全量爬取”明确发起全量campaign。
 
-拟议的公共验收 seam（待用户确认）：
+现役公共验收 seam：
 
 1. `campaign_submit/status/wait/cancel` 作为 Agent 全量批次入口；
 2. Operator `start/status/stop` 作为人工大批次入口；
@@ -33,7 +33,7 @@ queued → canary → reserving → collecting → finalizing → releasing → 
 
 ## 2026-09-14 生产发布合同
 
-用户已明确授权：发布候选、重启生产服务、使用 DPAPI 凭据、扩充获批会话槽，并按 3 ASIN → 20 ASIN → 1,093 ASIN 自动放行；任一门禁失败立即停止。真实采集仍坚持无登录、无个人 Cookie、无验证码绕过、无 TLS 指纹伪装。
+原授权要求按3 ASIN→20 ASIN→1,093 ASIN自动放行并在任一门禁失败时停止，该流程已在3条失败时正确停止；用户于2026-09-14 22:06另行明确启动1093条全量campaign。真实采集仍坚持无登录、无个人Cookie、无验证码绕过、无TLS指纹伪装。
 
 R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚点 → 30槽非 Amazon canary → 三 Worker readiness → 3条 live → 20条 live → 全量单一 campaign。
 
@@ -61,11 +61,11 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 - [x] 独立 R3 差异审查无 P0/P1（最终冻结代码提交`b714556`）。
 - [x] 第三轮修复第二次复审的3个P1，并完成724项非PG与29项隔离PG回归。
 - [x] 制作并部署不可变 release，保留旧 pointer 作为回滚点（`4021a56`已安装并曾激活；业务门禁失败后pointer已回滚）。
-- [ ] 三 Worker容量与 readiness 持续通过（`4021a56`初始3/3/3/3通过，但业务运行后固定状态文件竞态导致Worker重启/503，不能算发布通过）。
+- [x] release`33fd636`三Worker容量与readiness持续通过：激活30样本、3条业务门禁及全量提交后均3/3、restart=0。
 - [ ] 3条与20条真实验收通过（`33fd636`新3条为1 succeeded/2 transport failed，已取消；20条未提交）。
-- [ ] 提交1,093条单一全量 campaign。
-- [ ] 第二轮独立复审新增3个P1；按用户“任一门禁失败立即停止”要求，发布流程已停止，等待是否授权第三轮代码修复。
-- [ ] 第三轮独立复审仍有3个P1；自动修复循环再次停止：并发降级仍ready、cancel返回completed竞态、completed但成员投影暂缺被记failed。
+- [x] 提交1,093条单一全量campaign：`campaign-b14bef6a4b39509a9c92e1ff2629386b`；不得重提或拆分。
+- [x] 第二轮独立复审新增3个P1，后续TDD与delta复核已关闭。
+- [x] 第三轮独立复审的并发降级、cancel/completed竞态和成员投影问题均已关闭并通过后续全量回归。
 - [x] 第四轮TDD：requested/effective不一致时Agent readiness阻断。
 - [x] 第四轮TDD：cancel返回completed时Operator保持completed。
 - [x] 第四轮TDD：权威campaign completed不被本地暂缺成员投影改写为failed。
@@ -85,7 +85,7 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 - [x] 完成不可变Worker状态快照与Supervisor内存缓存；全套、隔离PG、Windows持久并发和独立review全部通过（最终P0=0/P1=0）。
 - [x] 冻结长期状态协议代码提交`8c1d9d7`，未纳入工作区既有未跟踪数据/目录。
 - [x] 制作release`33fd636`并恢复两项计划任务为系统PowerShell7托管Running；三Worker连续30样本和业务运行均3/3、restart=0。
-- [ ] 解决Amazon transport出口质量后，使用新幂等键重新执行3条→20条→1093条门禁。
+- [ ] 监控全量campaign同一ID的终态、Worker健康和transport/blocked比例；只有用户明确要求停止才cancel。
 - [x] 修复独立review发现的监督器重启预删锁竞态并补红绿测试。
 - [x] 修复复核发现的PID复用旧状态冒认：每次spawn绑定launch token并补红绿测试。
 - [x] 修复复核发现的旧failed/blocked跨launch污染，并覆盖三种旧状态。

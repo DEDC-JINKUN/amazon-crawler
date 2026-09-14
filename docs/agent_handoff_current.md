@@ -1,6 +1,6 @@
 # Amazon Collection 当前 Agent 交接
 
-**观察时间：** 2026-09-14 21:57（Asia/Shanghai）
+**观察时间：** 2026-09-14 22:07（Asia/Shanghai）
 
 **用途：** 新 Agent 的五分钟事实入口。本文是当前快照，不是部署凭证；变化事实必须回到下列权威来源复核。
 
@@ -8,7 +8,7 @@
 
 系统级 PowerShell 7.6.6、两项生产计划任务迁移和长期状态协议均已上线。当前 Collection/Operator pointer 是新release `33fd636`，reviewed code为`8c1d9d7`；两项任务均由系统pwsh托管为Running，三Worker在激活30次连续样本及真实业务门禁期间保持3/3健康、restart=0、快照清理失败=0。旧`4021a56`不得再激活。
 
-新的3-ASIN门禁`campaign-bd26b05e4b8055a691adc80d42c22561`没有通过：1 succeeded、2 failed，已取消并全部终态。失败均为代理会话到Amazon的transport/fetch_error，不是Worker状态文件故障。按门禁规则，20条和1,093条均未提交；当前新服务保持上线但空闲。
+3-ASIN门禁`campaign-bd26b05e4b8055a691adc80d42c22561`没有通过：1 succeeded、2 failed，已取消并全部终态。失败均为代理会话到Amazon的transport/fetch_error，不是Worker状态文件故障。用户随后于2026-09-14 22:06明确要求开始全量采集；1093条单一后台campaign已提交并开始领取，不能再按本文件此前的“保持空闲”结论操作。
 
 ## 事实矩阵
 
@@ -20,7 +20,8 @@
 | 线上 Operator | `verified-current` | operator pointer `33fd636` |
 | 计划任务运行时 | `verified-current` | Collection/Postgres任务均为Running，Action固定`C:/Program Files/PowerShell/7/pwsh.exe` |
 | 失败3-ASIN门禁 | `terminal-failed` | `campaign-bd26b05e4b8055a691adc80d42c22561`已取消且3/3终态：1 succeeded、2 transport failed |
-| 20条与全量campaign | `not-submitted` | 未提交20条；未提交1,093条 |
+| 20条campaign | `not-submitted` | 未提交独立20条门禁 |
+| 全量campaign | `active` | `campaign-b14bef6a4b39509a9c92e1ff2629386b`，稳定幂等键`prod-33fd636-full1093-20260914-v1`；初始快照total=1093、pending=1092、running=1、terminal=0 |
 | 目标清单 | `verified` | `Amazon Scraping/data/owned_us_asin_20260902_full_01/manifest_1093.csv`共1,093个唯一合法ASIN |
 | 代理容量 | `business-gate-failed` | 最新34槽非Amazon canary为31可用/唯一并allowed；实际Amazon门禁中4个canary可用会话在连接/响应头阶段9–12秒无字节失败，另1个会话成功 |
 | 默认非PG回归 | `verified-current` | 746 passed、56 skipped、0 failed |
@@ -59,10 +60,10 @@
 
 ## 下一步严格顺序
 
-1. 保持`33fd636`上线空闲，不提交20条或1,093条。
-2. 解决住宅代理到Amazon的会话质量：优先让供应商确认Amazon US可用性/地区与连接稳定性；代码侧备选是增加“实际Amazon transport失败会话的跨run短期隔离”，但必须另做设计、测试和review，不能把非Amazon canary改成Amazon隐式探测。
-3. 修复后刷新同配置非Amazon canary，并使用新的幂等键重跑3-ASIN门禁。
-4. 只有3条全部终态且无failed/blocked，才提交20条；20条同样通过后才提交1,093条单一campaign。
+1. 不得重新提交、拆分或更换幂等键；全量唯一权威是campaign`campaign-b14bef6a4b39509a9c92e1ff2629386b`。
+2. 用户只问进度时调用campaign status一次；用户要求等待结果时对同一campaign反复wait直到全部终态。只有用户明确要求停止时才cancel未来排队成员。
+3. 监控三Worker readiness、restart、capacity backpressure及transport/blocked比例。此前3条门禁2/3 transport失败是当前全量的已知高失败风险，不能在报告中隐藏。
+4. 后续仍建议解决住宅代理到Amazon的会话质量，或另行设计跨run的Amazon transport失败会话隔离；不得把非Amazon canary改成隐式Amazon探测。
 
 ## 新 Agent 开场检查
 
@@ -76,8 +77,8 @@ Get-Content 'D:\woring\爬虫\deploy\amazon-collection\operator-release.txt'
 curl.exe --silent --show-error --max-time 5 http://127.0.0.1:8765/readyz
 ```
 
-开场只汇报：线上release/readiness、3-ASIN失败证据、代理出口阻断、下一道放行条件。不得提交20/1093，不得复用失败campaign或旧幂等键，不得输出代理凭据。
+开场只汇报：线上release/readiness、全量campaign当前计数、3-ASIN已知代理风险、是否需要用户动作。不得再次提交1093、不得更换幂等键或拆分campaign，不得输出代理凭据。
 
 ## 可直接复制给新 Agent 的提示词
 
-> 在`D:\woring\爬虫\.worktrees\amazon-integrated-deploy`接手Amazon Collection。先完整读取`AGENTS.md`和`docs/agent_handoff_current.md`，再只读核对分支、提交、工作区、deploy pointers、计划任务状态与`127.0.0.1:8765/readyz`。当前release为`33fd636`，三Worker修复已上线且健康；3-ASIN业务门禁`campaign-bd26b05e4b8055a691adc80d42c22561`因2个transport失败而终止，20/1093未提交。请用四项回复：线上状态、门禁结果、代理出口证据、下一放行条件。不要输出凭据，不要跳过3→20→1093门禁。
+> 在`D:\woring\爬虫\.worktrees\amazon-integrated-deploy`接手Amazon Collection。先完整读取`AGENTS.md`和`docs/agent_handoff_current.md`，再只读核对分支、提交、工作区、deploy pointers、计划任务状态与`127.0.0.1:8765/readyz`。当前release为`33fd636`，全量唯一campaign为`campaign-b14bef6a4b39509a9c92e1ff2629386b`，共1093条；不得重新提交或换幂等键。3-ASIN门禁曾2个transport失败，因此全量存在高失败风险。请用四项回复：线上状态、campaign计数、Worker健康、代理风险。不要输出凭据；只有用户明确要求停止时才取消排队成员。
