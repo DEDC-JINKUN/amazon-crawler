@@ -258,7 +258,8 @@ def test_campaign_worker_supervisor_restarts_without_unlinking_a_locked_status_f
         supervisor.stop()
 
 
-def test_campaign_worker_supervisor_rejects_fresh_old_status_when_pid_is_reused(tmp_path):
+@pytest.mark.parametrize("old_state", ["running", "failed", "blocked"])
+def test_campaign_worker_supervisor_rejects_fresh_old_status_when_pid_is_reused(tmp_path, old_state):
     service = load("agent_collection_service")
     status_path = tmp_path / "pid-reuse-status" / "worker-1.json"
 
@@ -282,7 +283,7 @@ def test_campaign_worker_supervisor_rejects_fresh_old_status_when_pid_is_reused(
                 "schema": "amazon-campaign-worker-status-v1",
                 "pid": process.pid,
                 "launch_token": token,
-                "state": "running",
+                "state": old_state,
                 "heartbeat_at": now,
                 "worker_heartbeat_at": now,
                 "last_error": None,

@@ -73,3 +73,5 @@
 - 监督器delta修复后完整非PG 731 passed、56 skipped；专用55444矩阵29 passed并fast shutdown；Python编译与diff检查通过。待冻结提交和最终delta复核。
 - 对`08e381c`复核仍有1个P1：PID复用时旧新鲜状态可能冒充新Worker。新增PID复用红测旧代码1 failed；每次spawn绑定不可复用launch token，子进程状态回传token且监督器同时匹配token/PID后，相关4 passed。
 - launch token修复后完整非PG 732 passed、56 skipped；专用55444矩阵29 passed并fast shutdown；Python编译与diff检查通过。待冻结提交和最终delta复核。
+- 对`f62d315`复核仍有1个P1：token不匹配的旧failed/blocked仍会污染内部状态。PID复用测试扩展为running/failed/blocked，旧代码2 failed/1 passed；仅在token+PID匹配时采纳状态后3 passed。
+- 旧终态污染修复后完整非PG 734 passed、56 skipped；专用55444矩阵29 passed并fast shutdown；Python编译与diff检查通过。待冻结最终delta和复核。

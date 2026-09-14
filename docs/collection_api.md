@@ -15,7 +15,7 @@ Collection API 是 Agent 查询采集结果和提交小批按需刷新的统一�
 
 锁中的运行时指纹覆盖服务、Worker、代理池、API、存储模块和当前配置文件。只有 PID、StartTime、tenant、URL 均已验证且 `/healthz` 正常的旧版本进程会被受控替换；未知监听器继续 fail closed。
 
-进程身份与业务 readiness 分开：自动确保服务使用 `/healthz`，所以 refresh Worker blocked 后只读查询和 job 回查仍可用；`agent-health` 使用 `/readyz`，新 refresh 也由服务端 readiness Gate 拒绝。readiness 返回 `requested_workers`、`effective_workers`、`alive_workers`、`healthy_workers` 和 `capacity_backpressure`。服务持续重读 canary fact，并核对新鲜度、配置哈希和容量 Gate；只有状态严格为 `running` 才接受 refresh/campaign。多进程 Worker 还要求子进程心跳和 Worker线程业务心跳同时新鲜；异常退出或业务线程停滞会有限重启，blocked 不会通过重启绕过。Windows写心跳文件时若与监督器短暂读锁冲突，会在固定总预算内重试原子替换并清理临时文件；监督器重启不预删旧状态文件，并要求状态中的不可复用launch token与PID同时匹配新子进程，防止旧心跳或PID复用冒充健康。持续失败仍由监督器按失联处理。refresh Worker健康值分别累计`processed_actions`、`succeeded_actions`、`failed_actions`和`blocked_actions`；兼容字段`completed_actions`只表示成功，不能据此把失败处理误认成商品成功。
+进程身份与业务 readiness 分开：自动确保服务使用 `/healthz`，所以 refresh Worker blocked 后只读查询和 job 回查仍可用；`agent-health` 使用 `/readyz`，新 refresh 也由服务端 readiness Gate 拒绝。readiness 返回 `requested_workers`、`effective_workers`、`alive_workers`、`healthy_workers` 和 `capacity_backpressure`。服务持续重读 canary fact，并核对新鲜度、配置哈希和容量 Gate；只有状态严格为 `running` 才接受 refresh/campaign。多进程 Worker 还要求子进程心跳和 Worker线程业务心跳同时新鲜；异常退出或业务线程停滞会有限重启，blocked 不会通过重启绕过。Windows写心跳文件时若与监督器短暂读锁冲突，会在固定总预算内重试原子替换并清理临时文件；监督器重启不预删旧状态文件，并要求状态中的不可复用launch token与PID同时匹配新子进程，只有匹配当前launch的状态才会传播running/failed/blocked，防止旧心跳、PID复用或旧终态污染新Worker。持续失败仍由监督器按失联处理。refresh Worker健康值分别累计`processed_actions`、`succeeded_actions`、`failed_actions`和`blocked_actions`；兼容字段`completed_actions`只表示成功，不能据此把失败处理误认成商品成功。
 
 `agent-refresh -Wait`采用单job轮转、至少1.1秒的轮询间隔，并在本机API返回429时遵守`Retry-After`，因此五个持续等待job也不会自行超过默认60次/分钟限制。客户端强制UTF-8 JSON输出，Windows GBK控制台不再导致国际字符编码异常。
 

@@ -284,8 +284,12 @@ class CampaignWorkerSupervisor:
                     int(document.get("pid") or -1) == int(process.pid)
                     and str(document.get("launch_token") or "") == self._launch_tokens[index]
                 )
-                reported_state = str(document.get("state") or self._states[index])
-                if reported_state in {"blocked", "failed"}:
+                reported_state = (
+                    str(document.get("state") or self._states[index])
+                    if document_matches
+                    else self._states[index]
+                )
+                if document_matches and reported_state in {"blocked", "failed"}:
                     self._states[index] = reported_state
                 is_healthy = (
                     process_alive and document_matches and heartbeat_fresh
