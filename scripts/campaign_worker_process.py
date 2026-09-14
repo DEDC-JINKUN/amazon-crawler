@@ -10,11 +10,15 @@ from pathlib import Path
 import re
 import signal
 import threading
+import time
 import uuid
 
 from agent_collection_service import AgentRefreshWorker
 from amazon_us_worker import _build_http_adapter, load_config
 from postgres_worker_storage import PostgresWorkerStorage
+
+STATUS_REPLACE_ATTEMPTS = 20
+STATUS_REPLACE_DELAY_SECONDS = 0.01
 
 
 def _safe_error(value) -> str | None:
@@ -38,7 +42,20 @@ def _write_status(path: Path | None, status: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     temporary.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
-    os.replace(temporary, path)
+    try:
+        for attempt in range(STATUS_REPLACE_ATTEMPTS):
+            try:
+                os.replace(temporary, path)
+                return
+            except PermissionError:
+                if attempt + 1 >= STATUS_REPLACE_ATTEMPTS:
+                    raise
+                time.sleep(STATUS_REPLACE_DELAY_SECONDS)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def main() -> int:

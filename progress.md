@@ -66,3 +66,6 @@
 - 重启旧上线版`592a65a`加载新generation；3-ASIN campaign最终2 succeeded、1 variant、0 failed，三条均为本请求后evidence。第三条一次租约到期恢复后成功。
 - 新建独立30槽配置，离线确认15 action需要30槽；目标tenant非Amazon canary为30/30可用且唯一。随后事务初始化1093条，目标无活动campaign/job/lease/reservation。
 - 候选archive `release-e345468.zip`含258项，SHA256固定为`9d79121ed025c2d80b4179df1f634819deaa3148bb6be561dd1fda42f0d0f62c`；提升激活脚本预检通过。部署releases目录保持管理员/SYSTEM只写；Codex触发UAC未显示可操作提示，pointer仍为`592a65a`，候选尚未安装。
+- 用户通过ASCII/CRLF自提升启动器激活`e345468`；候选未在45秒内ready，脚本自动回滚pointer/wrapper并重启`592a65a`。备用8875/8870真实启动复现三个子Worker均因状态JSON原子替换WinError 5退出，且监督器耗尽重启预算；诊断服务随后关闭。
+- TDD修复状态文件Windows短暂读锁：旧代码红测1 failed；20×10ms有界`PermissionError`重试与临时文件清理后目标测试1 passed、Agent服务文件28 passed。待全套、PG、独立review和新release。
+- 修复后完整非PG套件730 passed、56 skipped；专用55444矩阵29 passed并fast shutdown；Python编译与diff检查通过。待冻结提交与独立R3 delta review。

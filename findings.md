@@ -62,3 +62,10 @@
 - 当前部署vault与旧源码vault各做一次脱敏原始CONNECT检查，网关均明确返回HTTP 407；故障位于代理凭据被供应商拒绝，不是Amazon、DNS、本机网络或TLS证书。
 - 不再重复canary。恢复需要用户在本机隐藏输入新的DataImpulse账号/密码；更新只替换部署vault的代理字段，保留生产DSN/API Key并先生成加密回滚副本。
 - 用户提供的新值已通过DPAPI原子轮换并保留旧加密vault，但脱敏CONNECT仍返回`407 NO_USER`。DataImpulse官方说明：代理login/password是在购买套餐后由Dashboard的`Proxy Access`生成；`NO_USER`表示该代理用户的套餐不存在。普通站点登录名不能替代代理login。
+
+## 2026-09-14 候选三Worker真实启动失败
+
+- `e345468`首次激活未通过45秒readiness并自动回滚到`592a65a`；目标tenant无任务被提交。
+- 在备用8875/8870端口复现：三个子Worker均在`campaign_worker_process._write_status -> os.replace`遇到WinError 5。父监督器并发读取`worker-N.json`时Windows短暂锁住目标，子进程将单次锁竞争当成致命错误，重启预算耗尽。
+- 遗留的唯一命名临时文件与堆栈共同证明故障在状态文件原子替换边界，而非PostgreSQL、代理容量、Worker业务线程或Console端口。
+- 修复只对`PermissionError`做20×10ms有界重试并在退出时清理本次临时文件；不扩大重启预算、不吞持续权限错误。

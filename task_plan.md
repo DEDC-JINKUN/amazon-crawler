@@ -77,6 +77,8 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 - [x] 用户从DataImpulse Proxy Access取得实际代理凭据；10000与823均CONNECT 200/TLS1.3，10槽与30槽canary通过。
 - [x] 目标tenant事务登记1093条，且无活动campaign/job/lease/reservation。
 - [ ] 管理员运行`outputs/prod-full-rollout-20260914/activate_reviewed_release.ps1`完成release安装与三Worker切换。
+- [x] 真实候选启动复现Windows状态文件原子替换竞态并完成红绿修复。
+- [ ] 对状态文件修复跑全套、独立R3 review并制作新不可变release；`e345468`不得再次激活（全套已过，待review/release）。
 
 ## Errors Encountered
 
@@ -112,6 +114,9 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 | 三Worker配置离线hash验证缺少credential generation | 1 | 未改生产；对子进程注入固定离线generation后确认30个唯一端口、15 action需要30槽。 |
 | 当前有限令牌不能写受保护的`deploy/releases` | 1 | archive已生成但release目录无半成品；保留管理员/SYSTEM只写ACL，不放宽权限，改用提升权限且自动回滚的激活脚本。 |
 | 从Codex进程触发RunAs未显示可操作UAC且长期等待 | 1 | current pointer仍为`592a65a`、候选目录不存在；中止等待，改由用户在管理员PowerShell手工执行已预检脚本。 |
+| 首个管理员CMD启动器被`cmd.exe`按LF/UTF-8中文路径错误解析 | 1 | 激活脚本未执行；改成ASCII临时路径、CRLF和PowerShell 7启动器。 |
+| `e345468`三Worker激活45秒内readiness失败 | 1 | 自动回滚成功；备用端口复现子Worker心跳`os.replace` WinError 5，禁止重试旧release。 |
+| 一次PowerShell诊断命令在try/catch后直接管道导致empty pipe parser error | 1 | 拆成变量赋值与最终单次JSON输出，取得真实503状态。 |
 
 ## 本轮自测
 

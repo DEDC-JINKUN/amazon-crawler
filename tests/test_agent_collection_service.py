@@ -241,9 +241,17 @@ def test_campaign_child_receives_custom_dsn_and_minimal_environment(monkeypatch,
     assert command[command.index("--dsn-env")+1]=="CUSTOM_CAMPAIGN_DSN"
 
 
-def test_campaign_worker_process_exits_when_embedded_worker_fails(monkeypatch, tmp_path):
+def test_campaign_worker_process_survives_transient_windows_status_replace_lock(monkeypatch, tmp_path):
     monkeypatch.syspath_prepend(str(ROOT/'scripts'))
     process=load('campaign_worker_process'); events=[]
+    replace_attempts=[]
+    real_replace=process.os.replace
+
+    def replace_with_one_transient_lock(source, destination):
+        replace_attempts.append((source, destination))
+        if len(replace_attempts)==1:
+            raise PermissionError(13, 'status target is temporarily locked by the supervisor')
+        return real_replace(source, destination)
 
     class Worker:
         def __init__(self, **_kwargs): pass
@@ -266,6 +274,7 @@ def test_campaign_worker_process_exits_when_embedded_worker_fails(monkeypatch, t
     monkeypatch.setattr(process,'PostgresWorkerStorage',lambda *_args,**_kwargs:object())
     monkeypatch.setattr(process,'AgentRefreshWorker',Worker)
     monkeypatch.setattr(process.threading,'Event',Event)
+    monkeypatch.setattr(process.os,'replace',replace_with_one_transient_lock)
     monkeypatch.setattr(sys,'argv',[
         'campaign_worker_process.py','--config',str(tmp_path/'config.toml'),
         '--output-dir',str(tmp_path/'output'),'--tenant-id','tenant-a','--dsn-env','TEST_WORKER_DSN',
@@ -273,6 +282,7 @@ def test_campaign_worker_process_exits_when_embedded_worker_fails(monkeypatch, t
     ])
 
     assert process.main()==2
+    assert len(replace_attempts)==2
     assert events==['start','stop']
     status = __import__('json').loads((tmp_path/'output'/'control'/'agent-workers'/'worker-1.json').read_text(encoding='utf-8'))
     assert status['state']=='failed'
