@@ -62,3 +62,7 @@
 - 继续诊断生产容量阻断：DNS、代理TCP和直连非Amazon目标正常；部署vault与旧源码vault分别进行一次脱敏CONNECT，均返回407。根因确定为供应商拒绝现有凭据。已在outputs准备仅替换代理字段的交互式DPAPI轮换入口，尚未运行、未改vault。
 - 用户提供新代理凭据后首次交互轮换在临时文件ACL阶段因PowerShell 7 API兼容失败；原vault未替换。轮换入口改用Windows原生`icacls`，待重新执行。
 - 第二次轮换成功：只替换代理字段，保留生产DSN/API Key，并生成加密回滚副本。新凭据的脱敏CONNECT返回`407 NO_USER`；官方文档确认应使用购买套餐后在Proxy Access生成的代理login/password。未运行canary、未重启服务、未访问Amazon。
+- 用户通过截图提供Proxy Access生成凭据；已写入DPAPI vault且不在日志/仓库复述。端口823与粘滞端口10000均CONNECT 200/TLS1.3；10槽canary 10/10唯一可用。
+- 重启旧上线版`592a65a`加载新generation；3-ASIN campaign最终2 succeeded、1 variant、0 failed，三条均为本请求后evidence。第三条一次租约到期恢复后成功。
+- 新建独立30槽配置，离线确认15 action需要30槽；目标tenant非Amazon canary为30/30可用且唯一。随后事务初始化1093条，目标无活动campaign/job/lease/reservation。
+- 候选archive `release-e345468.zip`含258项，SHA256固定为`9d79121ed025c2d80b4179df1f634819deaa3148bb6be561dd1fda42f0d0f62c`；提升激活脚本预检通过。部署releases目录保持管理员/SYSTEM只写；Codex触发UAC未显示可操作提示，pointer仍为`592a65a`，候选尚未安装。

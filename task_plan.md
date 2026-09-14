@@ -60,9 +60,9 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 - [x] 隔离 PostgreSQL 55444 的 17 个引擎测试；连同非 PG 矩阵共 29 passed。
 - [x] 独立 R3 差异审查无 P0/P1（最终冻结代码提交`b714556`）。
 - [x] 第三轮修复第二次复审的3个P1，并完成724项非PG与29项隔离PG回归。
-- [ ] 制作并部署不可变 release，保留旧 pointer 作为回滚点。
-- [ ] 三 Worker容量与 readiness 通过。
-- [ ] 3条与20条真实验收通过。
+- [ ] 制作并部署不可变 release，保留旧 pointer 作为回滚点（ZIP与激活脚本已预检，待管理员执行）。
+- [ ] 三 Worker容量与 readiness 通过（30槽canary已通过，服务readiness待激活）。
+- [ ] 3条与20条真实验收通过（旧上线版3条已通过，20条待候选激活）。
 - [ ] 提交1,093条单一全量 campaign。
 - [ ] 第二轮独立复审新增3个P1；按用户“任一门禁失败立即停止”要求，发布流程已停止，等待是否授权第三轮代码修复。
 - [ ] 第三轮独立复审仍有3个P1；自动修复循环再次停止：并发降级仍ready、cancel返回completed竞态、completed但成员投影暂缺被记failed。
@@ -74,7 +74,9 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 - [x] 第四轮独立复审新增P1：拒绝POST的请求体drain必须有固定总时间上限。
 - [x] 最终delta复核遗留P1：完整Worker计数字段必须严格相等而不是仅大于等于requested。
 - [ ] 在隔离环境完成 1W/2W 对照；不执行 Amazon live 验证。
-- [ ] 用户从DataImpulse Dashboard → Proxy Access取得实际代理login/password；当前新值返回`407 NO_USER`。正确凭据到位后再做CONNECT、新canary和发布门禁。
+- [x] 用户从DataImpulse Proxy Access取得实际代理凭据；10000与823均CONNECT 200/TLS1.3，10槽与30槽canary通过。
+- [x] 目标tenant事务登记1093条，且无活动campaign/job/lease/reservation。
+- [ ] 管理员运行`outputs/prod-full-rollout-20260914/activate_reviewed_release.ps1`完成release安装与三Worker切换。
 
 ## Errors Encountered
 
@@ -107,6 +109,9 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 | 生成PowerShell凭据轮换入口时JS模板误解释`${...}` | 1 | 文件未写入；改用PowerShell字符串拼接后由`apply_patch`成功创建。 |
 | 交互终端首次指定了不存在的`C:/Program Files/PowerShell/7/pwsh.exe` | 1 | 脚本未运行、vault未修改；改由当前Codex PowerShell宿主直接执行脚本。 |
 | 代理凭据轮换在PowerShell 7缺少`[IO.File]::SetAccessControl` | 1 | 失败发生在临时vault ACL阶段、原vault未替换；改用`icacls.exe`限制当前账户和SYSTEM后重试。 |
+| 三Worker配置离线hash验证缺少credential generation | 1 | 未改生产；对子进程注入固定离线generation后确认30个唯一端口、15 action需要30槽。 |
+| 当前有限令牌不能写受保护的`deploy/releases` | 1 | archive已生成但release目录无半成品；保留管理员/SYSTEM只写ACL，不放宽权限，改用提升权限且自动回滚的激活脚本。 |
+| 从Codex进程触发RunAs未显示可操作UAC且长期等待 | 1 | current pointer仍为`592a65a`、候选目录不存在；中止等待，改由用户在管理员PowerShell手工执行已预检脚本。 |
 
 ## 本轮自测
 

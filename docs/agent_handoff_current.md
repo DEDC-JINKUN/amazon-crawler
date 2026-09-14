@@ -1,25 +1,25 @@
 # Amazon Collection 当前 Agent 交接
 
-**观察时间：** 2026-09-14 13:08（Asia/Shanghai）
+**观察时间：** 2026-09-14 14:38（Asia/Shanghai）
 **用途：** 新 Agent 的五分钟事实入口。本文是当前快照，不是部署凭证；变化事实必须回到下列权威来源复核。
 
 ## 先说结论
 
-当前修复候选已完成独立R3代码审查，解决了 Operator/Agent 批次分叉、多Worker容量与健康监督、取消竞态和终态覆盖问题；**候选尚未部署，线上仍是旧版单Worker。** 上线版已创建3-ASIN后台campaign，但当天10槽非Amazon canary为0/10可用，容量门已把Worker置为blocked，因此任务仍queued且没有访问Amazon。
+当前修复候选已完成独立R3代码审查；**候选尚未部署，线上仍是旧版单Worker。** Proxy Access新凭据已通过，旧上线版3-ASIN campaign终态为2 succeeded、1 variant、0 failed；目标tenant已登记1093条，30槽canary为30/30唯一可用。发布包和自动回滚激活脚本均已预检，剩余阻塞是部署目录的管理员ACL，需要用户在管理员PowerShell执行一次激活脚本。
 
 ## 事实矩阵
 
 | 事实面 | 状态 | 当前证据 |
 |---|---|---|
 | 候选代码 | `reviewed-current` | 分支 `codex/multiworker-fix-20260913`，最终冻结代码提交 `b714556`；独立R3复核P0=0/P1=0 |
-| 线上 Collection | `blocked-by-capacity` | deploy pointer `592a65a`；旧版单Worker，tenant `local_agent_deployment_20260906`；`/readyz`为503 `canary_fact_denied` |
+| 线上 Collection | `verified-current` | deploy pointer `592a65a`；旧版单Worker，tenant `local_agent_deployment_20260906`；新凭据下10槽canary通过 |
 | 线上 Operator | `verified-current` | operator pointer `71db26e`；不是候选提交 |
-| 三 Worker | `pending` | 候选服务允许请求 1–8 Worker，但当前线上未部署；网页 Operator 仍只接受 1/2 |
+| 三 Worker | `activation-pending` | 30槽canary 30/30唯一可用；候选配置与激活脚本已预检，尚未切pointer |
 | 全量 campaign | `protocol available` | MCP/Collection capability 上限 5,000 ASIN；没有因此获得本轮真实采集授权 |
 | PostgreSQL 引擎验收 | `verified-current` | 2026-09-14 直接启动专用55444测试实例，完整矩阵29 passed；随后fast shutdown确认关闭 |
 | 文档 | `changed-and-verified` | `README.md`、`docs/collection_api.md`、`docs/collection_operator.md`、`CHANGELOG.md` 已与候选代码同步 |
-| 生产部署与 live 验证 | `blocked` | 代码审查门已通过；生产10槽canary为0/10可用，未发布候选、未启动Amazon请求 |
-| 上线后台campaign | `queued` | `campaign-579718cdd550503aba7e5ea996179b80`，3项queued；等有效容量事实，不得称为正在抓取 |
+| 生产部署与 live 验证 | `admin-action-required` | archive `release-e345468.zip`与自动回滚激活脚本预检通过；管理员ACL阻止当前有限令牌写release |
+| 上线后台campaign | `completed` | `campaign-579718cdd550503aba7e5ea996179b80`：2 succeeded、1 variant、0 failed，证据均晚于请求 |
 | Agent 记忆 | `generated-read-only` | 不直接编辑宿主生成记忆；以本文件作为项目内交接入口 |
 
 ## 候选实现了什么
@@ -56,11 +56,9 @@
 
 ## 下一步顺序
 
-1. 先解决代理出口网络：当前10槽canary全部`network_error`，不得重复盲试或绕过容量门；出口恢复后重新生成同配置新鲜canary。
-2. 三Worker仍需要30个获批会话槽和30个唯一可用出口；不要通过跨ASIN复用会话或放宽验证码、TLS、Cookie、登录规则换容量。
-3. 从`b714556`之后的审查通过快照制作不可变release并保留回滚点；切换pointer后先只做health/readiness。
-4. live verify 必须看到目标tenant/subject且`requested_workers=3`、`effective_workers=3`、`alive_workers=3`、`capacity_backpressure=false`。
-5. 依次做3 ASIN、20 ASIN受控验收；通过后才提交1,093条单一campaign。
+1. 在管理员PowerShell执行`D:/woring/爬虫/outputs/prod-full-rollout-20260914/activate_reviewed_release.ps1`；脚本会安装`e345468`、备份pointer/wrapper、激活三Worker并在失败时回滚。
+2. 激活后复核目标tenant/subject且`requested_workers=3`、`effective_workers=3`、`alive_workers=3`、`capacity_backpressure=false`。
+3. 候选3-ASIN与20-ASIN受控验收通过后，才提交1,093条单一campaign。
 
 当前网页只允许 1/2 Worker。三 Worker在发布候选后应走 MCP campaign；若业务要求网页选择 3，先扩展 Operator 的 1/2 校验和页面选项并补测试。不要使用旧 `crawler.ps1 run -Limit 1093` 代替 campaign。
 
