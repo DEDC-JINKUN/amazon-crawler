@@ -95,3 +95,6 @@
 - 最终P1修复后验证：相关98 passed；默认非PG 746 passed、56 skipped；隔离55444两文件29 passed并fast shutdown；三真实子进程在3个锁定旧固定文件和4,606次并发status调用下持续10秒保持3/3、restart=0、每Worker 3份快照。待最后delta复核。
 - 最终独立delta复核：非整数/零sequence、跨launch无界增长、inventory未知fail-open均关闭；多Worker部分启动回收有效，P0=0、P1=0，建议CONTINUE到冻结提交与新release。审查者独立复跑Agent服务44 passed和diff检查。
 - 长期状态协议代码、测试和同步文档冻结提交`8c1d9d7`（`fix: publish immutable worker status snapshots`）；未纳入工作区既有未跟踪数据/目录。下一步制作新的不可变release。
+- 文档回执提交`33fd636`制作不可变release，archive SHA256`98867ce15c695b979dd05b557eee6b462bd2a76fab042cde15fe13e84aa1efa8`，文件集合相对`4021a56`仅新增`campaign_worker_status.py`。首次激活在PostgreSQL半就绪窗口的认证清理连接失败并自动回滚；增加认证只读probe后第二次激活成功。
+- 激活事务先取消旧失败门禁并清零目标active campaign/job/lease/reservation，再刷新34槽canary得到31 available/unique、Gate allowed。两项计划任务均为系统PowerShell7托管Running；三Worker连续30样本及业务期间均3/3、restart=0，快照积压各3、cleanup failure=0。
+- 新3-ASIN campaign`campaign-bd26b05e4b8055a691adc80d42c22561`终态1 succeeded、2 failed并取消。失败为4个canary可用会话到Amazon连接/响应头9–12秒无状态/无字节的transport_error；成功会话返回200/426001 bytes。按规则停止，20与1093未提交；release`33fd636`保持上线空闲。

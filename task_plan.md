@@ -1,6 +1,6 @@
 # Operator 状态链整体验收
 
-当前候选代码冻结为`8c1d9d7`，最终独立review P0=0/P1=0。生产pointer已回滚到`592a65a`并保持只读展示可用；新release和3→20→1093门禁尚未执行。
+长期状态协议代码`8c1d9d7`已随release`33fd636`上线，最终独立review P0=0/P1=0。生产三Worker与计划任务托管健康；新的3-ASIN门禁因2个代理transport失败而终止，20与1093均未提交。
 
 ## 状态契约
 
@@ -19,7 +19,7 @@ queued → canary → reserving → collecting → finalizing → releasing → 
 
 ## 2026-09-13 续接目标
 
-用户要求判断是否可由 Agent 操控全量采集，并修复多 Worker 问题。当前仍遵守：不启动真实采集、不读取代理凭据、不访问生产数据库、不修改已部署 release。
+用户要求由Agent操控全量采集并修复多Worker。已获授权按3→20→1093门禁上线与采集；凭据只经DPAPI注入且不输出，任一门禁失败立即停止。
 
 拟议的公共验收 seam（待用户确认）：
 
@@ -62,7 +62,7 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 - [x] 第三轮修复第二次复审的3个P1，并完成724项非PG与29项隔离PG回归。
 - [x] 制作并部署不可变 release，保留旧 pointer 作为回滚点（`4021a56`已安装并曾激活；业务门禁失败后pointer已回滚）。
 - [ ] 三 Worker容量与 readiness 持续通过（`4021a56`初始3/3/3/3通过，但业务运行后固定状态文件竞态导致Worker重启/503，不能算发布通过）。
-- [ ] 3条与20条真实验收通过（旧上线版3条已通过，20条待候选激活）。
+- [ ] 3条与20条真实验收通过（`33fd636`新3条为1 succeeded/2 transport failed，已取消；20条未提交）。
 - [ ] 提交1,093条单一全量 campaign。
 - [ ] 第二轮独立复审新增3个P1；按用户“任一门禁失败立即停止”要求，发布流程已停止，等待是否授权第三轮代码修复。
 - [ ] 第三轮独立复审仍有3个P1；自动修复循环再次停止：并发降级仍ready、cancel返回completed竞态、completed但成员投影暂缺被记failed。
@@ -84,7 +84,8 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 - [x] 用迁移后的计划任务重启旧release验证，再激活`4021a56`并取得初始三Worker readiness；业务门禁随后暴露独立状态协议故障。
 - [x] 完成不可变Worker状态快照与Supervisor内存缓存；全套、隔离PG、Windows持久并发和独立review全部通过（最终P0=0/P1=0）。
 - [x] 冻结长期状态协议代码提交`8c1d9d7`，未纳入工作区既有未跟踪数据/目录。
-- [ ] 制作新release，恢复计划任务托管为Running，重新执行3条→20条→1093条门禁。
+- [x] 制作release`33fd636`并恢复两项计划任务为系统PowerShell7托管Running；三Worker连续30样本和业务运行均3/3、restart=0。
+- [ ] 解决Amazon transport出口质量后，使用新幂等键重新执行3条→20条→1093条门禁。
 - [x] 修复独立review发现的监督器重启预删锁竞态并补红绿测试。
 - [x] 修复复核发现的PID复用旧状态冒认：每次spawn绑定launch token并补红绿测试。
 - [x] 修复复核发现的旧failed/blocked跨launch污染，并覆盖三种旧状态。

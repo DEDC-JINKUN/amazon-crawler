@@ -1,28 +1,28 @@
 # Amazon Collection 当前 Agent 交接
 
-**观察时间：** 2026-09-14 20:04（Asia/Shanghai）
+**观察时间：** 2026-09-14 21:57（Asia/Shanghai）
 
 **用途：** 新 Agent 的五分钟事实入口。本文是当前快照，不是部署凭证；变化事实必须回到下列权威来源复核。
 
 ## 先说结论
 
-系统级 PowerShell 7.6.6 和两项生产计划任务迁移已经完成。`4021a56`曾成功激活并取得三 Worker 初始3/3/3/3 readiness，但新的3-ASIN业务门禁证明其固定状态文件方案在 Windows 持续读锁下仍会让三个 Worker崩溃；因此20条和1,093条都没有提交，生产pointer已回滚到旧版`592a65a`。
+系统级 PowerShell 7.6.6、两项生产计划任务迁移和长期状态协议均已上线。当前 Collection/Operator pointer 是新release `33fd636`，reviewed code为`8c1d9d7`；两项任务均由系统pwsh托管为Running，三Worker在激活30次连续样本及真实业务门禁期间保持3/3健康、restart=0、快照清理失败=0。旧`4021a56`不得再激活。
 
-状态通道已重构为不可变快照加Supervisor内存缓存，完整验证与最终独立review已通过并冻结为代码提交`8c1d9d7`；尚未制作新release或重新部署。不得再次激活`4021a56`。
+新的3-ASIN门禁`campaign-bd26b05e4b8055a691adc80d42c22561`没有通过：1 succeeded、2 failed，已取消并全部终态。失败均为代理会话到Amazon的transport/fetch_error，不是Worker状态文件故障。按门禁规则，20条和1,093条均未提交；当前新服务保持上线但空闲。
 
 ## 事实矩阵
 
 | 事实面 | 状态 | 当前证据 |
 |---|---|---|
-| 候选代码 | `reviewed-frozen` | 代码提交`8c1d9d7`；新增`campaign_worker_status.py`；最终独立复核P0=0/P1=0 |
+| 候选代码 | `deployed-reviewed` | release `33fd636`，reviewed code `8c1d9d7`；最终独立复核P0=0/P1=0 |
 | 旧候选release | `rejected-by-live-gate` | `4021a56`初始ready，但3-ASIN运行后Worker在`os.replace` WinError 5上耗尽重启；禁止复用 |
-| 线上 Collection | `rolled-back-and-live` | current pointer `592a65a`；`/readyz`最近返回200、tenant `local_agent_deployment_20260906`、单Worker running |
-| 线上 Operator | `rolled-back` | operator pointer `71db26e` |
-| 计划任务运行时 | `migrated-with-ownership-gap` | 两项Action均为`C:/Program Files/PowerShell/7/pwsh.exe`；XML备份和迁移回执存在；回滚后端口进程存活但任务状态显示Ready，下一次发布前须恢复托管为Running |
-| 失败3-ASIN门禁 | `stopped` | `campaign-0fa7b5ae1eb658c58e9ef8bae81ec2c6`曾2 succeeded、1 claimed；回滚后目标tenant状态尚未重新对账，不得当作通过或复用 |
+| 线上 Collection | `verified-current` | current pointer `33fd636`；`/readyz` 200，目标tenant，requested/effective/alive/healthy=3/3/3/3，restart=0 |
+| 线上 Operator | `verified-current` | operator pointer `33fd636` |
+| 计划任务运行时 | `verified-current` | Collection/Postgres任务均为Running，Action固定`C:/Program Files/PowerShell/7/pwsh.exe` |
+| 失败3-ASIN门禁 | `terminal-failed` | `campaign-bd26b05e4b8055a691adc80d42c22561`已取消且3/3终态：1 succeeded、2 transport failed |
 | 20条与全量campaign | `not-submitted` | 未提交20条；未提交1,093条 |
 | 目标清单 | `verified` | `Amazon Scraping/data/owned_us_asin_20260902_full_01/manifest_1093.csv`共1,093个唯一合法ASIN |
-| 代理容量 | `must-refresh` | 34槽配置曾有32个唯一可用并放行三Worker；该事实现在已过期，下一次发布前必须按同配置重跑非Amazon canary |
+| 代理容量 | `business-gate-failed` | 最新34槽非Amazon canary为31可用/唯一并allowed；实际Amazon门禁中4个canary可用会话在连接/响应头阶段9–12秒无字节失败，另1个会话成功 |
 | 默认非PG回归 | `verified-current` | 746 passed、56 skipped、0 failed |
 | 隔离PostgreSQL门禁 | `verified-current` | `127.0.0.1:55444/operator_matrix`两文件29 passed；随后fast shutdown确认关闭 |
 | Windows并发压力 | `verified-current` | 最终P1修复后3个真实子进程、3个被长期读锁的旧固定文件、4,606次并发status调用、持续10秒：alive/healthy=3/3、restart=0、每Worker保留3份快照 |
@@ -59,12 +59,10 @@
 
 ## 下一步严格顺序
 
-1. 从已review代码提交`8c1d9d7`制作新的不可变release；不得覆盖或复用`4021a56`。
-2. 以管理员权限恢复两项计划任务为真正Running托管状态，同时保持系统PowerShell7 Action。
-3. 刷新34槽非Amazon canary，并确认当前配置哈希、有效期和至少30个唯一槽。
-4. 在目标tenant对账并取消/终结失败门禁遗留的claimed成员，确认没有活动campaign/job/lease/reservation。
-5. 激活新release，持续观察三Worker而不是只看一次ready；必须requested/effective/alive/healthy=3/3/3/3、restart=0。
-6. 使用新的幂等键重新执行3-ASIN门禁；全部终态且无failed/blocked后再执行20条，之后才提交1,093条单一campaign。
+1. 保持`33fd636`上线空闲，不提交20条或1,093条。
+2. 解决住宅代理到Amazon的会话质量：优先让供应商确认Amazon US可用性/地区与连接稳定性；代码侧备选是增加“实际Amazon transport失败会话的跨run短期隔离”，但必须另做设计、测试和review，不能把非Amazon canary改成Amazon隐式探测。
+3. 修复后刷新同配置非Amazon canary，并使用新的幂等键重跑3-ASIN门禁。
+4. 只有3条全部终态且无failed/blocked，才提交20条；20条同样通过后才提交1,093条单一campaign。
 
 ## 新 Agent 开场检查
 
@@ -78,8 +76,8 @@ Get-Content 'D:\woring\爬虫\deploy\amazon-collection\operator-release.txt'
 curl.exe --silent --show-error --max-time 5 http://127.0.0.1:8765/readyz
 ```
 
-开场只汇报：候选diff状态、线上pointer/readiness、失败门禁遗留、下一道放行条件。不得把测试通过等同于已部署，不得复用失败campaign或旧幂等键，不得输出代理凭据。
+开场只汇报：线上release/readiness、3-ASIN失败证据、代理出口阻断、下一道放行条件。不得提交20/1093，不得复用失败campaign或旧幂等键，不得输出代理凭据。
 
 ## 可直接复制给新 Agent 的提示词
 
-> 在`D:\woring\爬虫\.worktrees\amazon-integrated-deploy`接手Amazon Collection。先完整读取`AGENTS.md`和`docs/agent_handoff_current.md`，再只读核对分支、提交、工作区、deploy pointers、计划任务状态与`127.0.0.1:8765/readyz`。当前`4021a56`已被3-ASIN生产门禁否决，不得再次激活；长期状态协议已review并冻结为`8c1d9d7`。请用四项回复：候选代码、线上状态、失败门禁遗留、下一放行条件。不要输出凭据，不要跳过3→20→1093门禁。
+> 在`D:\woring\爬虫\.worktrees\amazon-integrated-deploy`接手Amazon Collection。先完整读取`AGENTS.md`和`docs/agent_handoff_current.md`，再只读核对分支、提交、工作区、deploy pointers、计划任务状态与`127.0.0.1:8765/readyz`。当前release为`33fd636`，三Worker修复已上线且健康；3-ASIN业务门禁`campaign-bd26b05e4b8055a691adc80d42c22561`因2个transport失败而终止，20/1093未提交。请用四项回复：线上状态、门禁结果、代理出口证据、下一放行条件。不要输出凭据，不要跳过3→20→1093门禁。

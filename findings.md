@@ -88,4 +88,11 @@
 - 长期协议使用`worker-N.<launch-token>.<20位sequence>.json`不可变快照。Writer只创建新文件；Supervisor监控线程选择当前token的最新完整快照并缓存，API不再直接读文件。最新文件写入中/损坏时沿用上一完整缓存；旧快照删除失败为非致命best-effort，进程存活仍以受管Popen为权威。
 - 独立review发现两项P1：Python相等语义会让JSON boolean/float sequence冒充integer；锁定旧launch快照缺跨launch总上限。修复后读写两侧都严格要求原生`int`，并对每Worker设置64文件/1 MiB总配额、4 KiB单快照上限；启动前必须为3份滚动快照预留容量，否则fail closed。清理失败与积压数进入readiness子项。
 - delta复核继续发现两个P1：配额目录枚举/文件大小统计失败时把未知当0，以及读取端接受sequence=0。最终把inventory完整性纳入配额判定，glob/stat失败均拒绝spawn/publish；读写两端统一要求正整数。另补启动事务性清理，后续Worker预检失败时终止先前已启动成员。
-- 生产门禁已停止在3条，未提交20条或1093条。失败候选已恢复旧release指针；下一次放量必须重新经过全量测试、Windows三Worker持久并发、独立review和全新的3-ASIN门禁。
+- `4021a56`当时停止在3条且未提交20条或1093条，随后恢复旧pointer。该历史门禁已由下节的新release流程取代，但`4021a56`仍永久禁止复用。
+
+## 2026-09-14 release 33fd636与真实业务门禁
+
+- release`33fd636`（reviewed code`8c1d9d7`，archive SHA256`98867ce15c695b979dd05b557eee6b462bd2a76fab042cde15fe13e84aa1efa8`）已激活；两项计划任务均由系统PowerShell7托管Running。激活连续30次ready样本和后续业务运行都保持三Worker alive/healthy=3/3、restart=0；每Worker 3份快照、约1 KiB、cleanup failures=0。长期状态协议的生产故障已关闭。
+- 最新34槽非Amazon canary为31 available/unique、3 connect_failed，容量Gate allowed。新3-ASIN campaign`campaign-bd26b05e4b8055a691adc80d42c22561`最终1 succeeded、2 failed并取消；目标tenant随后active campaign/job/lease/reservation均为0。
+- 两个失败ASIN分别使用session-13/14与session-15/17；这些会话在ipify canary都返回200，但访问Amazon时连接/响应头阶段约9–12秒后无HTTP状态、无传输字节，均记录`transport_error`并隔离。session-23成功返回Amazon 200与426001 bytes。根因面转为“非Amazon可用的住宅出口不保证Amazon稳定”，不是状态文件、Worker重启、PostgreSQL或API。
+- 门禁规则生效：20条与1093条均未提交。当前`33fd636`保持上线空闲；下一步必须改善供应商出口质量，或另行设计跨run的Amazon transport失败会话隔离，再从新的3-ASIN门禁重新开始。
