@@ -221,8 +221,7 @@ class CampaignWorkerSupervisor:
                             document.get("worker_heartbeat_at"), now, self.worker_heartbeat_timeout,
                         )
                         document_matches = (
-                            int(document.get("pid") or -1) == int(process.pid)
-                            and str(document.get("launch_token") or "") == self._launch_tokens[index]
+                            str(document.get("launch_token") or "") == self._launch_tokens[index]
                         )
                         if (
                             document_matches and heartbeat_fresh
@@ -281,8 +280,7 @@ class CampaignWorkerSupervisor:
                     document.get("worker_heartbeat_at"), now, self.worker_heartbeat_timeout,
                 )
                 document_matches = (
-                    int(document.get("pid") or -1) == int(process.pid)
-                    and str(document.get("launch_token") or "") == self._launch_tokens[index]
+                    str(document.get("launch_token") or "") == self._launch_tokens[index]
                 )
                 reported_state = (
                     str(document.get("state") or self._states[index])

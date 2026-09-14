@@ -71,4 +71,5 @@
 - 修复只对`PermissionError`做20×10ms有界重试并在退出时清理本次临时文件；不扩大重启预算、不吞持续权限错误。
 - 独立delta review发现监督器`_spawn_locked`仍在重启前预删`worker-N.json`；目标被Windows读锁占用时该unlink同样会失败。删除预删是最小修复：新子进程本来就用临时文件原子覆盖，监督器又以PID匹配防止旧状态冒充健康。
 - 后续复核指出PID可能被操作系统复用；仅保留旧状态并核对PID仍可能短暂fail-open。最终采用每次spawn生成32位随机launch token，子进程写入状态，监督器同时匹配token与PID；新子进程首次状态前保持starting。
-- 再次复核发现`status()`虽计算token匹配，却在匹配判断外传播旧文件的failed/blocked到内部状态。最终把running/failed/blocked的读取与传播都置于当前token+PID匹配之后；旧running/failed/blocked三种PID复用场景均保持starting。
+- 再次复核发现`status()`虽计算launch匹配，却在匹配判断外传播旧文件的failed/blocked到内部状态。最终把running/failed/blocked的读取与传播都置于当前launch匹配之后；旧running/failed/blocked三种PID复用场景均保持starting。
+- 冻结release备用端口真实启动显示Windows venv的`Popen.pid`属于启动器父进程，状态文件PID属于真正执行Worker的子进程；强制PID相等会使健康Worker永久starting。launch token已足以绑定本次spawn，Popen本身负责生命周期；放宽PID等值后备用端口严格readiness为requested/effective/alive/healthy=3/3/3/3、restart=0。

@@ -309,6 +309,50 @@ def test_campaign_worker_supervisor_rejects_fresh_old_status_when_pid_is_reused(
         supervisor.stop()
 
 
+def test_campaign_worker_supervisor_accepts_matching_launch_token_from_windows_venv_child(tmp_path):
+    service = load("agent_collection_service")
+    commands = []
+
+    class Process:
+        pid = 6000
+        returncode = None
+        def poll(self): return self.returncode
+        def terminate(self): self.returncode = 0
+        def wait(self, timeout=None): return self.returncode
+        def kill(self): self.returncode = -9
+
+    def spawn(command, **_kwargs):
+        commands.append(list(command))
+        return Process()
+
+    supervisor = service.CampaignWorkerSupervisor(
+        ["python", "campaign_worker_process.py"], count=1, cwd=tmp_path,
+        environment={}, status_dir=tmp_path / "venv-child-status", spawn=spawn,
+        monitor_interval=0.01, heartbeat_timeout=2, restart_limit=1,
+    )
+    supervisor.start()
+    try:
+        command = commands[0]
+        launch_token = command[command.index("--launch-token") + 1]
+        now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+        (tmp_path / "venv-child-status" / "worker-1.json").write_text(__import__("json").dumps({
+            "schema": "amazon-campaign-worker-status-v1",
+            "pid": 6001,
+            "launch_token": launch_token,
+            "state": "running",
+            "heartbeat_at": now,
+            "worker_heartbeat_at": now,
+            "last_error": None,
+        }), encoding="utf-8")
+
+        status = supervisor.status()
+        assert status["state"] == "running"
+        assert status["alive_workers"] == 1
+        assert status["healthy_workers"] == 1
+    finally:
+        supervisor.stop()
+
+
 def test_service_parser_exposes_one_managed_primary_console():
     service=load('agent_collection_service')
     args=service.build_parser().parse_args([

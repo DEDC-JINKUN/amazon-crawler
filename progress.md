@@ -75,3 +75,5 @@
 - launch token修复后完整非PG 732 passed、56 skipped；专用55444矩阵29 passed并fast shutdown；Python编译与diff检查通过。待冻结提交和最终delta复核。
 - 对`f62d315`复核仍有1个P1：token不匹配的旧failed/blocked仍会污染内部状态。PID复用测试扩展为running/failed/blocked，旧代码2 failed/1 passed；仅在token+PID匹配时采纳状态后3 passed。
 - 旧终态污染修复后完整非PG 734 passed、56 skipped；专用55444矩阵29 passed并fast shutdown；Python编译与diff检查通过。待冻结最终delta和复核。
+- `30fa5ce`冻结release在备用端口显示3个受管Popen均存活、状态心跳也新鲜，但Popen父PID与实际Python子PID不同导致healthy=0。新增PID分层红测旧代码1 failed；以launch token绑定状态、Popen负责生命周期后4 passed。工作树备用8875/8870真实启动达到requested/effective/alive/healthy=3/3/3/3、restart=0、Console 200，随后已关闭。
+- PID分层修复后完整非PG 735 passed、56 skipped；专用55444矩阵29 passed并fast shutdown；Python编译与diff检查通过。待冻结最终提交和只读delta复核。
