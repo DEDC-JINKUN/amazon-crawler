@@ -3,7 +3,7 @@ const csrf=document.body.dataset.csrf;
 const state={preview:null,batch:null,timer:null};
 const $=id=>document.getElementById(id);
 const labels={requested:"请求",claimed:"处理中",completed:"完成",variant:"变体",failed:"失败",blocked:"阻断",pending:"待处理"};
-const statusLabels={starting:"启动中",running:"运行中",completed:"已完成",failed:"失败",stopped:"已停止"};
+const statusLabels={starting:"启动中",running:"运行中",stopping:"正在停止",cancel_pending:"取消待确认",cleanup_pending:"清理待确认",completed:"已完成",failed:"失败",stopped:"已停止"};
 const subjectLabels={own:"自有",competitor:"竞品",candidate:"候选"};
 const errors={unauthorized:"会话已失效，请刷新页面",csrf_rejected:"安全令牌失效，请刷新页面",unsupported_file_type:"仅支持 .xlsx 文件",invalid_rows_block_start:"存在无效非空行，不能启动",invalid_subject_type:"清单类型无效",another_batch_is_active:"已有普通批次运行中",deployment_batch_lock_busy:"已有控制器持有批次锁",selection_required:"请选择工作表和 ASIN 列",runner_failed:"控制器运行失败，请下载回执查看",runner_start_failed:"控制器未能启动，请稍后重试",status_projection_unavailable:"采集状态未能完成汇总",canary_failed:"代理容量预检失败，未开始采集",canary_setup_failed:"代理容量预检配置无效",canary_timeout:"代理容量预检超时，未开始采集",canary_cancelled:"代理容量预检已取消",canary_unique_capacity_insufficient:"代理可用容量不足，未开始采集",canary_replacement_capacity_insufficient:"代理替补容量不足，未开始采集",canary_credentials_missing:"代理凭据不可用，未开始采集",canary_database_credentials_missing:"数据库凭据不可用，未开始采集",capacity_reserved_elsewhere:"其他批次仍占用代理容量，请稍后重试",capacity_evidence_missing:"缺少可用的代理容量证据，未开始采集",capacity_evidence_stale:"代理容量证据已过期，未开始采集",capacity_config_mismatch:"代理容量配置已变化，未开始采集",capacity_release_failed:"停止批次时未能释放代理容量，请稍后重试"};
 

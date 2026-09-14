@@ -412,6 +412,69 @@ class BatchManager:
             "-PythonPath", str(self.settings.python_executable),
         ]
 
+    def _launch_cancel_runner(self, record: dict[str, Any], batch_dir: Path) -> subprocess.Popen:
+        manifest = batch_dir / "manifest.csv"
+        config = batch_dir / "batch.toml"
+        if not manifest.is_file() or not config.is_file():
+            raise OperatorError("campaign_cancel_files_unavailable", 503)
+        command = self._build_runner_command(record, batch_dir, manifest, config)
+        gate = batch_dir / "cancel-runner.start.gate"
+        request_path = batch_dir / "cancel-runner.request.json"
+        request = {
+            "python": command[0],
+            "working_directory": str(self.settings.release_root),
+            "arguments": command[1:],
+            "gate_path": str(gate),
+            "cancel_path": str(batch_dir / "cancel-runner.cancel"),
+        }
+        _atomic_json(request_path, request)
+        gate.write_bytes(b"")
+        stdout = (batch_dir / "cancel-runner.stdout.log").open("ab")
+        stderr = (batch_dir / "cancel-runner.stderr.log").open("ab")
+        try:
+            process = subprocess.Popen(
+                [
+                    str(self.settings.python_executable),
+                    str(self.settings.release_root / "scripts" / "crawler_process_host.py"),
+                    "--request", str(request_path),
+                ],
+                cwd=self.settings.release_root,
+                stdout=stdout,
+                stderr=stderr,
+                shell=False,
+            )
+        finally:
+            stdout.close()
+            stderr.close()
+        identity = None
+        for _ in range(20):
+            identity = _process_start_identity(process.pid)
+            if identity:
+                break
+            time.sleep(0.01)
+        _atomic_json(batch_dir / "control.json", {
+            "pid": process.pid,
+            "process_start_identity": identity,
+            "role": "campaign-cancel-runner",
+        })
+        self._processes[str(record["batch_id"])] = process
+        threading.Thread(
+            target=self._monitor_cancel,
+            args=(str(record["batch_id"]), process),
+            name=f"operator-cancel-{record['batch_id']}",
+            daemon=True,
+        ).start()
+        return process
+
+    def _monitor_cancel(self, batch_id: str, process: subprocess.Popen) -> None:
+        try:
+            exit_code = process.wait()
+            with self._lock:
+                self._finish_record(batch_id, exit_code)
+        finally:
+            with self._lock:
+                self._processes.pop(batch_id, None)
+
     def start_batch(self, import_id: str, worker_count: int = 1, subject_type: str = "own") -> dict[str, Any]:
         if int(worker_count) not in {1, 2}:
             raise OperatorError("invalid_worker_count")
@@ -554,7 +617,7 @@ class BatchManager:
                 raise
 
     def _merge_progress(self, record: dict[str, Any], batch_dir: Path) -> dict[str, Any]:
-        if record.get('status') in TERMINAL or record.get('status') == 'cleanup_pending':
+        if record.get('status') in TERMINAL or record.get('status') in {'cleanup_pending', 'cancel_pending'}:
             return record
         progress = _read_json(batch_dir / "progress.json") or {}
         allowed = {
@@ -604,6 +667,10 @@ class BatchManager:
 
     def _finish_record(self, batch_id: str, exit_code: int | None) -> None:
         batch_dir = self._batch_dir(batch_id)
+        campaign_link = _read_json(batch_dir / "campaign.json") or {}
+        has_campaign = bool(re.fullmatch(
+            r"campaign-[0-9a-f]{32}", str(campaign_link.get("campaign_id") or ""),
+        ))
         record = _read_json(batch_dir / "batch.json")
         if record is None:
             return
@@ -624,14 +691,38 @@ class BatchManager:
             record['finished_at'] = None
             _atomic_json(batch_dir / 'batch.json', record)
             return
-        resolved = sum(int(record.get(key) or 0) for key in ("completed", "variant", "failed", "blocked"))
-        projection_complete = (
-            record.get("status") == "completed"
-            and int(record.get("requested") or 0) == resolved
+        resolved = sum(int(record.get(key) or 0) for key in ("completed", "variant", "failed", "blocked", "stopped"))
+        members_terminal = (
+            int(record.get("requested") or 0) == resolved
             and int(record.get("pending") or 0) == 0
             and int(record.get("claimed") or 0) == 0
         )
-        if record.get("stop_requested"):
+        projection_complete = (
+            record.get("status") == "completed"
+            and members_terminal
+        )
+        campaign_status = str(record.get("campaign_status") or "")
+        if campaign_status == "completed" and members_terminal:
+            record["status"] = "completed"
+            record["latest_error"] = None
+        elif record.get("stop_requested") and campaign_status == "cancelled" and members_terminal:
+            record["status"] = "stopped"
+        elif record.get("stop_requested") and campaign_status in {"active", "cancelled"}:
+            record["status"] = "cancel_pending"
+            record["latest_error"] = "campaign_cancel_unconfirmed"
+            record["finished_at"] = None
+            record.pop("_pending_finalization", None)
+            _atomic_json(batch_dir / "batch.json", record)
+            return
+        elif record.get("stop_requested") and not campaign_status and has_campaign:
+            record["status"] = "cancel_pending"
+            record["latest_error"] = "campaign_cancel_unconfirmed"
+            record["finished_at"] = None
+            record.pop("_pending_finalization", None)
+            _atomic_json(batch_dir / "batch.json", record)
+            return
+        elif record.get("stop_requested") and not campaign_status:
+            # Legacy/fake runners have no shared campaign authority.
             record["status"] = "stopped"
         elif exit_code == 0 and projection_complete:
             record["status"] = "completed"
@@ -733,12 +824,29 @@ class BatchManager:
             record = _read_json(batch_dir / "batch.json")
             if record is None:
                 raise OperatorError("batch_not_found", 404)
-            if record.get("status") in TERMINAL:
+            campaign = _read_json(batch_dir / "campaign.json") or {}
+            has_campaign = bool(re.fullmatch(r"campaign-[0-9a-f]{32}", str(campaign.get("campaign_id") or "")))
+            if record.get("status") in TERMINAL and not (record.get("status") == "failed" and has_campaign):
                 return self._public(record)
             control = _read_json(batch_dir / "control.json") or {}
             pid = control.get("pid")
             identity = control.get("process_start_identity")
             if not _process_matches(pid, identity):
+                if has_campaign:
+                    record["status"] = "stopping"
+                    record["stop_requested"] = True
+                    record["latest_error"] = None
+                    record["finished_at"] = None
+                    _atomic_json(batch_dir / "batch.json", record)
+                    _atomic_json(batch_dir / "operator.stop.json", {
+                        "schema_version": "amazon-operator-stop-v1",
+                        "batch_id": batch_id,
+                        "campaign_id": campaign["campaign_id"],
+                        "requested_at": utc_now(),
+                        "reason": "operator_requested_after_runner_loss",
+                    })
+                    self._launch_cancel_runner(record, batch_dir)
+                    return self._public(record)
                 record["status"] = "failed"
                 record["latest_error"] = "managed_process_unavailable"
                 record["finished_at"] = utc_now()

@@ -128,7 +128,7 @@ Agent 调用使用 DPAPI 派生的 scoped key，子进程不会得到 PostgreSQL
 
 同一次 Agent 批量的最多5条由一个runner run处理，但容量按当时实际可领取的1至5条计算。商品广度默认每ASIN一个代理会话；同一ASIN的评论分页在该会话内粘滞。`agent-health`分别报告`processed_actions`、`succeeded_actions`、`failed_actions`与`blocked_actions`；兼容字段`completed_actions`只等于成功数，不再表示已处理数。Agent与普通Worker共享原子容量reservation：每次claim和创建新槽前复核TTL，只使用分配给自己的生产槽和最多两个有界替换槽；耗尽内部HTTP重试的transport-bad槽会隔离，下一ASIN不得复用。HTTP challenge最多换一个出口，并只允许一次stock Firefox验证；Firefox仍为challenge即熔断。拒绝事实持久化并通过`/readyz`与Console解释，不做无限轮换、验证码填写/破解、登录或个人Cookie读取。
 
-Agent 服务 Worker 数由 `-AgentWorkerCount 1..8` 请求，并纳入运行指纹。`/readyz` 同时返回 requested/effective/alive Worker 数；若代理容量不足，effective 会自动降低。人工 Operator 与 Agent 都使用同一 `collection_campaign` 事实源，Operator 的 JSON/CSV 只是该 campaign 的本地投影。
+Agent 服务 Worker 数由 `-AgentWorkerCount 1..8` 请求，并纳入运行指纹。`/readyz` 同时返回 requested/effective/alive/healthy Worker 数；只有全部 effective Worker 的进程、状态文件和业务线程心跳都新鲜，且当前容量事实仍有效时才返回 ready。子 Worker异常退出或业务线程超过租约时限无进度会有限重启，重启耗尽或访问阻断后 fail closed。人工 Operator 与 Agent 都使用同一 `collection_campaign` 事实源，Operator 的 JSON/CSV 只是该 campaign 的本地投影。
 
 本机只读运营控制台：
 

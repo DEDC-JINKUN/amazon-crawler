@@ -28,6 +28,76 @@ def test_effective_worker_count_backpressures_to_fresh_capacity_and_process_quot
     assert service.effective_worker_count(12,{'unique_egress_count':50},process_limit=6)==6
 
 
+def valid_three_worker_capacity(service):
+    config = {
+        "egress_profile": "proxy_sessions",
+        "proxy_url": "http://proxy.example",
+        "proxy_session_ports": list(range(10000, 10030)),
+        "proxy_product_session_scope": "per_asin",
+        "proxy_session_max_asins": 3,
+        "proxy_session_retry_per_asin": 1,
+        "proxy_canary_url": "https://api.ipify.org?format=json",
+        "proxy_canary_timeout_seconds": 15,
+        "proxy_credential_generation": "test-generation-20260914",
+    }
+    canary = load("proxy_canary")
+    fact = {
+        "is_fresh": True,
+        "capacity_config_hash": canary.capacity_config_hash(config),
+        "canary_status": "succeeded",
+        "capacity_gate_status": "allowed",
+        "capacity_gate_reason": "capacity_sufficient",
+        "planned_slots": 30,
+        "tested_slots": 30,
+        "available_slots": 30,
+        "unique_egress_count": 30,
+        "duplicate_egress_count": 0,
+        "requested_capacity": 15,
+        "required_slots": 15,
+        "slot_budget": 1,
+        "slot_capacity": 30,
+    }
+    return config, fact
+
+
+def test_three_worker_count_and_runtime_readiness_fail_closed_on_stale_or_denied_capacity():
+    service = load("agent_collection_service")
+    config, fact = valid_three_worker_capacity(service)
+    assert service.effective_worker_count(3, fact, config) == 3
+
+    stale = {**fact, "is_fresh": False}
+    denied = {**fact, "capacity_gate_status": "denied", "capacity_gate_reason": "capacity_insufficient"}
+    assert service.effective_worker_count(3, stale, config) == 1
+    assert service.effective_worker_count(3, denied, config) == 1
+
+    decision = service.pool_capacity_decision(stale, config, effective_workers=3)
+    status = service.worker_pool_status(
+        type("Worker", (), {"status": lambda self: {"state": "running"}})(),
+        [],
+        requested=3,
+        effective=3,
+        capacity_decision=decision,
+    )
+    assert decision["status"] == "denied"
+    assert status["state"] == "blocked"
+    assert status["last_error"] == "capacity_evidence_stale"
+
+
+def test_embedded_worker_readiness_rejects_a_stale_business_heartbeat():
+    service = load("agent_collection_service")
+    stale = (__import__('datetime').datetime.now(__import__('datetime').timezone.utc) - __import__('datetime').timedelta(seconds=5)).isoformat()
+
+    class Worker:
+        def status(self):
+            return {"state": "running", "worker_heartbeat_at": stale}
+
+    status = service.worker_pool_status(
+        Worker(), [], requested=1, effective=1, worker_heartbeat_timeout=0.1,
+    )
+    assert status["state"] == "blocked"
+    assert status["last_error"] == "worker_heartbeat_stale"
+
+
 def test_worker_pool_status_exposes_requested_effective_and_alive_after_capacity_downshift():
     service = load("agent_collection_service")
 
@@ -43,6 +113,100 @@ def test_worker_pool_status_exposes_requested_effective_and_alive_after_capacity
     assert status["effective_workers"] == 1
     assert status["alive_workers"] == 1
     assert status["capacity_backpressure"] is True
+
+
+def test_campaign_worker_supervisor_restarts_one_crash_and_requires_fresh_child_heartbeat(tmp_path):
+    service = load("agent_collection_service")
+
+    class Process:
+        def __init__(self, pid, returncode):
+            self.pid = pid
+            self.returncode = returncode
+        def poll(self): return self.returncode
+        def terminate(self): self.returncode = 0
+        def wait(self, timeout=None): return self.returncode
+        def kill(self): self.returncode = -9
+
+    class Factory:
+        def __init__(self): self.processes = []
+        def __call__(self, command, **_kwargs):
+            process = Process(1000 + len(self.processes), 2 if not self.processes else None)
+            self.processes.append((list(command), process))
+            return process
+
+    factory = Factory()
+    supervisor = service.CampaignWorkerSupervisor(
+        ["python", "campaign_worker_process.py"],
+        count=1,
+        cwd=tmp_path,
+        environment={},
+        status_dir=tmp_path / "status",
+        spawn=factory,
+        monitor_interval=0.01,
+        heartbeat_timeout=1.0,
+        restart_limit=1,
+    )
+    supervisor.start()
+    try:
+        deadline = time.monotonic() + 2
+        while len(factory.processes) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(factory.processes) == 2
+        replacement = factory.processes[-1][1]
+        status_path = tmp_path / "status" / "worker-1.json"
+        status_path.write_text(__import__('json').dumps({
+            "schema": "amazon-campaign-worker-status-v1",
+            "pid": replacement.pid,
+            "state": "running",
+            "last_error": None,
+            "heartbeat_at": __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
+            "worker_heartbeat_at": __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
+        }), encoding="utf-8")
+        status = supervisor.status()
+        assert status["state"] == "running"
+        assert status["alive_workers"] == 1
+        assert status["healthy_workers"] == 1
+        assert status["restart_count"] == 1
+        assert "--status-file" in factory.processes[-1][0]
+    finally:
+        supervisor.stop()
+
+
+def test_campaign_worker_supervisor_fails_after_restart_budget_and_does_not_restart_blocked_child(tmp_path):
+    service = load("agent_collection_service")
+
+    class Process:
+        def __init__(self, pid, returncode): self.pid, self.returncode = pid, returncode
+        def poll(self): return self.returncode
+        def terminate(self): self.returncode = 0
+        def wait(self, timeout=None): return self.returncode
+        def kill(self): self.returncode = -9
+
+    def run_case(returncode):
+        processes = []
+        def spawn(_command, **_kwargs):
+            process = Process(2000 + len(processes), returncode)
+            processes.append(process)
+            return process
+        supervisor = service.CampaignWorkerSupervisor(
+            ["python", "campaign_worker_process.py"], count=1, cwd=tmp_path,
+            environment={}, status_dir=tmp_path / f"status-{returncode}", spawn=spawn,
+            monitor_interval=0.01, heartbeat_timeout=1, restart_limit=1,
+        )
+        supervisor.start()
+        deadline = time.monotonic() + 2
+        expected = "blocked" if returncode == 3 else "failed"
+        try:
+            while supervisor.status()["state"] != expected and time.monotonic() < deadline:
+                time.sleep(0.01)
+            return supervisor.status(), len(processes)
+        finally:
+            supervisor.stop()
+
+    failed, failed_spawns = run_case(2)
+    blocked, blocked_spawns = run_case(3)
+    assert failed["state"] == "failed" and failed_spawns == 2
+    assert blocked["state"] == "blocked" and blocked_spawns == 1
 
 
 def test_service_parser_exposes_one_managed_primary_console():
@@ -83,7 +247,10 @@ def test_campaign_worker_process_exits_when_embedded_worker_fails(monkeypatch, t
     class Worker:
         def __init__(self, **_kwargs): pass
         def start(self): events.append('start')
-        def status(self): return {'state':'failed','last_error':'RuntimeError'}
+        def status(self): return {
+            'state':'failed','last_error':'RuntimeError',
+            'worker_heartbeat_at':__import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
+        }
         def stop(self): events.append('stop')
 
     class Event:
@@ -101,10 +268,61 @@ def test_campaign_worker_process_exits_when_embedded_worker_fails(monkeypatch, t
     monkeypatch.setattr(sys,'argv',[
         'campaign_worker_process.py','--config',str(tmp_path/'config.toml'),
         '--output-dir',str(tmp_path/'output'),'--tenant-id','tenant-a','--dsn-env','TEST_WORKER_DSN',
+        '--status-file',str(tmp_path/'output'/'control'/'agent-workers'/'worker-1.json'),
     ])
 
     assert process.main()==2
     assert events==['start','stop']
+    status = __import__('json').loads((tmp_path/'output'/'control'/'agent-workers'/'worker-1.json').read_text(encoding='utf-8'))
+    assert status['state']=='failed'
+    assert status['last_error']=='RuntimeError'
+    assert status['pid']==os.getpid()
+    assert status['heartbeat_at']
+    assert status['worker_heartbeat_at']
+
+
+def test_supervisor_restarts_process_when_worker_thread_heartbeat_stalls(tmp_path):
+    service = load("agent_collection_service")
+
+    class Process:
+        def __init__(self, pid): self.pid, self.returncode = pid, None
+        def poll(self): return self.returncode
+        def terminate(self): self.returncode = 0
+        def wait(self, timeout=None): return self.returncode
+        def kill(self): self.returncode = -9
+
+    processes = []
+    def spawn(_command, **_kwargs):
+        process = Process(3000 + len(processes))
+        processes.append(process)
+        return process
+
+    supervisor = service.CampaignWorkerSupervisor(
+        ["python", "campaign_worker_process.py"], count=1, cwd=tmp_path,
+        environment={}, status_dir=tmp_path / "stalled-status", spawn=spawn,
+        monitor_interval=0.01, heartbeat_timeout=2, worker_heartbeat_timeout=0.05,
+        restart_limit=1,
+    )
+    supervisor.start()
+    try:
+        first = processes[0]
+        now = __import__('datetime').datetime.now(__import__('datetime').timezone.utc)
+        (tmp_path / "stalled-status" / "worker-1.json").write_text(__import__('json').dumps({
+            "schema": "amazon-campaign-worker-status-v1",
+            "pid": first.pid,
+            "state": "running",
+            "heartbeat_at": now.isoformat(),
+            "worker_heartbeat_at": (now - __import__('datetime').timedelta(seconds=1)).isoformat(),
+            "last_error": None,
+        }), encoding="utf-8")
+        deadline = time.monotonic() + 2
+        while len(processes) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(processes) == 2
+        assert first.returncode == 0
+        assert supervisor.status()["restart_count"] == 1
+    finally:
+        supervisor.stop()
 
 
 class RefreshStorage:

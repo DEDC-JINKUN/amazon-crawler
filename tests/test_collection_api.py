@@ -432,6 +432,35 @@ class CollectionApiTests(unittest.TestCase):
         finally:
             server.shutdown(); server.server_close(); thread.join(timeout=2)
 
+    def test_agent_service_rejects_campaign_while_worker_pool_is_starting(self):
+        api = load("collection_api")
+
+        class Repository:
+            def load_job_status(self): return {"counts": {}}
+            def submit_campaign(self, **_kwargs): self.fail("starting service must not enqueue")
+
+        server = api.CollectionServer(
+            ("127.0.0.1", 0), repository=Repository(), api_key="master-key",
+            refresh_worker_status=lambda: {"state": "starting", "alive_workers": 2, "effective_workers": 3},
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/v1/campaigns",
+                data=b'{"asins":["B00RCPDCQU"],"idempotency_key":"starting-pool-test"}',
+                headers={"Content-Type": "application/json", **api.agent_headers("master-key", "refresh-agent")},
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                urllib.request.urlopen(request, timeout=2)
+            self.assertEqual(raised.exception.code, 503)
+            with self.assertRaises(urllib.error.HTTPError) as ready:
+                urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/readyz", timeout=2)
+            self.assertEqual(ready.exception.code, 503)
+        finally:
+            server.shutdown(); server.server_close(); thread.join(timeout=2)
+
     def test_readyz_converts_unexpected_repository_error_to_503(self):
         api = load("collection_api")
 

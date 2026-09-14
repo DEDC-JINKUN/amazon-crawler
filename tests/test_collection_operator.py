@@ -405,6 +405,67 @@ def test_operator_status_exposes_the_shared_campaign_and_effective_worker_pool(t
     assert status["alive_workers"] == 2
 
 
+def test_stop_relaunches_secure_campaign_runner_when_original_runner_is_gone(tmp_path, monkeypatch):
+    import operator_core
+
+    configured = settings(tmp_path)
+    configured.fake_runner = False
+    manager = BatchManager(configured)
+    batch_id = "batch-" + "c" * 24
+    batch_dir = configured.data_root / "batches" / batch_id
+    batch_dir.mkdir(parents=True)
+    (batch_dir / "manifest.csv").write_text("asin\nB000000001\n", encoding="utf-8")
+    (batch_dir / "batch.toml").write_text("[worker]\n", encoding="utf-8")
+    (batch_dir / "campaign.json").write_text(json.dumps({
+        "campaign_id": "campaign-" + "c" * 32,
+    }), encoding="utf-8")
+    (batch_dir / "batch.json").write_text(json.dumps({
+        "schema_version": "amazon-operator-batch-v1",
+        "batch_id": batch_id,
+        "tenant_id": "owned-products",
+        "subject_type": "own",
+        "status": "running",
+        "worker_count": 2,
+        "requested": 1,
+        "started_at": "2026-09-14T00:00:00+00:00",
+        "stop_requested": False,
+    }), encoding="utf-8")
+    (batch_dir / "control.json").write_text(json.dumps({
+        "pid": 999999,
+        "process_start_identity": "gone",
+    }), encoding="utf-8")
+    captured = {}
+
+    class Process:
+        pid = 43210
+        def poll(self): return None
+        def wait(self): return 130
+
+    class Thread:
+        def __init__(self, *args, **kwargs): captured["thread"] = (args, kwargs)
+        def start(self): captured["thread_started"] = True
+
+    def popen(command, **kwargs):
+        captured.update(command=command, kwargs=kwargs)
+        return Process()
+
+    monkeypatch.setattr(operator_core, "_process_matches", lambda *_args: False)
+    monkeypatch.setattr(operator_core, "_process_start_identity", lambda _pid: "new-identity")
+    monkeypatch.setattr(operator_core.subprocess, "Popen", popen)
+    monkeypatch.setattr(operator_core.threading, "Thread", Thread)
+
+    stopped = manager.stop_batch(batch_id)
+
+    assert stopped["status"] == "stopping"
+    assert stopped["stop_requested"] is True
+    assert captured["thread_started"] is True
+    assert "crawler_process_host.py" in " ".join(str(value) for value in captured["command"])
+    request = json.loads((batch_dir / "cancel-runner.request.json").read_text(encoding="utf-8"))
+    assert "operator_secure_runner.ps1" in " ".join(request["arguments"])
+    assert request["gate_path"].endswith("cancel-runner.start.gate")
+    assert (batch_dir / "operator.stop.json").is_file()
+
+
 def test_controller_host_uses_structured_argv_and_propagates_projection_failure(tmp_path, monkeypatch):
     release = tmp_path / "release"
     scripts = release / "scripts"
@@ -683,6 +744,92 @@ def test_null_progress_error_does_not_erase_terminal_runner_failure(tmp_path):
     assert receipt["latest_error"] == "runner_failed"
 
 
+def test_cancel_failure_stays_cancel_pending_until_backend_terminal_is_confirmed(tmp_path):
+    manager = BatchManager(settings(tmp_path))
+    batch_id = "batch-" + "e" * 24
+    batch_dir = manager.settings.data_root / "batches" / batch_id
+    batch_dir.mkdir(parents=True)
+    record = {
+        "schema_version": "amazon-operator-batch-v1", "batch_id": batch_id,
+        "tenant_id": "owned-products", "subject_type": "own", "status": "stopping",
+        "worker_count": 2, "requested": 1, "claimed": 0, "completed": 0,
+        "variant": 0, "failed": 0, "blocked": 0, "pending": 1,
+        "latest_error": None, "stop_requested": True,
+        "started_at": "2026-09-14T00:00:00+00:00", "finished_at": None,
+    }
+    (batch_dir / "batch.json").write_text(json.dumps(record), encoding="utf-8")
+    (batch_dir / "progress.json").write_text(json.dumps({
+        **record,
+        "status": "failed",
+        "campaign_status": "active",
+        "latest_error": "campaign_poll_failed",
+    }), encoding="utf-8")
+
+    manager._finish_record(batch_id, 4)
+
+    result = manager.get_batch(batch_id)
+    assert result["status"] == "cancel_pending"
+    assert result["latest_error"] == "campaign_cancel_unconfirmed"
+    assert result["finished_at"] is None
+    assert manager._active_batch()["batch_id"] == batch_id
+
+
+def test_cancel_runner_failure_before_first_status_stays_cancel_pending(tmp_path):
+    manager = BatchManager(settings(tmp_path))
+    batch_id = "batch-" + "1" * 24
+    batch_dir = manager.settings.data_root / "batches" / batch_id
+    batch_dir.mkdir(parents=True)
+    record = {
+        "schema_version": "amazon-operator-batch-v1", "batch_id": batch_id,
+        "tenant_id": "owned-products", "subject_type": "own", "status": "stopping",
+        "worker_count": 2, "requested": 1, "claimed": 0, "completed": 0,
+        "variant": 0, "failed": 0, "blocked": 0, "pending": 1,
+        "latest_error": None, "stop_requested": True,
+        "started_at": "2026-09-14T00:00:00+00:00", "finished_at": None,
+    }
+    (batch_dir / "batch.json").write_text(json.dumps(record), encoding="utf-8")
+    (batch_dir / "campaign.json").write_text(json.dumps({
+        "campaign_id": "campaign-" + "1" * 32,
+    }), encoding="utf-8")
+
+    manager._finish_record(batch_id, 4)
+
+    result = manager.get_batch(batch_id)
+    assert result["status"] == "cancel_pending"
+    assert result["latest_error"] == "campaign_cancel_unconfirmed"
+
+
+def test_completed_campaign_wins_over_late_operator_stop_at_batch_manager_seam(tmp_path):
+    manager = BatchManager(settings(tmp_path))
+    batch_id = "batch-" + "f" * 24
+    batch_dir = manager.settings.data_root / "batches" / batch_id
+    batch_dir.mkdir(parents=True)
+    record = {
+        "schema_version": "amazon-operator-batch-v1", "batch_id": batch_id,
+        "tenant_id": "owned-products", "subject_type": "own", "status": "stopping",
+        "worker_count": 2, "requested": 1, "claimed": 0, "completed": 0,
+        "variant": 0, "failed": 0, "blocked": 0, "pending": 1,
+        "latest_error": None, "stop_requested": True,
+        "started_at": "2026-09-14T00:00:00+00:00", "finished_at": None,
+    }
+    (batch_dir / "batch.json").write_text(json.dumps(record), encoding="utf-8")
+    (batch_dir / "progress.json").write_text(json.dumps({
+        **record,
+        "status": "completed",
+        "campaign_status": "completed",
+        "completed": 1,
+        "pending": 0,
+        "finished_at": "2026-09-14T00:05:00+00:00",
+    }), encoding="utf-8")
+
+    manager._finish_record(batch_id, 0)
+
+    result = manager.get_batch(batch_id)
+    assert result["status"] == "completed"
+    assert result["completed"] == 1
+    assert json.loads((batch_dir / "receipt.json").read_text(encoding="utf-8"))["status"] == "completed"
+
+
 def test_monitor_releases_batch_mutex_when_finalization_raises(tmp_path, monkeypatch):
     manager = BatchManager(settings(tmp_path))
     released = []
@@ -738,6 +885,7 @@ def test_http_restart_and_page_refresh_returns_latest_batch_without_empty_id(tmp
         source = (ROOT / "operator" / "app.js").read_text(encoding="utf-8")
         assert "batch_id=${encodeURIComponent(batchId)}" in source and "batchId||\"\"" not in source
         assert "batch.latest_error" in source
+        assert 'cancel_pending:"取消待确认"' in source
     finally:
         server.shutdown(); server.server_close(); thread.join(timeout=2)
 

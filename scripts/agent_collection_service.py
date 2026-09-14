@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import threading
@@ -28,6 +29,7 @@ from collection_console import ConsoleServer, PostgresConsoleRepository  # noqa:
 from collection_storage import PostgresCollectionRepository  # noqa: E402
 from postgres_worker_storage import PostgresWorkerStorage  # noqa: E402
 from proxy_canary import reservation_slots_for  # noqa: E402
+from proxy_capacity_gate import evaluate_capacity_fact  # noqa: E402
 from product_watch.delivery_repository import WatchDeliveryRepository  # noqa: E402
 
 MAX_AGENT_REFRESH_BATCH = 5
@@ -66,6 +68,16 @@ def worker_process_command(args: argparse.Namespace, worker_script: Path, output
 
 def effective_worker_count(requested: int, capacity_fact: dict[str, Any] | None, config: dict[str, Any] | None = None, *, process_limit: int = 8) -> int:
     requested=max(1,int(requested)); process_limit=max(1,min(int(process_limit),64))
+    upper = min(requested, process_limit)
+    if config:
+        for count in range(upper, 0, -1):
+            decision = evaluate_capacity_fact(
+                capacity_fact, config,
+                requested_actions=MAX_AGENT_REFRESH_BATCH * count,
+            )
+            if decision.get("status") == "allowed":
+                return count
+        return 1
     unique=(capacity_fact or {}).get('unique_egress_count')
     try: slots_per_worker=reservation_slots_for(config or {},MAX_AGENT_REFRESH_BATCH) if config else 2
     except (TypeError,ValueError): slots_per_worker=2
@@ -73,10 +85,41 @@ def effective_worker_count(requested: int, capacity_fact: dict[str, Any] | None,
     return min(requested,process_limit,capacity_limit)
 
 
-def worker_pool_status(worker: Any, processes: list[Any], *, requested: int, effective: int) -> dict[str, Any]:
+def pool_capacity_decision(fact: dict[str, Any] | None, config: dict[str, Any], *, effective_workers: int) -> dict[str, Any]:
+    return evaluate_capacity_fact(
+        fact,
+        config,
+        requested_actions=MAX_AGENT_REFRESH_BATCH * max(1, int(effective_workers)),
+    )
+
+
+def worker_pool_status(
+    worker: Any,
+    processes: list[Any],
+    *,
+    requested: int,
+    effective: int,
+    capacity_decision: dict[str, Any] | None = None,
+    pool_snapshot: dict[str, Any] | None = None,
+    worker_heartbeat_timeout: float | None = None,
+) -> dict[str, Any]:
     if worker is not None:
         status = dict(worker.status())
         alive = 1 if status.get("state") in {"starting", "running", "recovering", "blocked"} else 0
+        if worker_heartbeat_timeout is not None and status.get("state") == "running":
+            try:
+                heartbeat = datetime.fromisoformat(str(status.get("worker_heartbeat_at") or "").replace("Z", "+00:00"))
+                heartbeat_fresh = (
+                    datetime.now(timezone.utc) - heartbeat.astimezone(timezone.utc)
+                ).total_seconds() <= max(0.1, float(worker_heartbeat_timeout))
+            except (TypeError, ValueError):
+                heartbeat_fresh = False
+            if not heartbeat_fresh:
+                status["state"] = "blocked"
+                status["last_error"] = "worker_heartbeat_stale"
+    elif pool_snapshot is not None:
+        status = dict(pool_snapshot)
+        alive = int(status.get("alive_workers") or 0)
     else:
         alive = sum(process.poll() is None for process in processes)
         status = {"state": "running" if alive == effective else "failed"}
@@ -86,7 +129,205 @@ def worker_pool_status(worker: Any, processes: list[Any], *, requested: int, eff
         "alive_workers": int(alive),
         "capacity_backpressure": int(effective) < int(requested),
     })
+    if capacity_decision is not None:
+        status["capacity_decision"] = dict(capacity_decision)
+        if capacity_decision.get("status") != "allowed" and status.get("state") not in {"failed", "stopped"}:
+            status["state"] = "blocked"
+            status["last_error"] = str(capacity_decision.get("reason") or "capacity_denied")
     return status
+
+
+class CampaignWorkerSupervisor:
+    """Supervise isolated queue consumers and aggregate fresh child heartbeats."""
+
+    def __init__(
+        self,
+        command: list[str],
+        *,
+        count: int,
+        cwd: Path,
+        environment: dict[str, str],
+        status_dir: Path,
+        spawn: Callable[..., Any] = subprocess.Popen,
+        monitor_interval: float = 1.0,
+        heartbeat_timeout: float = 5.0,
+        worker_heartbeat_timeout: float = 600.0,
+        restart_limit: int = 2,
+    ):
+        self.command = list(command)
+        self.count = max(1, int(count))
+        self.cwd = Path(cwd).resolve()
+        self.environment = dict(environment)
+        self.status_dir = Path(status_dir).resolve()
+        self.spawn = spawn
+        self.monitor_interval = max(0.01, float(monitor_interval))
+        self.heartbeat_timeout = max(0.1, float(heartbeat_timeout))
+        self.worker_heartbeat_timeout = max(0.1, float(worker_heartbeat_timeout))
+        self.restart_limit = max(0, int(restart_limit))
+        self._children: dict[int, Any] = {}
+        self._states = {index: "created" for index in range(1, self.count + 1)}
+        self._restart_counts = {index: 0 for index in range(1, self.count + 1)}
+        self._lock = threading.RLock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _status_path(self, index: int) -> Path:
+        return self.status_dir / f"worker-{index}.json"
+
+    def _spawn_locked(self, index: int) -> None:
+        path = self._status_path(index)
+        path.unlink(missing_ok=True)
+        command = [*self.command, "--status-file", str(path)]
+        self._children[index] = self.spawn(
+            command,
+            cwd=str(self.cwd),
+            env=self.environment,
+        )
+        self._states[index] = "starting"
+
+    def start(self) -> None:
+        self.status_dir.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            if self._thread is not None:
+                raise RuntimeError("campaign worker supervisor is already started")
+            for index in range(1, self.count + 1):
+                self._spawn_locked(index)
+            self._thread = threading.Thread(
+                target=self._monitor,
+                name="campaign-worker-supervisor",
+                daemon=True,
+            )
+            self._thread.start()
+
+    def _monitor(self) -> None:
+        while not self._stop.wait(self.monitor_interval):
+            with self._lock:
+                for index, process in list(self._children.items()):
+                    return_code = process.poll()
+                    if return_code is None:
+                        document = self._read_status(self._status_path(index)) or {}
+                        now = datetime.now(timezone.utc)
+                        heartbeat_fresh = self._timestamp_fresh(document.get("heartbeat_at"), now, self.heartbeat_timeout)
+                        worker_heartbeat_fresh = self._timestamp_fresh(
+                            document.get("worker_heartbeat_at"), now, self.worker_heartbeat_timeout,
+                        )
+                        document_matches = int(document.get("pid") or -1) == int(process.pid)
+                        if (
+                            document_matches and heartbeat_fresh
+                            and str(document.get("state") or "") == "running"
+                            and not worker_heartbeat_fresh
+                        ):
+                            self._states[index] = "stalled"
+                            try:
+                                process.terminate()
+                            except OSError:
+                                pass
+                        continue
+                    if self._states[index] in {"blocked", "failed"}:
+                        continue
+                    if int(return_code) == 3:
+                        self._states[index] = "blocked"
+                    elif self._restart_counts[index] < self.restart_limit:
+                        self._restart_counts[index] += 1
+                        self._states[index] = "restarting"
+                        try:
+                            self._spawn_locked(index)
+                        except OSError:
+                            self._states[index] = "failed"
+                    else:
+                        self._states[index] = "failed"
+
+    @staticmethod
+    def _read_status(path: Path) -> dict[str, Any] | None:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    @staticmethod
+    def _timestamp_fresh(value: Any, now: datetime, timeout: float) -> bool:
+        try:
+            observed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+            return (now - observed.astimezone(timezone.utc)).total_seconds() <= timeout
+        except (TypeError, ValueError):
+            return False
+
+    def status(self) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        alive = 0
+        healthy = 0
+        child_states: list[dict[str, Any]] = []
+        with self._lock:
+            for index in range(1, self.count + 1):
+                process = self._children[index]
+                process_alive = process.poll() is None
+                alive += int(process_alive)
+                document = self._read_status(self._status_path(index)) or {}
+                heartbeat_fresh = self._timestamp_fresh(document.get("heartbeat_at"), now, self.heartbeat_timeout)
+                worker_heartbeat_fresh = self._timestamp_fresh(
+                    document.get("worker_heartbeat_at"), now, self.worker_heartbeat_timeout,
+                )
+                document_matches = int(document.get("pid") or -1) == int(process.pid)
+                reported_state = str(document.get("state") or self._states[index])
+                if reported_state in {"blocked", "failed"}:
+                    self._states[index] = reported_state
+                is_healthy = (
+                    process_alive and document_matches and heartbeat_fresh
+                    and worker_heartbeat_fresh and reported_state == "running"
+                )
+                healthy += int(is_healthy)
+                child_states.append({
+                    "index": index,
+                    "pid": int(process.pid),
+                    "state": (
+                        self._states[index]
+                        if self._states[index] in {"blocked", "failed", "stalled"}
+                        else reported_state
+                    ),
+                    "heartbeat_fresh": heartbeat_fresh,
+                    "worker_heartbeat_fresh": worker_heartbeat_fresh,
+                    "restart_count": self._restart_counts[index],
+                    "last_error": (
+                        "worker_heartbeat_stale"
+                        if self._states[index] == "stalled"
+                        else str(document.get("last_error") or "")[:120] or None
+                    ),
+                })
+            states = {child["state"] for child in child_states}
+            if "failed" in states:
+                state = "failed"
+            elif "blocked" in states:
+                state = "blocked"
+            elif healthy == self.count:
+                state = "running"
+            else:
+                state = "starting"
+            last_error = next((child["last_error"] for child in child_states if child["last_error"]), None)
+            return {
+                "state": state,
+                "alive_workers": alive,
+                "healthy_workers": healthy,
+                "restart_count": sum(self._restart_counts.values()),
+                "last_error": last_error,
+                "children": child_states,
+            }
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(1.0, self.monitor_interval * 2))
+        with self._lock:
+            processes = list(self._children.values())
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+        for process in processes:
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
 
 
 class RefreshOnlyStorageView:
@@ -175,12 +416,18 @@ class AgentRefreshWorker:
         self._last_error: str | None = None
         self._last_capacity_decision: dict[str, Any] | None = None
         self._last_action_at: str | None = None
+        self._worker_heartbeat_at: str | None = None
+
+    def _heartbeat(self) -> None:
+        with self._lock:
+            self._worker_heartbeat_at = datetime.now(timezone.utc).isoformat()
 
     def start(self) -> None:
         if self._thread is not None:
             raise RuntimeError("refresh worker is already started")
         with self._lock:
             self._state = "starting"
+            self._worker_heartbeat_at = datetime.now(timezone.utc).isoformat()
         self._thread = threading.Thread(target=self._run, name="agent-refresh-worker", daemon=True)
         self._thread.start()
 
@@ -209,12 +456,14 @@ class AgentRefreshWorker:
                 "last_action_at": self._last_action_at,
                 "last_error": self._last_error,
                 "capacity_decision": dict(self._last_capacity_decision) if self._last_capacity_decision else None,
+                "worker_heartbeat_at": self._worker_heartbeat_at,
             }
 
     def _run(self) -> None:
         worker_id = f"agent-refresh-{os.getpid()}"
         database_failures = 0
         while not self._stop.is_set():
+            self._heartbeat()
             try:
                 self._run_until_stopped(worker_id)
                 return
@@ -228,6 +477,7 @@ class AgentRefreshWorker:
                     delay = min(30.0, max(self.poll_seconds, 0.25 * (2 ** min(database_failures - 1, 7))))
                     self._event.wait(delay)
                     self._event.clear()
+                    self._heartbeat()
                     continue
                 terminalizer = getattr(self.storage, "fail_claimed_refreshes", None)
                 if callable(terminalizer):
@@ -243,6 +493,7 @@ class AgentRefreshWorker:
     def _run_until_stopped(self, worker_id: str) -> None:
         adapter = None
         try:
+            self._heartbeat()
             self.storage.reclaim_expired_leases()
             requeue = getattr(self.storage, "requeue_claimed_refreshes", None)
             if callable(requeue):
@@ -253,11 +504,13 @@ class AgentRefreshWorker:
                 self._last_error = None
                 self._last_capacity_decision = None
             while not self._stop.is_set():
+                self._heartbeat()
                 with self._lock:
                     capacity_blocked = self._state == "blocked" and self._last_error != "access_blocked"
                 if capacity_blocked:
                     self._event.wait(max(self.poll_seconds, 30.0))
                     self._event.clear()
+                    self._heartbeat()
                     self.storage.reclaim_expired_leases()
                 # A restarted service can begin before the old lease expires.
                 # Sweep while idle too, otherwise claimed refreshes never wake.
@@ -271,11 +524,13 @@ class AgentRefreshWorker:
                 if pending_count <= 0:
                     self._event.wait(self.poll_seconds)
                     self._event.clear()
+                    self._heartbeat()
                     continue
                 batch_limit = max(1, min(MAX_AGENT_REFRESH_BATCH, pending_count))
                 run_id = f"agent-refresh-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}-{uuid.uuid4().hex[:8]}"
                 self._refresh_storage.begin_batch_metrics()
                 try:
+                    self._heartbeat()
                     result = run_postgres_actions(
                         self._refresh_storage,
                         adapter,
@@ -285,6 +540,7 @@ class AgentRefreshWorker:
                         worker_id=worker_id,
                         lease_seconds=self.lease_seconds,
                     )
+                    self._heartbeat()
                 except ProxyCapacityGateDenied as exc:
                     with self._lock:
                         self._state = "blocked"
@@ -310,6 +566,7 @@ class AgentRefreshWorker:
                     if callable(getattr(self.storage, "configure_recovery", None)):
                         self._event.wait(self.poll_seconds)
                         self._event.clear()
+                        self._heartbeat()
                         continue
                     return
                 if result > 0:
@@ -324,6 +581,7 @@ class AgentRefreshWorker:
                     continue
                 self._event.wait(self.poll_seconds)
                 self._event.clear()
+                self._heartbeat()
         finally:
             if adapter is not None and hasattr(adapter, "close"):
                 adapter.close()
@@ -382,9 +640,24 @@ def main(argv: list[str] | None = None) -> int:
     fact=fact_loader(max_age_seconds=int(config.get('proxy_canary_max_age_seconds') or 3600)) if callable(fact_loader) else None
     effective=effective_worker_count(args.worker_count,fact,config,process_limit=args.worker_process_limit)
     worker = AgentRefreshWorker(storage=storage,adapter_factory=lambda: _build_http_adapter(config),config=config,poll_seconds=args.poll_seconds,lease_seconds=args.lease_seconds) if effective==1 else None
-    worker_processes=[]
+    supervisor = None
     def pool_status():
-        return worker_pool_status(worker, worker_processes, requested=args.worker_count, effective=effective)
+        try:
+            current_fact = fact_loader(
+                max_age_seconds=int(config.get('proxy_canary_max_age_seconds') or 3600),
+            ) if callable(fact_loader) else None
+            decision = pool_capacity_decision(current_fact, config, effective_workers=effective)
+        except Exception:
+            decision = {"status": "denied", "reason": "capacity_status_unavailable"}
+        return worker_pool_status(
+            worker,
+            [],
+            requested=args.worker_count,
+            effective=effective,
+            capacity_decision=decision,
+            pool_snapshot=supervisor.status() if supervisor is not None else None,
+            worker_heartbeat_timeout=args.lease_seconds,
+        )
     reporting_repository = WatchDeliveryRepository(dsn)
     server = None
     console_server = None
@@ -416,8 +689,15 @@ def main(argv: list[str] | None = None) -> int:
             worker_script=Path(__file__).with_name('campaign_worker_process.py')
             worker_environment=build_worker_environment(args.dsn_env,config)
             command=worker_process_command(args,worker_script,output_dir)
-            for _index in range(effective):
-                worker_processes.append(subprocess.Popen(command,cwd=str(Path(__file__).resolve().parents[1]),env=worker_environment))
+            supervisor = CampaignWorkerSupervisor(
+                command,
+                count=effective,
+                cwd=Path(__file__).resolve().parents[1],
+                environment=worker_environment,
+                status_dir=output_dir / 'control' / 'agent-workers',
+                worker_heartbeat_timeout=args.lease_seconds,
+            )
+            supervisor.start()
         if worker is not None: worker.start()
         print(f"Agent Collection Service listening on http://{args.host}:{server.server_port}", flush=True)
         server.serve_forever()
@@ -433,11 +713,7 @@ def main(argv: list[str] | None = None) -> int:
         if console_thread is not None:
             console_thread.join(timeout=5)
         if worker is not None: worker.stop()
-        for process in worker_processes:
-            if process.poll() is None: process.terminate()
-        for process in worker_processes:
-            try: process.wait(timeout=10)
-            except subprocess.TimeoutExpired: process.kill(); process.wait(timeout=5)
+        if supervisor is not None: supervisor.stop()
     return 0
 
 

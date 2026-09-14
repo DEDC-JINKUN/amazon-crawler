@@ -339,7 +339,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
             if callable(status_loader):
                 worker_status = status_loader()
                 payload["refresh_worker"] = worker_status
-                if worker_status.get("state") in {"failed", "blocked"}:
+                if worker_status.get("state") != "running":
                     payload.update({"ok": False, "error": "refresh_worker_unavailable"})
                     self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, payload)
                     return
@@ -679,7 +679,7 @@ class CollectionServer(ThreadingHTTPServer):
     def can_accept_refresh(self) -> bool:
         if not callable(self.refresh_worker_status):
             return True
-        return self.refresh_worker_status().get("state") not in {"failed", "blocked", "stopped"}
+        return self.refresh_worker_status().get("state") == "running"
 
     def allow_request(self, agent_id: str) -> bool:
         import time

@@ -143,6 +143,14 @@ class SubjectMismatchClient(CompletingCampaignClient):
         return readiness
 
 
+class CompletedBeforeStopClient(CompletingCampaignClient):
+    def get_campaign(self, campaign_id):
+        assert campaign_id == self.campaign_id
+        return {"campaign": self._campaign("completed", ["succeeded", "variant", "succeeded"])}
+    def cancel_campaign(self, _campaign_id):
+        raise AssertionError("terminal campaign must not be cancelled")
+
+
 class RetryingCancelCampaignClient(CancelledCampaignClient):
     def cancel_campaign(self, campaign_id):
         assert campaign_id == self.campaign_id
@@ -538,3 +546,30 @@ def test_operator_rejects_a_collection_service_with_the_wrong_subject_scope(tmp_
     assert client.submissions == []
     progress = json.loads((batch_dir / "progress.json").read_text(encoding="utf-8"))
     assert progress["latest_error"] == "collection_subject_mismatch"
+
+
+def test_late_stop_does_not_relabel_an_already_completed_campaign(tmp_path):
+    from operator_campaign_runner import CampaignRunSpec, run_campaign
+
+    batch_dir = tmp_path / ("batch-" + "d" * 24)
+    batch_dir.mkdir()
+    manifest = batch_dir / "manifest.csv"
+    write_manifest(manifest, ["B0TEST0001", "B0TEST0002", "B0TEST0003"])
+
+    result = run_campaign(
+        CampaignRunSpec(
+            batch_dir=batch_dir,
+            manifest=manifest,
+            tenant_id="owned-products",
+            subject_type="own",
+            worker_count=2,
+            poll_seconds=0,
+        ),
+        CompletedBeforeStopClient(),
+        sleep=lambda _seconds: None,
+        stop_requested=lambda: True,
+    )
+
+    assert result == 0
+    progress = json.loads((batch_dir / "progress.json").read_text(encoding="utf-8"))
+    assert progress["status"] == "completed"

@@ -16,9 +16,9 @@
 | 线上 Operator | `verified-current` | operator pointer `71db26e`；不是候选提交 |
 | 三 Worker | `pending` | 候选服务允许请求 1–8 Worker，但当前线上未部署；网页 Operator 仍只接受 1/2 |
 | 全量 campaign | `protocol available` | MCP/Collection capability 上限 5,000 ASIN；没有因此获得本轮真实采集授权 |
-| PostgreSQL 引擎验收 | `pending` | 17 个隔离 55444 测试未运行；当前执行环境拒绝绑定该测试端口 |
+| PostgreSQL 引擎验收 | `verified-current` | 2026-09-14 直接启动专用55444测试实例，完整矩阵29 passed；随后fast shutdown确认关闭 |
 | 文档 | `changed-and-verified` | `README.md`、`docs/collection_api.md`、`docs/collection_operator.md`、`CHANGELOG.md` 已与候选代码同步 |
-| 生产部署与 live 验证 | `pending` | 本轮没有发布、迁移、访问生产库或启动 Amazon 采集 |
+| 生产部署与 live 验证 | `blocked` | 第二轮独立R3复审仍有3个P1；本轮没有发布、迁移或启动Amazon采集 |
 | Agent 记忆 | `generated-read-only` | 不直接编辑宿主生成记忆；以本文件作为项目内交接入口 |
 
 ## 候选实现了什么
@@ -41,7 +41,7 @@
 
 - 主非 PG 套件：713 passed、56 skipped、0 failed。
 - Operator 非 PG 状态矩阵：12 passed。
-- 未运行：17 个必须连接专用 `127.0.0.1:55444/operator_matrix` 的 PostgreSQL 测试。
+- 专用 `127.0.0.1:55444/operator_matrix` 完整矩阵：29 passed。
 - 鉴权 Windows loopback 重复：20/20 通过。
 - campaign 提交/取消重复：10/10 通过。
 - Python 编译、PowerShell AST、`git diff --check`：通过。
@@ -50,7 +50,7 @@
 
 ## 三 Worker 的现实容量
 
-当前部署配置只有 10 个会话端口，`proxy_session_max_asins=3`、`proxy_session_retry_per_asin=1`；按候选当前默认的 per-ASIN 计算，每个 Worker 的 5-action pass 需要 4 个槽，因此三 Worker 至少需要 12 个通过同配置 canary 的唯一槽。这个数字是基于 2026-09-13 配置和代码的推导，配置变化后必须重新计算。
+当前部署配置只有 10 个会话端口，`proxy_session_retry_per_asin=1`，正式商品会话范围是 `per_asin`。该范围下 `proxy_session_max_asins` 不会合并不同 ASIN；每个 Worker 的 5-action pass需要5个生产槽和5个有界替换槽，共10槽。因此三 Worker需要30个通过同配置 canary 的唯一槽。此前文档写成12槽是错误的；配置变化后仍必须调用容量函数重新计算，不能只抄文档。
 
 即使请求 `AgentWorkerCount=3`，容量不够时 effective 仍会降到 2 或 1。生产判断只看 `/readyz` 的实际值，不能只看启动参数。
 
@@ -58,7 +58,7 @@
 
 1. 在允许绑定 55444 的隔离环境运行剩余 17 个 PostgreSQL 测试；完成标准是 0 failed、0 error，不能用生产 55443/5432 替代。
 2. 对提交 `30d4787` 做独立差异审查，修复阻断项后重新跑门禁。
-3. 如确需三 Worker，配置至少 12 个获批会话槽并完成同配置非 Amazon canary；不要通过放宽验证码、TLS、Cookie 或登录规则换容量。
+3. 如确需三 Worker，在当前per-ASIN策略下配置30个获批会话槽并完成同配置非 Amazon canary；不要通过改成跨ASIN复用会话或放宽验证码、TLS、Cookie、登录规则换容量。
 4. 从审查后的提交制作不可变 release，更新 deploy pointer；部署与服务重启需要用户明确授权。
 5. live verify 必须看到目标 tenant/subject 且 `requested_workers=3`、`effective_workers=3`、`alive_workers=3`、`capacity_backpressure=false`。
 6. 依次做 3 ASIN、20 ASIN 受控验收；通过后才讨论全量 campaign。真实 Amazon 请求需要单独明确授权。

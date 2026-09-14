@@ -31,6 +31,12 @@ queued → canary → reserving → collecting → finalizing → releasing → 
 
 模块设计：新增一个深模块封装“readiness 校验 → campaign 提交 → 状态投影 → 取消 → 终态回执”。Operator 只调用其单一运行 interface；并发进程只由 Agent service pool 管理，容量降级在 campaign 提交前可见。
 
+## 2026-09-14 生产发布合同
+
+用户已明确授权：发布候选、重启生产服务、使用 DPAPI 凭据、扩充获批会话槽，并按 3 ASIN → 20 ASIN → 1,093 ASIN 自动放行；任一门禁失败立即停止。真实采集仍坚持无登录、无个人 Cookie、无验证码绕过、无 TLS 指纹伪装。
+
+R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚点 → 30槽非 Amazon canary → 三 Worker readiness → 3条 live → 20条 live → 全量单一 campaign。
+
 ## 进度
 
 - [x] 冻结基线，工作树干净。
@@ -51,7 +57,14 @@ queued → canary → reserving → collecting → finalizing → releasing → 
 - [x] Operator 提交前核对 Collection tenant 与 subject scope；campaign 截止时间独立配置。
 - [x] Windows loopback 鉴权响应与幂等 campaign 调用具备有界抗重置处理。
 - [x] 完整非 PG 测试、差异复核与文档一致性验收。
-- [ ] 隔离 PostgreSQL 55444 的 17 个引擎测试（当前环境无法绑定端口）。
+- [x] 隔离 PostgreSQL 55444 的 17 个引擎测试；连同非 PG 矩阵共 29 passed。
+- [ ] 独立 R3 差异审查无 P0/P1。
+- [x] 第三轮修复第二次复审的3个P1，并完成724项非PG与29项隔离PG回归。
+- [ ] 制作并部署不可变 release，保留旧 pointer 作为回滚点。
+- [ ] 三 Worker容量与 readiness 通过。
+- [ ] 3条与20条真实验收通过。
+- [ ] 提交1,093条单一全量 campaign。
+- [ ] 第二轮独立复审新增3个P1；按用户“任一门禁失败立即停止”要求，发布流程已停止，等待是否授权第三轮代码修复。
 - [ ] 在隔离环境完成 1W/2W 对照；不执行 Amazon live 验证。
 
 ## Errors Encountered
@@ -69,6 +82,10 @@ queued → canary → reserving → collecting → finalizing → releasing → 
 | 全套回归中的 Collection API 无权限 POST 偶发 WinError 10053 | 1/10 | 根因为拒绝前未读取小请求体；认证拒绝前有界丢弃后连续 20 次通过。 |
 | 第一次请求体丢弃补丁产生 Python 缩进错误 | 1 | 立即读取报错行、修正缩进并先做 `py_compile`；未叠加其他修复。 |
 | campaign cancel 在 Windows loopback 偶发 WinError 10053 | 1 | 在 loopback Client Adapter 对 10053/10054 做一次有限重试；campaign API 场景连续 10 次通过。 |
+| 生产只读探针首次把 `dict_row` 当数组读取 | 1 | 修正为取 mapping 首值后重跑；确认探针只读且生产 schema 完整。 |
+| 先前把三 Worker容量写成12槽 | 1 | 重新按 `per_asin + retry=1 + 5-action pass` 调用链核对：每 Worker 10槽，三 Worker需30个唯一槽；修正文档并以 canary/readiness 实值为放行依据。 |
+| 第二轮独立复审仍有3个P1 | 2 | 按R3与用户门禁立即停止自动发布；保留未提交修复现场，等待用户决定是否继续第三轮代码修复。 |
+| 第三轮中间聚焦测试一次loopback job查询超时并锁住临时SQLite | 1 | 单测复跑通过；最终完整非PG套件724 passed，未修改本轮无关的GET job路径。 |
 
 ## 本轮自测
 

@@ -228,7 +228,8 @@ def run_campaign(
                     "finished_at": datetime.now(timezone.utc).isoformat(),
                 })
                 return 4
-            if not stopping and stop_requested():
+            current_projection = _project_campaign(campaign)
+            if not stopping and current_projection["status"] == "running" and stop_requested():
                 stopping = True
                 campaign = _cancel_campaign(
                     client, campaign_id, attempts=spec.poll_failure_limit,
