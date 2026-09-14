@@ -8,13 +8,13 @@
 
 系统级 PowerShell 7.6.6 和两项生产计划任务迁移已经完成。`4021a56`曾成功激活并取得三 Worker 初始3/3/3/3 readiness，但新的3-ASIN业务门禁证明其固定状态文件方案在 Windows 持续读锁下仍会让三个 Worker崩溃；因此20条和1,093条都没有提交，生产pointer已回滚到旧版`592a65a`。
 
-当前工作树已把状态通道重构为不可变快照加Supervisor内存缓存，完整验证与最终独立review已通过，但尚未提交、制作release或重新部署。不得再次激活`4021a56`。
+状态通道已重构为不可变快照加Supervisor内存缓存，完整验证与最终独立review已通过并冻结为代码提交`8c1d9d7`；尚未制作新release或重新部署。不得再次激活`4021a56`。
 
 ## 事实矩阵
 
 | 事实面 | 状态 | 当前证据 |
 |---|---|---|
-| 候选代码 | `reviewed-ready-to-freeze` | 新增`campaign_worker_status.py`；固定目标覆盖已替换为launch-token/sequence不可变快照；最终独立复核P0=0/P1=0 |
+| 候选代码 | `reviewed-frozen` | 代码提交`8c1d9d7`；新增`campaign_worker_status.py`；最终独立复核P0=0/P1=0 |
 | 旧候选release | `rejected-by-live-gate` | `4021a56`初始ready，但3-ASIN运行后Worker在`os.replace` WinError 5上耗尽重启；禁止复用 |
 | 线上 Collection | `rolled-back-and-live` | current pointer `592a65a`；`/readyz`最近返回200、tenant `local_agent_deployment_20260906`、单Worker running |
 | 线上 Operator | `rolled-back` | operator pointer `71db26e` |
@@ -59,7 +59,7 @@
 
 ## 下一步严格顺序
 
-1. 冻结已通过独立P0/P1 review的当前diff并制作新的不可变release；不得覆盖或复用`4021a56`。
+1. 从已review代码提交`8c1d9d7`制作新的不可变release；不得覆盖或复用`4021a56`。
 2. 以管理员权限恢复两项计划任务为真正Running托管状态，同时保持系统PowerShell7 Action。
 3. 刷新34槽非Amazon canary，并确认当前配置哈希、有效期和至少30个唯一槽。
 4. 在目标tenant对账并取消/终结失败门禁遗留的claimed成员，确认没有活动campaign/job/lease/reservation。
@@ -82,4 +82,4 @@ curl.exe --silent --show-error --max-time 5 http://127.0.0.1:8765/readyz
 
 ## 可直接复制给新 Agent 的提示词
 
-> 在`D:\woring\爬虫\.worktrees\amazon-integrated-deploy`接手Amazon Collection。先完整读取`AGENTS.md`和`docs/agent_handoff_current.md`，再只读核对分支、提交、工作区、deploy pointers、计划任务状态与`127.0.0.1:8765/readyz`。当前`4021a56`已被3-ASIN生产门禁否决，不得再次激活；先审查未提交的不可变Worker状态快照方案。请用四项回复：候选diff、线上状态、失败门禁遗留、下一放行条件。不要输出凭据，不要跳过3→20→1093门禁。
+> 在`D:\woring\爬虫\.worktrees\amazon-integrated-deploy`接手Amazon Collection。先完整读取`AGENTS.md`和`docs/agent_handoff_current.md`，再只读核对分支、提交、工作区、deploy pointers、计划任务状态与`127.0.0.1:8765/readyz`。当前`4021a56`已被3-ASIN生产门禁否决，不得再次激活；长期状态协议已review并冻结为`8c1d9d7`。请用四项回复：候选代码、线上状态、失败门禁遗留、下一放行条件。不要输出凭据，不要跳过3→20→1093门禁。

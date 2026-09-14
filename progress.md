@@ -94,3 +94,4 @@
 - delta复核原两P1后新增2个P1并继续停止发布：inventory glob/stat失败会低估积压，读取端接受sequence=0。新增红测3 failed；inventory不完整直接计为超限、读写统一正整数后3 passed。主代理自审另补多Worker启动事务性回收红绿，Agent服务现44 passed；待重新跑扩大/全量/PG/压力验证和再次delta复核。
 - 最终P1修复后验证：相关98 passed；默认非PG 746 passed、56 skipped；隔离55444两文件29 passed并fast shutdown；三真实子进程在3个锁定旧固定文件和4,606次并发status调用下持续10秒保持3/3、restart=0、每Worker 3份快照。待最后delta复核。
 - 最终独立delta复核：非整数/零sequence、跨launch无界增长、inventory未知fail-open均关闭；多Worker部分启动回收有效，P0=0、P1=0，建议CONTINUE到冻结提交与新release。审查者独立复跑Agent服务44 passed和diff检查。
+- 长期状态协议代码、测试和同步文档冻结提交`8c1d9d7`（`fix: publish immutable worker status snapshots`）；未纳入工作区既有未跟踪数据/目录。下一步制作新的不可变release。

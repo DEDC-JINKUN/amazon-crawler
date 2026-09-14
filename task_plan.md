@@ -1,6 +1,6 @@
 # Operator 状态链整体验收
 
-冻结基线：71db26e。生产展示继续运行；禁止使用生产清单、凭据、数据库及端口做调试。部署门关闭，连续通过轮数 0/3。
+当前候选代码冻结为`8c1d9d7`，最终独立review P0=0/P1=0。生产pointer已回滚到`592a65a`并保持只读展示可用；新release和3→20→1093门禁尚未执行。
 
 ## 状态契约
 
@@ -83,6 +83,7 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 - [x] 备份并迁移AmazonCollectionAgentService/Postgres任务到固定系统pwsh路径与`-NonInteractive`。
 - [x] 用迁移后的计划任务重启旧release验证，再激活`4021a56`并取得初始三Worker readiness；业务门禁随后暴露独立状态协议故障。
 - [x] 完成不可变Worker状态快照与Supervisor内存缓存；全套、隔离PG、Windows持久并发和独立review全部通过（最终P0=0/P1=0）。
+- [x] 冻结长期状态协议代码提交`8c1d9d7`，未纳入工作区既有未跟踪数据/目录。
 - [ ] 制作新release，恢复计划任务托管为Running，重新执行3条→20条→1093条门禁。
 - [x] 修复独立review发现的监督器重启预删锁竞态并补红绿测试。
 - [x] 修复复核发现的PID复用旧状态冒认：每次spawn绑定launch token并补红绿测试。
