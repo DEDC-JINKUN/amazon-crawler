@@ -125,3 +125,6 @@
 - Phase 7独立review的4个P1已完成修复：Worker readiness重新覆盖每进程真实3条预约；external metric batch并发串行与多owner确定性继承；Operator active只轮询summary、终态分页并对分页失败留安全回执。定向74 passed；Console 405 loopback连续20/20；完整非PG 777 passed/59 skipped；外部指标PG 3 passed，Operator PG 29 passed，恢复/Worker/Campaign/指标等PG组合57 passed；compileall与diff check通过，所有测试PostgreSQL已关闭。待冻结delta并交同一reviewer复核。
 - `fc1a45f`已由原reviewer delta复核，4个P1全部关闭、无新P0/P1、CONTINUE。用户随后用融合手册扩大目标；初稿经source map进一步编译为四个顺序Goal并从Goal 1只读source manifest重新开始。14:28生产pointer仍`28d62ce`、计划任务显示Running，但8765/8770与Collection MCP超时；未重启或修改生产。
 - 综合Goal经独立source map由三段优化为四段，Goal 1只做源码归一。新增可验证Goal合同、初始JSON source manifest并同步交接；确认15个Woot核心文件在`Amazon Scraping`均untracked、PDP恢复仓无remote、云端v5只有审计工件。旧Goal控制面仍active，未越权创建integration分支或启动服务。
+- 原active效率Goal继续推进共同缺口：开始设计原1093 campaign固定20 pending成员的release-gate cohort。现有refresh/recovery claim无持久cohort过滤，直接恢复Worker会越过门禁；当前仅只读分析与记录，未访问生产或启动采集。
+- 用户停止旧Goal，控制面已确认goal=null；新“源码归一与可重建基线”Goal 1创建成功。新clean worktree从`company/main@08468db`建立；移植前完整离线基线535 passed/35 skipped/4 failed，失败为2个未跟踪本机fixture依赖和2个PowerShell5中文路径超时。Woot 15文件有界移植并行进行，未访问网络/生产。
+- Woot移植在写入前因`tests/test_console_woot_reviews.py`来源hash从`d1eabdcf...`变为`b0082861...`而停止；目标15文件均未写入。source manifest已记录双观察，新integration worktree新增`AGENTS.md`，供新Agent自动读取Goal/manifest/handoff后继续hash delta审查。

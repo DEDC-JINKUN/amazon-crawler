@@ -8,7 +8,7 @@
 
 生产 Collection/Operator pointer 仍是 `28d62ce`；14:28两项计划任务显示Running，但8765 health/ready和8770 Console均在5秒内0字节超时，Collection MCP也返回`backend_unavailable`。这只能证明任务登记仍在，不能证明服务或Worker健康。未做重启、cancel、重新提交或生产数据库查询。
 
-开发候选已推进到`fc1a45f`且独立delta review为P0=0/P1=0、CONTINUE，但尚未制作或部署新release。用户随后将PDP、独立评论和统一编排合并为新的四阶段计划，权威目标见[`integrated_collection_program_goal_20260915.md`](integrated_collection_program_goal_20260915.md)。全量唯一campaign仍是`campaign-b14bef6a4b39509a9c92e1ff2629386b`，不得重建、拆分或取消；当前计数因API超时不可验证。外部手册记录的84终态是此前快照，不得当作14:28当前值。
+开发候选已推进到`fc1a45f`且独立delta review为P0=0/P1=0、CONTINUE，但尚未制作或部署新release。用户随后停止旧Goal并启动源码归一Goal 1；clean lane为`D:/woring/爬虫/.worktrees/amazon-integrated-source-20260915`、分支`codex/integrated-source-20260915@08468db`，其`AGENTS.md`是新Agent入口。15文件Woot移植因一个来源hash变化而fail closed，尚未复制。全量唯一campaign仍是`campaign-b14bef6a4b39509a9c92e1ff2629386b`，不得重建、拆分或取消；当前计数因API超时不可验证。
 
 ## 事实矩阵
 

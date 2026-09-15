@@ -187,4 +187,5 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 - [pending] Goal 2：评论只读API、历史数据隔离导入演练与统一ASIN只读投影。
 - [pending] Goal 3：Review Campaign、graceful stop、统一analysis_run编排与权限矩阵。
 - [pending] Goal 4：分阶段生产发布、原1093 campaign固定20 pending成员cohort门禁、达标后恢复剩余成员。
-- [blocked-control-plane] Codex旧PDP效率Goal仍为active且未完成，工具不允许代理覆盖；用户需在Goal控制界面停止旧Goal后，才能将Goal 1登记为新的active Goal。该控制面限制不阻塞共同的只读盘点。
+- [complete] 用户已停止旧PDP效率Goal；新Goal 1已登记为active。
+- [in_progress] 已从`company/main@08468db`创建`codex/integrated-source-20260915`独立worktree；移植前基线535 passed/35 skipped/4 failed，先保留为基线证据并继续有界Woot切片。

@@ -134,3 +134,10 @@
 - Codex旧PDP效率Goal仍active且未完成，控制面不允许代理覆盖。新的Goal 1已写入`docs/integrated_collection_program_goal_20260915.md`，在用户界面停止旧Goal前只推进两者共同的只读source manifest工作。
 - 独立source map确认四个事实源分离：PDP恢复仓`fc1a45f`无remote；目标公司仓`Amazon Scraping`为`main@2bef259`、比`origin/main`超前42提交且有170项工作区变化；15个独立Woot核心文件全部untracked；云端v5仅有`release.json`/部署回执审计副本而无本地Git ref。不能整体目录合并。
 - 初始机器清单已写入`docs/source_manifest_20260915.json`，记录两个Git基线、15个Woot核心文件SHA256/字节数、PDP实验adapter、云端v5 manifest和生产pointer，并明确排除运行数据、缓存、凭据与真实清单。状态仍为`partial_read_only_inventory`，下一步需在新Goal控制面下创建clean integration worktree。
+- 原active效率Goal的固定20门禁仍缺实际claim seam：`claim_refresh_task`与recovery `claim(refresh_only=True)`按整个tenant的queued refresh选择，直接重启候选会领取任意原campaign成员，不能证明固定20。
+- `PostgresWorkerStorage._recovery_allowed_asins`已有run内allowlist原语，但`begin_recovery_run()`每次重置为`None`，且普通refresh claim不使用它；不能把它当作持久、崩溃可恢复的release gate。最小方向是新增campaign附属的授权/选择表，让所有refresh-only count/claim路径在数据库事务内过滤，状态仍由原campaign/member/job/evidence派生。
+- release gate必须区分`testing`、`passed-awaiting-open`、`blocked`和`open`：testing只领固定cohort；完成后在人工放行前不得自动领第21条；失败保持blocked。旧release不认识新gate，因此回滚合同必须停止Worker，不能在gate仍闭合时启动旧release。
+- 用户在Codex界面停止旧PDP Goal后，新Goal 1已成功登记；目标仓切换为`D:/woring/爬虫/Amazon Scraping`的公司Git源码归一。创建独立worktree`D:/woring/爬虫/.worktrees/amazon-integrated-source-20260915`，分支`codex/integrated-source-20260915`从`company/main@08468db`开始，未切换或覆盖原脏`main`。
+- 公司clean基线完整离线套件为535 passed/35 skipped/4 failed：两个测试依赖未纳入Git的raw_html junction和geckodriver fixture；两个`crawler.ps1` PowerShell5子进程在中文worktree路径下20秒超时。它们发生在Woot移植前，属于基线失败，Goal 1要达到0失败需单独裁决，不能归因于Woot。
+- 15文件Woot移植前复核发现14/15 hash仍一致，但`tests/test_console_woot_reviews.py`从manifest的`d1eabdcf...`/8813 bytes变为`b0082861...`/17509 bytes。worker按fail-closed合同未复制任何文件；manifest保留旧观察并追加新hash，下一步必须审查这8696 bytes差异的来源与意图。
+- 新integration lane已新增精简`AGENTS.md`作为自动上下文入口：指向综合Goal、machine manifest和当前handoff，明确clean branch、hash冲突、基线4失败、禁碰脏main/生产与完成标准。新Agent无需复制历史聊天即可对齐。

@@ -64,7 +64,18 @@
         {"path": "tests/test_woot_review_provider.py", "sha256": "2d73f3c19712bdb6587bfafa373b54683994ce804c703d755c37ce82a5835655", "bytes": 16006, "tracked": false},
         {"path": "tests/test_woot_review_worker.py", "sha256": "3db749d9653a55fecec5269462b03898bba15294d72316148bb80a6bbf94ef23", "bytes": 16793, "tracked": false},
         {"path": "tests/test_woot_review_postgres.py", "sha256": "ee521a4a7c3dc0d7e541365854adcee345f2dcb8ed14b5c3580f1c7b011c607b", "bytes": 6641, "tracked": false},
-        {"path": "tests/test_console_woot_reviews.py", "sha256": "d1eabdcf5d065185673baf8faa42e2c9450723c9ec4bd575a9cc7dec97239286", "bytes": 8813, "tracked": false},
+        {
+          "path": "tests/test_console_woot_reviews.py",
+          "sha256": "d1eabdcf5d065185673baf8faa42e2c9450723c9ec4bd575a9cc7dec97239286",
+          "bytes": 8813,
+          "tracked": false,
+          "status": "source_changed_after_manifest",
+          "current_source_observation": {
+            "sha256": "b0082861107d2bc73462cd167b7c3fde047695666f44c3d0be921bf03b477d95",
+            "bytes": 17509,
+            "decision": "stop_import_until_delta_provenance_review"
+          }
+        },
         {"path": "docs/woot_review_provider.md", "sha256": "692acfe1c3911bca281be4555b8fa54788c51b37d6b398d54a62ece3d82d0b25", "bytes": 5045, "tracked": false},
         {"path": "docs/woot_review_postgres.md", "sha256": "4126a03f92494326e143240f73c30ffaf9e774ed13e33a20b9d9329bf09d7441", "bytes": 5185, "tracked": false}
       ]
@@ -105,6 +116,7 @@
     "No local Git ref for cloud v5 was found.",
     "The 170 working-tree entries in Amazon Scraping have not yet been classified one by one.",
     "The independent Woot files have not yet received their own clean-branch review.",
+    "tests/test_console_woot_reviews.py changed after the initial manifest and must be delta-reviewed before import.",
     "Cloud runtime and production database contents were not accessed during this inventory."
   ],
   "next_action": "create_clean_integration_worktree_from_target_repository_then_port_only_manifest_approved_slices"
