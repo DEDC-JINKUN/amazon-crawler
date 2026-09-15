@@ -124,3 +124,8 @@
 - 外部指标实现使用独立`external_metric_batch/external_metrics/external_metric_relationship`；同batch绑定source+SHA256+row_count，完全相同重导0新增、内容变化冲突。隔离PG验证`100×$25`为own_core、`10×$50`为own_normal、映射竞品为competitor_core，product_snapshot仍2行未被改写。
 - 独立字段TTL按“采集面”实现以避免反向增加请求：核心PDP 4/6小时、非核心PDP 168小时；静态字段随已发生的PDP顺带更新而不另发请求；评论是独立来源/增量面。逐字段各发一次PDP会降低效率，因此没有采用。
 - Woot适配器当前仅离线可调用且未接Worker：已验证透明UA、稳定来源键、403/HTML/坏结构全失败；`review_record`增加`source_type/source_record_id`以避免把Woot证据冒充Amazon HTML。真实端点门禁仍待Phase 7。
+- Phase 7首轮独立review给出4个P1并STOP：Worker readiness与真实3条预约不一致；同批次并发导入存在空行锁竞态；竞品多owner继承不确定；Operator仍以`members=all`高频轮询。
+- 容量修复恢复为按`MAX_AGENT_REFRESH_BATCH × workers`核验事实与替换槽。`per_asin + retry=1`下三Worker至少需要18个唯一槽；3/6/9槽均不得误报3W可用，18槽允许，生产34槽设计仍满足。
+- 外部指标在读取批次前按`tenant+batch_id`取得事务级advisory lock；并发相同文件一写一重放，并发不同文件同批次一写一`ExternalMetricBatchConflict`。竞品继承先按竞品聚合`bool_or(owner core)`，任一owner核心即确定性核心。
+- Operator客户端默认summary；实际HTTP Runner连续active轮询只请求无成员汇总，终态才以100条分页读取成员。分页数量不完整或持续失败会写脱敏`campaign_members_fetch_failed`回执，避免无回执崩溃。
+- 复审修复后证据：74项Agent/Client/Operator定向通过；外部指标并发3项真实PG通过；Console 405真实loopback连续20/20；完整非PG 777 passed/59 skipped；全新UTF-8本地集群Operator 29 passed；恢复/Worker/Campaign/External Metrics等组合57 passed。所有55444实例均fast shutdown。

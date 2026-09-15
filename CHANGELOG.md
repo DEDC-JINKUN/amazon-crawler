@@ -10,10 +10,11 @@
 
 ## Unreleased
 
-- Worker pool启动/readiness容量由“每Worker必须能跑满3条”改为“每Worker至少授权1条”，实际1–3条批次继续由pending数、capacity fact与原子reservation动态缩放；小队列不再因缺少满批slot而503闲置。
-- 新增source-separated外部销量CSV通道和`$2000`销量×自采USD价格分层：批次SHA256幂等、冲突拒绝、缺值跳过、竞品显式继承核心层级，非核心PDP统一168小时。新增未接生产的Woot评论实验适配器；透明UA、403/HTML/坏JSON fail closed、稳定复合键和`woot_ajax`来源列均有离线测试。
+- Console对不支持的POST/PUT/DELETE在固定短deadline内丢弃已声明的小请求体后返回405，避免Windows因未读请求体将结构化拒绝变成10053连接中止；超大、非法或慢请求仍关闭连接。
+- Worker pool启动/readiness按每个Worker真实最多3条批次及其替换出口预留容量，避免服务显示3/3后各进程实际预约相互争抢；3/6/9个出口均不能误报可承载三Worker，生产34槽配置仍满足门槛。
+- 新增source-separated外部销量CSV通道和`$2000`销量×自采USD价格分层：批次SHA256幂等、并发同批次导入事务串行化、冲突拒绝、缺值跳过；一个竞品关联多个自有品时只要任一为核心就确定性继承核心层级，非核心PDP统一168小时。新增未接生产的Woot评论实验适配器；透明UA、403/HTML/坏JSON fail closed、稳定复合键和`woot_ajax`来源列均有离线测试。
 - 每个Agent Worker容量批次由5条收紧为最多3条，三Worker所需并发slot随实际批次计算；单个子Worker全局熔断不终止其他健康子进程。PostgreSQL claim现在携带`asin_master.priority/refresh_policy`，`own_normal/competitor_normal/candidate`的transport、访问阻断、字段或上下文缺口不启动Firefox，只有显式`own_core/competitor_core`保留一次有界浏览器补全。
-- Campaign读取默认返回数据库聚合汇总，不再JOIN并序列化全部1093个成员；显式`members=page&offset=&limit=`提供最多100条分页，内部Operator客户端使用`members=all`保持现有完整投影。隔离PostgreSQL 1093成员、20次汇总p95门禁≤2秒通过。
+- Campaign读取默认返回数据库聚合汇总，不再JOIN并序列化全部1093个成员；显式`members=page&offset=&limit=`提供最多100条分页。Operator运行中只轮询汇总，campaign终态后才分页读取一次完整成员用于结果文件。隔离PostgreSQL 1093成员、20次汇总p95门禁≤2秒通过。
 - 修复三 Worker 停止/重启的资源泄漏链：Firefox adapter 现在保留 geckodriver 所有权，在 WebDriver 关闭超时、初始化失败或 driver 已消失时，按已捕获的父子关系、可执行名与进程创建时间三重身份只回收所属 Firefox 进程；Agent 服务与子 Worker 改为协作停止，Supervisor 以 launch token 预先分配精确 Worker owner，退出时幂等回队 claimed refresh、释放 item lease 与 active capacity reservation，首次心跳前崩溃和强制结束也不依赖子进程PID回传。stop在等待线程前先关闭refresh claim与新capacity reservation入口，超时线程不能在owner清理后重新占用资源。全局访问熔断仍保持 fail closed，不自动换出口绕过验证码。
 - Operator 生产批次改为复用 Collection campaign：Agent 与网页的提交、进度和取消共享 `collection_campaign` 成员事实，不再由 Operator 直接启动旧 ordinary 双 Worker Controller，也不再用历史商品状态推断本轮完成。Agent 服务支持 `-AgentWorkerCount 1..8`，并把 requested/effective/alive Worker 数及容量降级写入 readiness；Operator 请求的并发不可用时在提交前拒绝。Operator runner 只接收 DPAPI 中的 Collection API Key，不再接收 PostgreSQL DSN 或代理凭据；campaign 截止时间独立配置，默认 1 天，不复用旧单 Worker 的 90 分钟恢复时限。
 - Collection readiness 增加 `subject_type`，Operator 与 tenant 一起前置核对。API 在拒绝有请求体的未授权、越权或限流请求前，会有界丢弃已声明的小请求体；loopback 客户端对 Windows 10053/10054 连接重置做一次有限重试，避免短暂本机传输故障覆盖应返回的业务结果。

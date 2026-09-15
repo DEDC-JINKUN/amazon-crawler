@@ -1297,6 +1297,43 @@ class PostgresConsoleRepository:
 class ConsoleHandler(BaseHTTPRequestHandler):
     server: "ConsoleServer"
 
+    def _discard_request_body(self, limit: int = 1048576, timeout_seconds: float = 0.25) -> bool:
+        """Drain a bounded rejected body so Windows can receive the 405 response."""
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            self.close_connection = True
+            return False
+        if length < 0 or length > limit:
+            self.close_connection = True
+            return False
+        if not length:
+            return True
+        deadline = time.monotonic() + max(0.01, float(timeout_seconds))
+        previous_timeout = self.connection.gettimeout()
+        remaining = length
+        try:
+            while remaining:
+                seconds_left = deadline - time.monotonic()
+                if seconds_left <= 0:
+                    self.close_connection = True
+                    return False
+                self.connection.settimeout(seconds_left)
+                chunk = self.rfile.read(min(remaining, 65536))
+                if not chunk:
+                    self.close_connection = True
+                    return False
+                remaining -= len(chunk)
+            return True
+        except (OSError, TimeoutError):
+            self.close_connection = True
+            return False
+        finally:
+            try:
+                self.connection.settimeout(previous_timeout)
+            except OSError:
+                self.close_connection = True
+
     def _security_headers(self) -> None:
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Security-Policy", SECURITY_POLICY)
@@ -1564,12 +1601,15 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if parsed.path in OPERATOR_WRITE_ROUTES:
             self._proxy_operator("POST", parsed)
             return
+        self._discard_request_body()
         self._send_json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "read_only_console"})
 
     def do_PUT(self) -> None:  # noqa: N802
+        self._discard_request_body()
         self._send_json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "read_only_console"})
 
     def do_DELETE(self) -> None:  # noqa: N802
+        self._discard_request_body()
         self._send_json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "read_only_console"})
 
     def log_message(self, format: str, *args: Any) -> None:

@@ -23,7 +23,7 @@ CSV字段：
   apply-tiers --revenue-threshold 2000
 ```
 
-同一tenant的`batch_id`绑定来源、文件SHA256和行数；完全相同的重导返回`duplicate_batch=true`且不增加指标，内容不同则`ExternalMetricBatchConflict`。分层读取每个ASIN最新销量和最新自采USD价格：`sales_units × price >= 2000`标记`own_core/priority=100`，否则标记`own_normal/priority=50`；显式映射的竞品相应继承`competitor_core`或`competitor_normal`。
+同一tenant的`batch_id`绑定来源、文件SHA256和行数；并发导入同一批次时按该逻辑身份事务串行化，完全相同的重导返回`duplicate_batch=true`且不增加指标，内容不同则`ExternalMetricBatchConflict`。分层读取每个ASIN最新销量和最新自采USD价格：`sales_units × price >= 2000`标记`own_core/priority=100`，否则标记`own_normal/priority=50`；一个竞品关联多个自有品时，只要任一自有品为核心，该竞品就确定性继承`competitor_core/priority=100`。
 
 缺销量、缺价格或非USD价格一律`skipped`，不猜测层级。
 
@@ -32,7 +32,7 @@ CSV字段：
 - 核心商品PDP：`own_core`每4小时、`competitor_core`每6小时。
 - 非核心商品PDP：`own_normal`和`competitor_normal`统一每168小时。
 - 普通/候选任务只走HTTP；transport、访问阻断、字段或上下文缺口不启动Firefox。
-- Worker启动门禁只要求每个进程至少能处理1条；实际批次在1–3条间按待处理数和原子容量动态缩小。
+- Worker启动与持续readiness按每个进程真实最多3条批次及其替换出口核算，避免3个进程同时预约时容量相互争抢；实际单轮待处理数仍为1–3条。
 - Firefox只留给显式核心产品的一次字段/身份补全。
 - 标题、品牌等静态字段随PDP请求顺带更新，不为它们制造额外请求；价格、库存和buy box由核心PDP cadence决定。
 - 评论是独立采集面，不因PDP动态字段到期而重抓历史评论；后续评论增量以来源和稳定键去重。

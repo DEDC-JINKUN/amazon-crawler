@@ -96,6 +96,34 @@ def test_readiness_is_available_through_the_loopback_client(monkeypatch):
     assert calls == [("GET", "/readyz", None)]
 
 
+def test_campaign_client_polls_summary_and_fetches_terminal_members_in_bounded_pages(monkeypatch):
+    module = load_client()
+    client = module.AmazonCollectionClient("http://127.0.0.1:8765", "refresh-agent", "key")
+    calls = []
+
+    def request(method, path, payload=None):
+        calls.append((method, path, payload))
+        if "members=page" not in path:
+            return {"campaign": {"campaign_id": "campaign-1", "status": "completed", "total": 101}}
+        offset = 100 if "offset=100" in path else 0
+        count = 1 if offset else 100
+        return {"campaign": {
+            "campaign_id": "campaign-1", "status": "completed", "total": 101,
+            "members": [{"asin": f"B0PAGE{i:04d}"} for i in range(offset, offset + count)],
+        }}
+
+    monkeypatch.setattr(client, "_request", request)
+    summary = client.get_campaign("campaign-1")["campaign"]
+    full = client.get_campaign_with_members("campaign-1", summary=summary)["campaign"]
+
+    assert len(full["members"]) == 101
+    assert calls == [
+        ("GET", "/v1/campaigns/campaign-1", None),
+        ("GET", "/v1/campaigns/campaign-1?members=page&offset=0&limit=100", None),
+        ("GET", "/v1/campaigns/campaign-1?members=page&offset=100&limit=1", None),
+    ]
+
+
 def test_loopback_connection_abort_is_retried_once_for_idempotent_campaign_calls():
     module = load_client()
     client = module.AmazonCollectionClient("http://127.0.0.1:8765", "refresh-agent", "key")

@@ -21,6 +21,8 @@ Collection API 是 Agent 查询采集结果和提交小批按需刷新的统一�
 
 `agent-refresh -Wait`采用单job轮转、至少1.1秒的轮询间隔，并在本机API返回429时遵守`Retry-After`，因此五个持续等待job也不会自行超过默认60次/分钟限制。客户端强制UTF-8 JSON输出，Windows GBK控制台不再导致国际字符编码异常。
 
+Console保持只读；不支持的POST/PUT/DELETE会在固定短deadline内有界读取已声明的小请求体再返回405，避免Windows客户端把未读请求体的连接关闭表现为10053。非法、超大或慢请求体直接关闭连接。
+
 以下直接启动方式仅用于离线开发：
 
 ```powershell
@@ -191,7 +193,7 @@ Idempotency-Key: owned-full-20260913-v1
 | `fields` | 否 | 希望采集的字段标签；不改变 Worker 的合规边界 |
 | `freshness_seconds` | 否 | 可选的新鲜度要求 |
 
-同一个幂等键和同一请求返回同一个 `campaign_id`；同键不同请求返回 409。进度使用 `GET /v1/campaigns/{campaign_id}`，默认只返回`total/terminal/counts`等数据库聚合汇总，不携带全部成员。需要成员时使用`?members=page&offset=0&limit=100`，`offset`必须为非负整数、`limit`为1–100，响应增加`member_page`；受控Operator兼容入口显式使用`?members=all`，普通Agent和MCP不得用它轮询大campaign。取消使用 `POST /v1/campaigns/{campaign_id}/cancel`：只取消尚未开始的成员，已经持有租约的成员继续报告真实终态。
+同一个幂等键和同一请求返回同一个 `campaign_id`；同键不同请求返回 409。进度使用 `GET /v1/campaigns/{campaign_id}`，默认只返回`total/terminal/counts`等数据库聚合汇总，不携带全部成员。需要成员时使用`?members=page&offset=0&limit=100`，`offset`必须为非负整数、`limit`为1–100，响应增加`member_page`；Operator运行中同样只轮询汇总，确认campaign终态后才分页读取成员并生成结果。普通Agent、Operator和MCP都不得用`members=all`轮询大campaign。取消使用 `POST /v1/campaigns/{campaign_id}/cancel`：只取消尚未开始的成员，已经持有租约的成员继续报告真实终态。
 
 Operator 上传 Excel 后也走这组接口。Operator 先读取 `/readyz`，确认 tenant 以及请求的 Worker 数均已生效，再提交 campaign；本地进度和结果文件只投影该 campaign 的成员状态，不读取历史商品状态推断本批完成。
 
@@ -213,7 +215,7 @@ Content-Type: application/json
 {"requested_by":"agent-name","reason":"price_is_stale"}
 ```
 
-HTTP线程只负责登记队列并返回 `202 Accepted`；真实采集由后台受控 Worker 执行。API仍可原子提交最多5条，但每个后台Worker的容量批次最多领取3条，容量按1–3条实际待领取数预约，减小坏会话的连带损失。启动/readiness只要求每个Worker至少有1条action的授权容量；满批容量不足时实际runner继续按pending数和原子reservation缩小，不因“凑不满3条”让小队列503闲置。每个Worker在独立子进程中创建自己的adapter/代理子池，数据库reservation保证slot不重叠；一个子Worker全局熔断不会终止其他健康子进程，但服务整体readiness仍fail closed并拒绝新campaign。PostgreSQL claim携带`priority/refresh_policy`：只有`own_core`或`competitor_core`可使用一次有界Firefox补全；普通/候选任务的transport、访问阻断、字段缺口或上下文不一致直接记录并进入既有恢复/终态，不启动Firefox。商品广度每ASIN新会话，同ASIN评论分页粘滞。
+HTTP线程只负责登记队列并返回 `202 Accepted`；真实采集由后台受控 Worker 执行。API仍可原子提交最多5条，但每个后台Worker的容量批次最多领取3条，容量按1–3条实际待领取数预约，减小坏会话的连带损失。启动/readiness按每个Worker最多3条的真实预约上界及替换出口核算，多Worker不能共享同一份替换缓冲；容量不足时在新campaign提交前fail closed。每个Worker在独立子进程中创建自己的adapter/代理子池，数据库reservation保证slot不重叠；一个子Worker全局熔断不会终止其他健康子进程，但服务整体readiness仍fail closed并拒绝新campaign。PostgreSQL claim携带`priority/refresh_policy`：只有`own_core`或`competitor_core`可使用一次有界Firefox补全；普通/候选任务的transport、访问阻断、字段缺口或上下文不一致直接记录并进入既有恢复/终态，不启动Firefox。商品广度每ASIN新会话，同ASIN评论分页粘滞。
 
 若Worker在领取后发生未预期异常，服务按固定脱敏原因将该Worker仍持有的refresh job置为`failed`，释放对应item lease并写状态历史；异常正文不进入API响应或健康状态。Agent客户端只允许HTTP loopback基址，拒绝外部主机、URL内嵌凭据、路径、query、fragment和HTTP重定向，避免scoped key外发。
 

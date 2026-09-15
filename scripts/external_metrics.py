@@ -98,6 +98,13 @@ class ExternalMetricsStore:
 
         with self._connect() as conn:
             with conn.cursor() as cursor:
+                # SELECT ... FOR UPDATE cannot lock a row that does not exist.
+                # Serialize the logical identity before checking it so two
+                # concurrent imports have deterministic idempotency semantics.
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                    (f"external-metrics:{self.tenant_id}:{batch_id}",),
+                )
                 cursor.execute(
                     "SELECT source,content_hash,row_count FROM amazon_us.external_metric_batch "
                     "WHERE tenant_id=%s AND batch_id=%s FOR UPDATE",
@@ -179,17 +186,23 @@ class ExternalMetricsStore:
                     )
                     counts["core" if core else "normal"] += 1
                 cursor.execute(
-                    """UPDATE amazon_us.asin_master competitor SET
-                      refresh_policy=CASE WHEN owner.refresh_policy='own_core' THEN 'competitor_core' ELSE 'competitor_normal' END,
-                      priority=CASE WHEN owner.refresh_policy='own_core' THEN 100 ELSE 50 END,
+                    """WITH inherited AS (
+                      SELECT relation.competitor_asin,
+                        bool_or(owner.refresh_policy='own_core') AS is_core
+                      FROM amazon_us.external_metric_relationship relation
+                      JOIN amazon_us.asin_master owner ON owner.tenant_id=relation.tenant_id
+                        AND owner.marketplace=relation.marketplace AND owner.asin=relation.own_asin AND owner.subject_type='own'
+                      WHERE relation.tenant_id=%s AND relation.marketplace='US'
+                      GROUP BY relation.competitor_asin
+                    )
+                    UPDATE amazon_us.asin_master competitor SET
+                      refresh_policy=CASE WHEN inherited.is_core THEN 'competitor_core' ELSE 'competitor_normal' END,
+                      priority=CASE WHEN inherited.is_core THEN 100 ELSE 50 END,
                       updated_at=CURRENT_TIMESTAMP
-                    FROM amazon_us.external_metric_relationship relation
-                    JOIN amazon_us.asin_master owner ON owner.tenant_id=relation.tenant_id
-                      AND owner.marketplace=relation.marketplace AND owner.asin=relation.own_asin AND owner.subject_type='own'
-                    WHERE competitor.tenant_id=relation.tenant_id AND competitor.marketplace=relation.marketplace
-                      AND competitor.asin=relation.competitor_asin AND competitor.subject_type='competitor'
-                      AND competitor.tenant_id=%s""",
-                    (self.tenant_id,),
+                    FROM inherited
+                    WHERE competitor.tenant_id=%s AND competitor.marketplace='US'
+                      AND competitor.asin=inherited.competitor_asin AND competitor.subject_type='competitor'""",
+                    (self.tenant_id, self.tenant_id),
                 )
                 counts["competitors_updated"] = max(0, int(cursor.rowcount))
             conn.commit()

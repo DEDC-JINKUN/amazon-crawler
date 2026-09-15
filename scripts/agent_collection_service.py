@@ -75,7 +75,7 @@ def effective_worker_count(requested: int, capacity_fact: dict[str, Any] | None,
         for count in range(upper, 0, -1):
             decision = evaluate_capacity_fact(
                 capacity_fact, config,
-                requested_actions=count,
+                requested_actions=MAX_AGENT_REFRESH_BATCH * count,
             )
             if decision.get("status") == "allowed":
                 return count
@@ -91,7 +91,7 @@ def pool_capacity_decision(fact: dict[str, Any] | None, config: dict[str, Any], 
     return evaluate_capacity_fact(
         fact,
         config,
-        requested_actions=max(1, int(effective_workers)),
+        requested_actions=MAX_AGENT_REFRESH_BATCH * max(1, int(effective_workers)),
     )
 
 

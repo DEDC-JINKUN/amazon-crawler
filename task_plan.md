@@ -138,6 +138,10 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 | external metrics隔离PG首次重导把默认tuple row直接`dict()` | 1 | 默认连接改用psycopg `dict_row`；测试事务已finally清理且55444关闭，随后重跑完整导入/分层场景。 |
 | 隔离PG Agent E2E在Worker仍`starting`时立即POST得到503 | 2 | 同时修正静态满批容量门禁为每Worker至少1条；测试在业务请求前显式等待并断言Worker running，保留API启动期fail-closed语义后定点重跑。 |
 | Agent E2E新增显式ready等待后缺少`time`导入 | 1 | 仅补测试模块import，未改产品路径；55444已fast shutdown后重新定点运行。 |
+| Phase 7复审后把不同PG合同的套件误放进同一库 | 1 | 改用全新UTF-8本地集群，分别向`operator_matrix`和带安全marker的recovery测试库运行；未连接生产库。 |
+| PG套件默认临时目录ACL/长路径失败 | 2 | 改用仓库内短`--basetemp`重跑，排除Windows夹具目录假失败。 |
+| 浏览器预算旧测试与核心分层/局部终态语义不一致 | 1 | 显式标记`own_core`；局部240次预算耗尽只终结该商品并返回批次处理数2；租约失效场景补`half_open=true`，三分支通过。 |
+| 完整非PG套件连续两轮在Console 405处WinError 10053 | 2 | 根因是不支持的PUT/DELETE未读取小请求体；增加固定0.25秒/1MiB有界drain，同一loopback测试连续20/20及最终全套777项通过。 |
 
 ## 2026-09-15 全量运行阻断修复
 
@@ -168,5 +172,5 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 - [complete] Phase 4：TDD实现非核心HTTP优先、transport/访问阻断/字段与上下文缺口不启Firefox，核心字段/身份才允许浏览器补全。
 - [complete] Phase 5：接入销量×价格≥2000美元分层、竞品继承与按采集面时效；非核心PDP统一7天，静态字段不单独制造请求、评论独立增量。
 - [complete] Phase 6：Woot仅作`source=woot_ajax`实验适配器；403/非JSON失败、稳定复合键、门禁未过不进生产。
-- [in_progress] Phase 7：全套非PG、隔离PG、性能基准、独立review与固定20-ASIN显式业务门禁；不可达则生成失败报告并保持fail-closed。
+- [in_progress] Phase 7：全套非PG、隔离PG、性能基准、独立review与固定20-ASIN显式业务门禁；首轮独立review的4个P1已修复并通过777项非PG、29项Operator PG、57项恢复/Worker/指标PG组合证据，待同一reviewer delta复核后才允许live门禁。
 - [pending] Phase 8：制作可回滚release；只恢复同一campaign，不创建新全量campaign。

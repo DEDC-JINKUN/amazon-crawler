@@ -158,6 +158,24 @@ class CompletedDuringCancelClient(CancelledCampaignClient):
         return {"campaign": self._campaign("completed", ["succeeded", "variant", "succeeded"])}
 
 
+class TerminalMemberFailureClient(CompletingCampaignClient):
+    def __init__(self):
+        super().__init__()
+        self.member_calls = 0
+
+    def get_campaign_summary(self, campaign_id):
+        assert campaign_id == self.campaign_id
+        campaign = self._campaign("completed", ["succeeded", "variant", "failed"])
+        campaign.pop("members")
+        return {"campaign": campaign}
+
+    def get_campaign_with_members(self, campaign_id, *, summary=None):
+        assert campaign_id == self.campaign_id
+        assert summary and "members" not in summary
+        self.member_calls += 1
+        raise OSError("terminal member page unavailable with secret detail")
+
+
 class RetryingCancelCampaignClient(CancelledCampaignClient):
     def cancel_campaign(self, campaign_id):
         assert campaign_id == self.campaign_id
@@ -173,6 +191,8 @@ class HttpCampaignRepository:
 
     def __init__(self):
         self.campaign_id = "campaign-" + "8" * 32
+        self.load_views = []
+        self.summary_polls = 0
 
     def load_schema_contract(self):
         return {
@@ -192,10 +212,24 @@ class HttpCampaignRepository:
     def submit_campaign(self, *, asins, **_options):
         return self._campaign("active", asins, ["pending"] * len(asins))
 
-    def load_campaign(self, campaign_id, **_member_view):
+    def load_campaign(self, campaign_id, **member_view):
         assert campaign_id == self.campaign_id
+        self.load_views.append(dict(member_view))
         asins = ["B0TEST0001", "B0TEST0002"]
-        return self._campaign("completed", asins, ["succeeded", "variant"])
+        if not member_view.get("include_members", True):
+            self.summary_polls += 1
+            if self.summary_polls < 3:
+                campaign = self._campaign("active", asins, ["running", "pending"])
+            else:
+                campaign = self._campaign("completed", asins, ["succeeded", "variant"])
+            campaign.pop("members", None)
+        else:
+            campaign = self._campaign("completed", asins, ["succeeded", "variant"])
+        if member_view.get("include_members", True) and member_view.get("member_limit") is not None:
+            offset = int(member_view.get("member_offset") or 0)
+            limit = int(member_view["member_limit"])
+            campaign["members"] = campaign["members"][offset:offset + limit]
+        return campaign
 
     def cancel_campaign(self, campaign_id):
         assert campaign_id == self.campaign_id
@@ -389,6 +423,38 @@ def test_campaign_expiry_is_a_failed_operator_terminal_not_a_success(tmp_path):
     assert progress["failed"] == 3
 
 
+def test_terminal_member_page_failure_retries_then_persists_safe_failure(tmp_path):
+    from operator_campaign_runner import CampaignRunSpec, run_campaign
+
+    batch_dir = tmp_path / ("batch-" + "f" * 24)
+    batch_dir.mkdir()
+    manifest = batch_dir / "manifest.csv"
+    write_manifest(manifest, ["B0TEST0001", "B0TEST0002", "B0TEST0003"])
+    client = TerminalMemberFailureClient()
+
+    result = run_campaign(
+        CampaignRunSpec(
+            batch_dir=batch_dir,
+            manifest=manifest,
+            tenant_id="owned-products",
+            subject_type="own",
+            worker_count=2,
+            poll_seconds=0,
+            poll_failure_limit=2,
+        ),
+        client,
+        sleep=lambda _seconds: None,
+    )
+
+    assert result == 4
+    assert client.member_calls == 2
+    progress = json.loads((batch_dir / "progress.json").read_text(encoding="utf-8"))
+    receipt = json.loads((batch_dir / "receipt.json").read_text(encoding="utf-8"))
+    assert progress["latest_error"] == receipt["latest_error"] == "campaign_members_fetch_failed"
+    assert "secret detail" not in json.dumps(progress) + json.dumps(receipt)
+    assert not (batch_dir / "results.json").exists()
+
+
 def test_repeated_poll_failure_cancels_campaign_and_persists_a_safe_failure(tmp_path):
     from operator_campaign_runner import CampaignRunSpec, run_campaign
 
@@ -497,6 +563,12 @@ def test_operator_runner_uses_the_real_loopback_campaign_http_seam(tmp_path):
     assert progress["campaign_id"] == repository.campaign_id
     assert progress["completed"] == 1
     assert progress["variant"] == 1
+    assert repository.load_views == [
+        {"include_members": False, "member_offset": 0, "member_limit": None},
+        {"include_members": False, "member_offset": 0, "member_limit": None},
+        {"include_members": False, "member_offset": 0, "member_limit": None},
+        {"include_members": True, "member_offset": 0, "member_limit": 2},
+    ]
 
 
 def test_operator_stop_retries_campaign_cancel_before_failing_the_runner(tmp_path):

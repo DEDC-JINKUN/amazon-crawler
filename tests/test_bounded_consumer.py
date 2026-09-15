@@ -156,6 +156,14 @@ def test_local_browser_budget_finishes_only_its_job_and_preserves_global_denials
     from collection_storage import PostgresCollectionRepository
     storage,config,_,calls,_,advance=build_fixture(monkeypatch,tmp_path)
     asins=['B0CC2FRY3J','B0CC2JBW2H']
+    # This scenario exercises the bounded browser-resource budget. Browser
+    # fallback is now intentionally reserved for explicitly core products.
+    with psycopg.connect(DSN) as conn:
+        conn.execute(
+            "UPDATE amazon_us.asin_master SET refresh_policy='own_core',priority=100 "
+            "WHERE tenant_id=%s AND asin=ANY(%s)",
+            (storage.tenant_id, asins),
+        )
     config['manifest_asins']=asins
     config['_recovery_wait']=advance
     class Response(io.BytesIO):
@@ -175,7 +183,7 @@ def test_local_browser_budget_finishes_only_its_job_and_preserves_global_denials
                         if global_denial=='manual':
                             conn.execute('UPDATE amazon_us.recovery_egress SET manually_paused=true WHERE tenant_id=%s',(storage.tenant_id,))
                         else:
-                            conn.execute("UPDATE amazon_us.recovery_egress SET lease_expires_at=now()-interval '1 second' WHERE tenant_id=%s",(storage.tenant_id,))
+                            conn.execute("UPDATE amazon_us.recovery_egress SET half_open=true,lease_expires_at=now()-interval '1 second' WHERE tenant_id=%s",(storage.tenant_id,))
                 self.config['_recovery_browser_request']()
                 raise AssertionError('241st resource must be refused')
             return Response((f'<link rel="canonical" href="https://www.amazon.com/dp/{asin}">'
@@ -192,7 +200,7 @@ def test_local_browser_budget_finishes_only_its_job_and_preserves_global_denials
         assert storage.recovery_status(asins[1]) is None
     else:
         assert run_postgres_actions(storage,pool,config,limit=2,product_only=True,run_id=run_id,
-                                    keep_alive=True,consumer_max_seconds=300)==-1
+                                    keep_alive=True,consumer_max_seconds=300)==2
         assert calls==asins
         assert storage.recovery_status(asins[1])['outcome']=='completed'
         assert storage.recovery_batch_progress(run_id)['terminal_count']==2

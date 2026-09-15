@@ -84,6 +84,31 @@ def test_three_worker_count_and_runtime_readiness_fail_closed_on_stale_or_denied
     assert status["last_error"] == "capacity_evidence_stale"
 
 
+def test_three_worker_readiness_reserves_each_workers_real_maximum_batch():
+    service = load("agent_collection_service")
+    config, base = valid_three_worker_capacity(service)
+
+    def fact_with_exits(exits):
+        return {
+            **base,
+            "planned_slots": exits,
+            "tested_slots": exits,
+            "available_slots": exits,
+            "unique_egress_count": exits,
+            "duplicate_egress_count": 0,
+            "slot_capacity": exits,
+        }
+
+    for exits in (3, 6, 9):
+        fact = fact_with_exits(exits)
+        assert service.effective_worker_count(3, fact, config) < 3
+        assert service.pool_capacity_decision(fact, config, effective_workers=3)["status"] == "denied"
+
+    sufficient = fact_with_exits(18)
+    assert service.effective_worker_count(3, sufficient, config) == 3
+    assert service.pool_capacity_decision(sufficient, config, effective_workers=3)["status"] == "allowed"
+
+
 def test_embedded_worker_readiness_rejects_a_stale_business_heartbeat():
     service = load("agent_collection_service")
     stale = (__import__('datetime').datetime.now(__import__('datetime').timezone.utc) - __import__('datetime').timedelta(seconds=5)).isoformat()

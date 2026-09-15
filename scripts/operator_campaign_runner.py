@@ -93,12 +93,26 @@ def _project_campaign(campaign: dict[str, Any], *, stopping: bool = False) -> di
         else:
             item["status"] = mapping.get(source_status, "failed")
         projected_items.append(item)
-    counts = {
-        name: sum(item["status"] == name for item in projected_items)
-        for name in ("pending", "claimed", "completed", "variant", "failed", "blocked", "stopped")
-    }
+    if "members" in campaign:
+        counts = {
+            name: sum(item["status"] == name for item in projected_items)
+            for name in ("pending", "claimed", "completed", "variant", "failed", "blocked", "stopped")
+        }
+        total = len(projected_items)
+    else:
+        source_counts = dict(campaign.get("counts") or {})
+        cancelled = int(source_counts.get("cancelled") or 0)
+        counts = {
+            "pending": int(source_counts.get("pending") or 0) + int(source_counts.get("deferred") or 0),
+            "claimed": int(source_counts.get("running") or 0),
+            "completed": int(source_counts.get("succeeded") or 0),
+            "variant": int(source_counts.get("variant") or 0),
+            "failed": int(source_counts.get("failed") or 0) + (0 if stopping else cancelled),
+            "blocked": int(source_counts.get("blocked") or 0),
+            "stopped": cancelled if stopping else 0,
+        }
+        total = int(campaign.get("total") or sum(counts.values()))
     terminal = counts["completed"] + counts["variant"] + counts["failed"] + counts["blocked"] + counts["stopped"]
-    total = len(projected_items)
     campaign_status = str(campaign.get("status") or "")
     campaign_terminal = campaign_status in {"completed", "cancelled", "expired"} and terminal == total
     if not campaign_terminal:
@@ -118,6 +132,30 @@ def _project_campaign(campaign: dict[str, Any], *, stopping: bool = False) -> di
         "campaign_status": campaign_status,
         "items": projected_items,
     }
+
+
+def _get_campaign_summary(client: Any, campaign_id: str) -> dict[str, Any]:
+    loader = getattr(client, "get_campaign_summary", None)
+    payload = loader(campaign_id) if callable(loader) else client.get_campaign(campaign_id)
+    return dict((payload or {}).get("campaign") or {})
+
+
+def _get_terminal_campaign_members(
+    client: Any, campaign_id: str, campaign: dict[str, Any],
+) -> dict[str, Any]:
+    members = campaign.get("members")
+    if isinstance(members, list) and len(members) == int(campaign.get("total") or len(members)):
+        return campaign
+    loader = getattr(client, "get_campaign_with_members", None)
+    if callable(loader):
+        payload = loader(campaign_id, summary=campaign)
+    else:
+        payload = client.get_campaign(campaign_id)
+    loaded = dict((payload or {}).get("campaign") or {})
+    loaded_members = loaded.get("members")
+    if not isinstance(loaded_members, list) or len(loaded_members) != int(loaded.get("total") or 0):
+        raise RuntimeError("campaign terminal members incomplete")
+    return loaded
 
 
 def _write_results(batch_dir: Path, progress: dict[str, Any]) -> None:
@@ -186,9 +224,10 @@ def run_campaign(
         })
         stopping = False
         poll_failures = 0
+        member_failures = 0
         while True:
             try:
-                campaign = dict((client.get_campaign(campaign_id) or {}).get("campaign") or {})
+                campaign = _get_campaign_summary(client, campaign_id)
                 poll_failures = 0
             except (OSError, RuntimeError, ValueError):
                 poll_failures += 1
@@ -235,6 +274,39 @@ def run_campaign(
                     client, campaign_id, attempts=spec.poll_failure_limit,
                     sleep=sleep, delay=spec.poll_seconds,
                 ) or campaign
+            if str(campaign.get("status") or "") in {"completed", "cancelled", "expired"}:
+                try:
+                    campaign = _get_terminal_campaign_members(client, campaign_id, campaign)
+                    member_failures = 0
+                except (OSError, RuntimeError, ValueError):
+                    member_failures += 1
+                    if member_failures < max(1, int(spec.poll_failure_limit)):
+                        sleep(max(0.0, float(spec.poll_seconds)))
+                        continue
+                    progress = _project_campaign(campaign, stopping=stopping)
+                    progress.update({
+                        "status": "failed",
+                        "latest_error": "campaign_members_fetch_failed",
+                        "requested_workers": int(spec.worker_count),
+                        "effective_workers": pool["effective_workers"],
+                        "alive_workers": pool["alive_workers"],
+                    })
+                    _atomic_json(Path(spec.batch_dir) / "progress.json", progress)
+                    _atomic_json(Path(spec.batch_dir) / "receipt.json", {
+                        "schema_version": "amazon-operator-campaign-receipt-v1",
+                        "status": "failed",
+                        "campaign_id": campaign_id,
+                        "requested": progress["requested"],
+                        "completed": progress["completed"],
+                        "variant": progress["variant"],
+                        "failed": progress["failed"],
+                        "blocked": progress["blocked"],
+                        "latest_error": "campaign_members_fetch_failed",
+                        "requested_workers": int(spec.worker_count),
+                        "effective_workers": pool["effective_workers"],
+                        "finished_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                    return 4
             progress = _project_campaign(campaign, stopping=stopping)
             progress.update({
                 "requested_workers": int(spec.worker_count),

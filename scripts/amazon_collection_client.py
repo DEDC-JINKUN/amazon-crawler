@@ -113,9 +113,46 @@ class AmazonCollectionClient:
         return self._request("POST","/v1/campaigns",payload)
 
     def get_campaign(self, campaign_id: str) -> dict[str, Any]:
-        # Preserve the Operator's legacy full projection while the public/API
-        # default stays summary-only for large campaign status reads.
-        return self._request("GET",f"/v1/campaigns/{campaign_id}?members=all")
+        return self.get_campaign_summary(campaign_id)
+
+    def get_campaign_summary(self, campaign_id: str) -> dict[str, Any]:
+        return self._request("GET", f"/v1/campaigns/{campaign_id}")
+
+    def get_campaign_members_page(
+        self, campaign_id: str, *, offset: int = 0, limit: int = 100,
+    ) -> dict[str, Any]:
+        offset = int(offset)
+        limit = int(limit)
+        if offset < 0 or not 1 <= limit <= 100:
+            raise ValueError("invalid campaign member page")
+        return self._request(
+            "GET", f"/v1/campaigns/{campaign_id}?members=page&offset={offset}&limit={limit}",
+        )
+
+    def get_campaign_with_members(
+        self, campaign_id: str, *, summary: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        campaign = dict(summary or (self.get_campaign_summary(campaign_id).get("campaign") or {}))
+        total = max(0, int(campaign.get("total") or 0))
+        members: list[dict[str, Any]] = []
+        for offset in range(0, total, 100):
+            for attempt in range(2):
+                try:
+                    payload = self.get_campaign_members_page(
+                        campaign_id, offset=offset, limit=min(100, total - offset),
+                    )
+                    break
+                except AgentRateLimitError as exc:
+                    if attempt:
+                        raise
+                    time.sleep(exc.retry_after_seconds)
+            page = dict((payload.get("campaign") or {}))
+            members.extend(dict(item) for item in page.get("members") or [])
+            campaign.update({key: value for key, value in page.items() if key not in {"members", "member_page"}})
+        if len(members) != total:
+            raise RuntimeError("campaign member page incomplete")
+        campaign["members"] = members
+        return {"campaign": campaign}
 
     def cancel_campaign(self, campaign_id: str) -> dict[str, Any]:
         return self._request("POST",f"/v1/campaigns/{campaign_id}/cancel",{})
