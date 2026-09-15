@@ -33,6 +33,7 @@ class PostgresWorkerStorage:
         *,
         connect: Callable[[], Any] | None = None,
         default_lease_seconds: int = 300,
+        release_gate_id: str | None = None,
     ) -> None:
         if not tenant_id or not tenant_id.strip():
             raise ValueError("tenant_id is required")
@@ -44,8 +45,95 @@ class PostgresWorkerStorage:
         self.tenant_id = tenant_id.strip()
         self.subject_type = subject_type
         self.default_lease_seconds = int(default_lease_seconds)
+        normalized_gate = str(release_gate_id or "").strip()
+        if normalized_gate and not re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", normalized_gate):
+            raise ValueError("invalid release_gate_id")
+        self.release_gate_id = normalized_gate or None
         self._connect_factory = connect or self._connect
         self._recovery = None
+
+    def release_gate_request_filter(self, request_alias: str = "r") -> tuple[str, tuple[Any, ...]]:
+        """Return the durable release-gate predicate for one refresh request alias."""
+        if request_alias != "r":
+            raise ValueError("unsupported release gate request alias")
+        if self.release_gate_id:
+            return (
+                """AND EXISTS (
+                  SELECT 1 FROM amazon_us.collection_release_gate gate
+                  JOIN amazon_us.collection_campaign_member gated_member
+                    ON gated_member.tenant_id=gate.tenant_id
+                   AND gated_member.campaign_id=gate.campaign_id
+                   AND gated_member.release_gate_id=gate.gate_id
+                  WHERE gate.tenant_id=r.tenant_id AND gate.gate_id=%s AND gate.status='active'
+                    AND gated_member.refresh_job_id=r.job_id
+                )""",
+                (self.release_gate_id,),
+            )
+        return (
+            """AND NOT EXISTS (
+              SELECT 1 FROM amazon_us.collection_campaign gated_campaign
+              WHERE gated_campaign.tenant_id=r.tenant_id
+                AND gated_campaign.release_gate_id IS NOT NULL
+            )""",
+            (),
+        )
+
+    def release_gate_item_filter(self, item_alias: str = "s") -> tuple[str, tuple[Any, ...]]:
+        """Return the matching gate predicate for ordinary item-state claims."""
+        if item_alias != "s":
+            raise ValueError("unsupported release gate item alias")
+        if self.release_gate_id:
+            return (
+                """AND EXISTS (
+                  SELECT 1 FROM amazon_us.collection_release_gate gate
+                  JOIN amazon_us.collection_campaign_member gated_member
+                    ON gated_member.tenant_id=gate.tenant_id
+                   AND gated_member.campaign_id=gate.campaign_id
+                   AND gated_member.release_gate_id=gate.gate_id
+                  WHERE gate.tenant_id=s.tenant_id AND gate.gate_id=%s AND gate.status='active'
+                    AND gated_member.asin=s.asin AND gated_member.subject_type=s.subject_type
+                )""",
+                (self.release_gate_id,),
+            )
+        return (
+            """AND NOT EXISTS (
+              SELECT 1 FROM amazon_us.collection_campaign gated_campaign
+              WHERE gated_campaign.tenant_id=s.tenant_id
+                AND gated_campaign.release_gate_id IS NOT NULL
+            )""",
+            (),
+        )
+
+    def load_release_gate(self) -> dict[str, Any] | None:
+        """Read the gate currently constraining this tenant or this worker."""
+        with self._connect_factory() as conn, conn.cursor() as cursor:
+            if self.release_gate_id:
+                cursor.execute(
+                    """SELECT gate_id,campaign_id,release_id,status,selection_hash,selected_count,
+                              started_at,stop_requested_at,finished_at,failure_reason
+                    FROM amazon_us.collection_release_gate
+                    WHERE tenant_id=%s AND gate_id=%s""",
+                    (self.tenant_id, self.release_gate_id),
+                )
+            else:
+                cursor.execute(
+                    """SELECT gate.gate_id,gate.campaign_id,gate.release_id,gate.status,
+                              gate.selection_hash,gate.selected_count,gate.started_at,
+                              gate.stop_requested_at,gate.finished_at,gate.failure_reason
+                    FROM amazon_us.collection_campaign campaign
+                    JOIN amazon_us.collection_release_gate gate
+                      ON gate.tenant_id=campaign.tenant_id AND gate.gate_id=campaign.release_gate_id
+                    WHERE campaign.tenant_id=%s AND campaign.release_gate_id IS NOT NULL
+                    ORDER BY gate.started_at DESC LIMIT 1""",
+                    (self.tenant_id,),
+                )
+            row = self._as_dict(cursor.fetchone())
+        if row is None:
+            return None
+        return {
+            key: value.isoformat() if hasattr(value, "isoformat") else value
+            for key, value in row.items()
+        }
 
     def configure_recovery(self, config: Mapping[str, Any]) -> None:
         from recovery_scheduler import RecoveryScheduler
@@ -240,6 +328,7 @@ class PostgresWorkerStorage:
         if stage not in {None, "product", "reviews"}:
             raise ValueError("task_stage must be product or reviews")
         stage_clause = "AND s.task_stage=%s" if stage else ""
+        gate_clause, gate_params = self.release_gate_item_filter()
         token = uuid.uuid4().hex
         with self._connect_factory() as conn:
             try:
@@ -254,6 +343,7 @@ class PostgresWorkerStorage:
                             AND ((s.status IN ('pending','reviews_pending'))
                               OR (s.status='failed' AND s.attempts < s.max_attempts))
                             AND (s.next_retry_at IS NULL OR s.next_retry_at <= CURRENT_TIMESTAMP)
+                            {gate_clause}
                             {stage_clause}
                           ORDER BY m.priority DESC, s.updated_at, s.asin
                           FOR UPDATE SKIP LOCKED
@@ -276,7 +366,7 @@ class PostgresWorkerStorage:
                         )
                         SELECT * FROM claimed
                         f"""
-                    params: list[Any] = [self.tenant_id, self.subject_type]
+                    params: list[Any] = [self.tenant_id, self.subject_type, *gate_params]
                     if stage:
                         params.append(stage)
                     params.extend([token, worker_id.strip(), seconds])
@@ -886,16 +976,18 @@ class PostgresWorkerStorage:
 
     def claim_refresh_request(self) -> dict[str, Any] | None:
         """Atomically claim the oldest queued refresh request in this scope."""
+        gate_clause, gate_params = self.release_gate_request_filter()
         with self._connect_factory() as conn:
             try:
                 with conn.cursor() as cursor:
                     cursor.execute(
-                        """
+                        f"""
                         WITH next_request AS (
-                          SELECT job_id
-                          FROM amazon_us.refresh_request
-                          WHERE tenant_id=%s AND marketplace='US' AND subject_type=%s AND status='queued'
-                          ORDER BY requested_at, job_id
+                          SELECT r.job_id
+                          FROM amazon_us.refresh_request r
+                          WHERE r.tenant_id=%s AND r.marketplace='US' AND r.subject_type=%s AND r.status='queued'
+                          {gate_clause}
+                          ORDER BY r.requested_at, r.job_id
                           FOR UPDATE SKIP LOCKED
                           LIMIT 1
                         )
@@ -905,7 +997,7 @@ class PostgresWorkerStorage:
                         WHERE r.job_id=n.job_id AND r.tenant_id=%s
                         RETURNING r.*
                         """,
-                        (self.tenant_id, self.subject_type, self.tenant_id),
+                        (self.tenant_id, self.subject_type, *gate_params, self.tenant_id),
                     )
                     request = self._as_dict(cursor.fetchone())
                 conn.commit()
@@ -918,10 +1010,11 @@ class PostgresWorkerStorage:
         """Read whether this Agent scope has claimable refresh work without taking a lease."""
         if self._recovery is not None:
             return self._recovery.due_count(1) > 0
+        gate_clause, gate_params = self.release_gate_request_filter()
         with self._connect_factory() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(
-                    """
+                    f"""
                     SELECT EXISTS (
                       SELECT 1
                       FROM amazon_us.refresh_request r
@@ -930,6 +1023,7 @@ class PostgresWorkerStorage:
                        AND s.asin=r.asin AND s.subject_type=r.subject_type
                       WHERE r.tenant_id=%s AND r.marketplace='US' AND r.subject_type=%s
                         AND r.status='queued'
+                        {gate_clause}
                         AND (r.reason NOT LIKE 'campaign:%%' OR NOT EXISTS (
                                SELECT 1 FROM amazon_us.collection_campaign_member cm
                                WHERE cm.tenant_id=r.tenant_id AND cm.refresh_job_id=r.job_id
@@ -943,7 +1037,7 @@ class PostgresWorkerStorage:
                         AND (s.status<>'running' OR s.lease_expires_at <= CURRENT_TIMESTAMP)
                     ) AS has_pending
                     """,
-                    (self.tenant_id, self.subject_type),
+                    (self.tenant_id, self.subject_type, *gate_params),
                 )
                 row = cursor.fetchone()
         if isinstance(row, Mapping):
@@ -958,10 +1052,11 @@ class PostgresWorkerStorage:
         limit = int(limit)
         if limit < 1 or limit > 5:
             raise ValueError("refresh task count limit must be between 1 and 5")
+        gate_clause, gate_params = self.release_gate_request_filter()
         with self._connect_factory() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(
-                    """
+                    f"""
                     SELECT COUNT(*) AS pending_count
                     FROM (
                       SELECT 1
@@ -971,6 +1066,7 @@ class PostgresWorkerStorage:
                        AND s.asin=r.asin AND s.subject_type=r.subject_type
                       WHERE r.tenant_id=%s AND r.marketplace='US' AND r.subject_type=%s
                         AND r.status='queued'
+                        {gate_clause}
                         AND (r.reason NOT LIKE 'campaign:%%' OR NOT EXISTS (
                                SELECT 1 FROM amazon_us.collection_campaign_member cm
                                WHERE cm.tenant_id=r.tenant_id AND cm.refresh_job_id=r.job_id
@@ -986,7 +1082,7 @@ class PostgresWorkerStorage:
                       LIMIT %s
                     ) claimable
                     """,
-                    (self.tenant_id, self.subject_type, limit),
+                    (self.tenant_id, self.subject_type, *gate_params, limit),
                 )
                 row = cursor.fetchone()
         if isinstance(row, Mapping):
@@ -1026,11 +1122,12 @@ class PostgresWorkerStorage:
         if seconds <= 0:
             raise ValueError("lease_seconds must be positive")
         token = uuid.uuid4().hex
+        gate_clause, gate_params = self.release_gate_request_filter()
         with self._connect_factory() as conn:
             try:
                 with conn.cursor() as cursor:
                     cursor.execute(
-                        """
+                        f"""
                         WITH next_request AS (
                           SELECT r.job_id,r.tenant_id,r.marketplace,r.asin,r.subject_type,s.status AS previous_status,
                                  am.priority,am.refresh_policy
@@ -1043,6 +1140,7 @@ class PostgresWorkerStorage:
                            AND am.asin=s.asin AND am.subject_type=s.subject_type
                           WHERE r.tenant_id=%s AND r.marketplace='US' AND r.subject_type=%s
                             AND r.status='queued'
+                            {gate_clause}
                             AND (r.reason NOT LIKE 'campaign:%%' OR NOT EXISTS (
                                    SELECT 1 FROM amazon_us.collection_campaign_member cm
                                    WHERE cm.tenant_id=r.tenant_id AND cm.refresh_job_id=r.job_id
@@ -1082,7 +1180,7 @@ class PostgresWorkerStorage:
                         SELECT c.*,m.job_id,n.priority,n.refresh_policy
                         FROM claimed c CROSS JOIN marked_request m CROSS JOIN next_request n
                         """,
-                        (self.tenant_id, self.subject_type, token, worker_id.strip(), seconds),
+                        (self.tenant_id, self.subject_type, *gate_params, token, worker_id.strip(), seconds),
                     )
                     task = self._as_dict(cursor.fetchone())
                 conn.commit()

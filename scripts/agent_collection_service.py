@@ -63,10 +63,14 @@ def build_worker_environment(dsn_env: str, config: dict[str, Any]) -> dict[str, 
 
 
 def worker_process_command(args: argparse.Namespace, worker_script: Path, output_dir: Path) -> list[str]:
-    return [sys.executable, str(worker_script), '--config', str(args.config.resolve()), '--output-dir',
+    command = [sys.executable, str(worker_script), '--config', str(args.config.resolve()), '--output-dir',
             str(output_dir), '--tenant-id', args.tenant_id, '--subject-type', args.subject_type,
             '--dsn-env', args.dsn_env, '--poll-seconds', str(args.poll_seconds),
             '--lease-seconds', str(args.lease_seconds)]
+    release_gate_id = str(getattr(args, "release_gate_id", None) or "").strip()
+    if release_gate_id:
+        command.extend(["--release-gate-id", release_gate_id])
+    return command
 
 def effective_worker_count(requested: int, capacity_fact: dict[str, Any] | None, config: dict[str, Any] | None = None, *, process_limit: int = 8) -> int:
     requested=max(1,int(requested)); process_limit=max(1,min(int(process_limit),64))
@@ -580,6 +584,7 @@ class AgentRefreshWorker:
                 "last_error": self._last_error,
                 "capacity_decision": dict(self._last_capacity_decision) if self._last_capacity_decision else None,
                 "worker_heartbeat_at": self._worker_heartbeat_at,
+                "release_gate_id": getattr(self.storage, "release_gate_id", None),
             }
 
     def _run(self) -> None:
@@ -726,6 +731,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--campaign-max-asins", type=int, default=5000)
     parser.add_argument("--worker-count", type=int, default=1)
     parser.add_argument("--worker-process-limit", type=int, default=8)
+    parser.add_argument("--release-gate-id")
     parser.add_argument("--console-port", type=int, default=0)
     parser.add_argument("--console-tenant-id", default="amazon_us_main")
     parser.add_argument("--operator-base-url")
@@ -779,7 +785,17 @@ def main(argv: list[str] | None = None) -> int:
     storage = PostgresWorkerStorage(
         dsn, tenant_id=args.tenant_id, subject_type=args.subject_type,
         default_lease_seconds=args.lease_seconds,
+        release_gate_id=args.release_gate_id,
     )
+    if args.release_gate_id:
+        try:
+            gate = storage.load_release_gate()
+        except Exception:
+            print("error: release gate is unavailable", file=sys.stderr)
+            return 2
+        if not gate or gate.get("status") != "active":
+            print("error: release gate is not active", file=sys.stderr)
+            return 2
     repository = PostgresCollectionRepository(dsn, tenant_id=args.tenant_id, subject_type=args.subject_type)
     fact_loader=getattr(storage,'load_latest_proxy_capacity',None)
     fact=fact_loader(max_age_seconds=int(config.get('proxy_canary_max_age_seconds') or 3600)) if callable(fact_loader) else None
@@ -798,7 +814,7 @@ def main(argv: list[str] | None = None) -> int:
             decision = pool_capacity_decision(current_fact, config, effective_workers=effective)
         except Exception:
             decision = {"status": "denied", "reason": "capacity_status_unavailable"}
-        return worker_pool_status(
+        status = worker_pool_status(
             worker,
             [],
             requested=args.worker_count,
@@ -807,6 +823,8 @@ def main(argv: list[str] | None = None) -> int:
             pool_snapshot=supervisor.status() if supervisor is not None else None,
             worker_heartbeat_timeout=args.lease_seconds,
         )
+        status["release_gate_id"] = str(args.release_gate_id or "").strip() or None
+        return status
     reporting_repository = WatchDeliveryRepository(dsn)
     server = None
     console_server = None

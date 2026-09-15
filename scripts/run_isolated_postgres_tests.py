@@ -43,6 +43,8 @@ def main() -> int:
                 root = Path(__file__).resolve().parents[1]
                 conn.execute((root / 'schema/postgres_schema.sql').read_text(encoding='utf-8'))
                 conn.execute((root / 'schema/migrations/20260904_recovery.sql').read_text(encoding='utf-8'))
+                conn.execute((root / 'schema/migrations/20260906_campaign.sql').read_text(encoding='utf-8'))
+                conn.execute((root / 'schema/migrations/20260915_release_gate.sql').read_text(encoding='utf-8'))
                 conn.execute((root / 'schema/migrations/20260904_bounded_consumer.sql').read_text(encoding='utf-8'))
                 conn.execute((root / 'schema/migrations/20260905_product_watch.sql').read_text(encoding='utf-8'))
                 conn.execute((root / 'schema/migrations/20260905_search_rank.sql').read_text(encoding='utf-8'))

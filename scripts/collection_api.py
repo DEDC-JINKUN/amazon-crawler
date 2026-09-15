@@ -724,6 +724,8 @@ class CollectionServer(ThreadingHTTPServer):
     def refresh_worker_ready(self, worker_status: dict[str, Any]) -> bool:
         if worker_status.get("state") != "running":
             return False
+        if worker_status.get("release_gate_id"):
+            return False
         if bool(worker_status.get("capacity_backpressure")):
             return False
         count_fields = ("requested_workers", "effective_workers", "alive_workers")

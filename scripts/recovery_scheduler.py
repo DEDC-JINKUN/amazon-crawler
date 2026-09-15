@@ -72,13 +72,15 @@ class RecoveryScheduler:
                     for key,value in dict(row).items() if key != 'lease_token'} if row else None
 
     def due_count(self, limit=5):
+        gate_clause, gate_params = self.storage.release_gate_request_filter()
         with self.storage._connect_factory() as conn, conn.cursor() as cur:
-            cur.execute('''SELECT COUNT(*) AS count FROM (
+            cur.execute(f'''SELECT COUNT(*) AS count FROM (
                 SELECT DISTINCT s.asin FROM amazon_us.refresh_request r
                 JOIN amazon_us.item_state s USING(tenant_id,marketplace,asin,subject_type)
                 LEFT JOIN amazon_us.recovery_job j ON j.tenant_id=s.tenant_id AND j.asin=s.asin
                   AND j.subject_type=s.subject_type AND j.stage='product'
                 WHERE r.tenant_id=%s AND r.subject_type=%s AND r.status='queued'
+                  {gate_clause}
                   AND (r.reason NOT LIKE 'campaign:%%' OR NOT EXISTS (
                          SELECT 1 FROM amazon_us.collection_campaign_member cm
                          WHERE cm.tenant_id=r.tenant_id AND cm.refresh_job_id=r.job_id
@@ -97,7 +99,9 @@ class RecoveryScheduler:
                   AND NOT EXISTS(SELECT 1 FROM amazon_us.recovery_egress e WHERE e.tenant_id=r.tenant_id
                        AND e.egress_id=%s AND (e.manually_paused OR e.paused_until>CURRENT_TIMESTAMP
                          OR (e.half_open AND e.lease_expires_at>CURRENT_TIMESTAMP)))
-                LIMIT %s) due''', (self.storage.tenant_id,self.storage.subject_type,self.egress_id,limit))
+                LIMIT %s) due''', (
+                    self.storage.tenant_id,self.storage.subject_type,*gate_params,self.egress_id,limit,
+                ))
             return int(cur.fetchone()['count'])
 
     def abort(self,evidence=None):
@@ -153,6 +157,8 @@ class RecoveryScheduler:
             raise ValueError('invalid_recovery_lease')
         tenant, subject = self.storage.tenant_id, self.storage.subject_type
         token = uuid.uuid4().hex
+        gate_request_clause, gate_request_params = self.storage.release_gate_request_filter()
+        gate_item_clause, gate_item_params = self.storage.release_gate_item_filter()
         with self.storage._connect_factory() as conn, conn.cursor() as cur:
             cur.execute('INSERT INTO amazon_us.recovery_egress(tenant_id,egress_id) VALUES (%s,%s) ON CONFLICT DO NOTHING', (tenant, self.egress_id))
             cur.execute('SELECT *,CURRENT_TIMESTAMP AS now FROM amazon_us.recovery_egress WHERE tenant_id=%s AND egress_id=%s FOR UPDATE', (tenant,self.egress_id))
@@ -166,18 +172,23 @@ class RecoveryScheduler:
                 return None
             first_pass = False
             if not refresh_only:
-                cur.execute('''SELECT EXISTS(SELECT 1 FROM amazon_us.item_state s
+                cur.execute(f'''SELECT EXISTS(SELECT 1 FROM amazon_us.item_state s
                     LEFT JOIN amazon_us.recovery_job j ON j.tenant_id=s.tenant_id AND j.asin=s.asin
                       AND j.subject_type=s.subject_type AND j.stage=s.task_stage
                     WHERE s.tenant_id=%s AND s.subject_type=%s AND s.marketplace='US'
+                      {gate_item_clause}
                       AND (%s::text[] IS NULL OR s.asin=ANY(%s))
                       AND (%s::text IS NULL OR s.task_stage=%s)
                       AND s.status IN ('pending','running','reviews_pending')
                       AND COALESCE(j.attempts,s.attempts,0)=0
                       AND (j.tenant_id IS NULL OR (NOT j.terminal AND j.deadline>CURRENT_TIMESTAMP))) AS pending''',
-                    (tenant,subject,getattr(self.storage,'_recovery_allowed_asins',None),getattr(self.storage,'_recovery_allowed_asins',None),stage,stage))
+                    (
+                        tenant,subject,*gate_item_params,
+                        getattr(self.storage,'_recovery_allowed_asins',None),
+                        getattr(self.storage,'_recovery_allowed_asins',None),stage,stage,
+                    ))
                 first_pass = bool(cur.fetchone()['pending'])
-            cur.execute('''
+            cur.execute(f'''
                 SELECT s.*,r.job_id,j.attempts AS recovery_attempts,am.priority,am.refresh_policy
                 FROM amazon_us.item_state s
                 JOIN amazon_us.asin_master am ON am.tenant_id=s.tenant_id AND am.marketplace=s.marketplace
@@ -188,6 +199,7 @@ class RecoveryScheduler:
                     SELECT job_id FROM amazon_us.refresh_request r WHERE r.tenant_id=s.tenant_id
                     AND r.marketplace=s.marketplace AND r.asin=s.asin AND r.subject_type=s.subject_type
                     AND r.status='queued'
+                    {gate_request_clause}
                     AND (r.reason NOT LIKE 'campaign:%%' OR NOT EXISTS (
                            SELECT 1 FROM amazon_us.collection_campaign_member cm
                            WHERE cm.tenant_id=r.tenant_id AND cm.refresh_job_id=r.job_id
@@ -201,6 +213,7 @@ class RecoveryScheduler:
                     ORDER BY requested_at,job_id LIMIT 1
                 ) r ON true
                 WHERE s.tenant_id=%s AND s.subject_type=%s AND s.marketplace='US'
+                  {gate_item_clause}
                   AND (%s::text[] IS NULL OR s.asin=ANY(%s))
                   AND NOT(s.asin=ANY(%s))
                   AND (%s::text IS NULL OR s.task_stage=%s)
@@ -214,7 +227,13 @@ class RecoveryScheduler:
                        AND j.request_count < j.max_requests AND j.browser_request_count<240 AND j.deadline>CURRENT_TIMESTAMP
                        AND (j.next_retry_at IS NULL OR j.next_retry_at<=CURRENT_TIMESTAMP)))
                 ORDER BY s.updated_at,s.asin FOR UPDATE OF s SKIP LOCKED LIMIT 1
-            ''', (refresh_only, tenant, subject,getattr(self.storage,'_recovery_allowed_asins',None),getattr(self.storage,'_recovery_allowed_asins',None), sorted(getattr(self.storage,'_recovery_excluded_asins',set())), stage, stage, first_pass, refresh_only, refresh_only))
+            ''', (
+                refresh_only,*gate_request_params,tenant,subject,*gate_item_params,
+                getattr(self.storage,'_recovery_allowed_asins',None),
+                getattr(self.storage,'_recovery_allowed_asins',None),
+                sorted(getattr(self.storage,'_recovery_excluded_asins',set())),
+                stage,stage,first_pass,refresh_only,refresh_only,
+            ))
             row = cur.fetchone()
             if not row:
                 self.last_denial = 'recovery_no_due_work'

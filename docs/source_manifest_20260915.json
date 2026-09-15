@@ -66,14 +66,18 @@
         {"path": "tests/test_woot_review_postgres.py", "sha256": "ee521a4a7c3dc0d7e541365854adcee345f2dcb8ed14b5c3580f1c7b011c607b", "bytes": 6641, "tracked": false},
         {
           "path": "tests/test_console_woot_reviews.py",
-          "sha256": "d1eabdcf5d065185673baf8faa42e2c9450723c9ec4bd575a9cc7dec97239286",
-          "bytes": 8813,
+          "sha256": "b0082861107d2bc73462cd167b7c3fde047695666f44c3d0be921bf03b477d95",
+          "bytes": 17509,
           "tracked": false,
-          "status": "source_changed_after_manifest",
+          "status": "accepted_as_part_of_review_console_slice",
+          "prior_observation": {
+            "sha256": "d1eabdcf5d065185673baf8faa42e2c9450723c9ec4bd575a9cc7dec97239286",
+            "bytes": 8813
+          },
           "current_source_observation": {
             "sha256": "b0082861107d2bc73462cd167b7c3fde047695666f44c3d0be921bf03b477d95",
             "bytes": 17509,
-            "decision": "stop_import_until_delta_provenance_review"
+            "decision": "import_only_with_all_review_console_slice_companions"
           }
         },
         {"path": "docs/woot_review_provider.md", "sha256": "692acfe1c3911bca281be4555b8fa54788c51b37d6b398d54a62ece3d82d0b25", "bytes": 5045, "tracked": false},
@@ -100,6 +104,29 @@
       "decision": "read_only_reference_not_source_branch"
     }
   ],
+  "reviewed_slices": [
+    {
+      "slice_id": "postgres-review-console-readonly-20260915",
+      "provenance": "D:/woring/爬虫/findings.md#2026-09-15-统一控制台接入评论数据",
+      "status": "local_review_repaired_not_yet_git_tracked",
+      "verification": {
+        "python": "47 passed",
+        "frontend_auth": "9 passed",
+        "javascript_syntax": "passed",
+        "independent_review": "P0=0/P1 repaired",
+        "live_evidence": "historical read-only observation; not repeated in Goal 1"
+      },
+      "decision": "import_as_one_indivisible_source_slice",
+      "files": [
+        {"path": "scripts/collection_console.py", "sha256": "b7b3d504a395f731cb8585bbfbc7c08c46772d4c7d38f0735d94a0792e7b88d4", "bytes": 106142},
+        {"path": "console/index.html", "sha256": "966dfcfb0a61269bad97166ad20d3bb2810135f8b544dce803cb76ad6a1f39af", "bytes": 13388},
+        {"path": "console/app.js", "sha256": "b289d235e31303c996cdcd2ad2d838d081d60682772c18f3351b0077f106d267", "bytes": 42135},
+        {"path": "run_console_windows.ps1", "sha256": "220694007aa51d4fc9c11f6e1e739419dc13a81931e556ffd52c501ef25b44a1", "bytes": 1724},
+        {"path": "docs/collection_console.md", "sha256": "438ce2213d1630a63e5db2aade9d1647003f3a600a9cd5bf409a270d1d35d6f2", "bytes": 5848},
+        {"path": "tests/test_console_woot_reviews.py", "sha256": "b0082861107d2bc73462cd167b7c3fde047695666f44c3d0be921bf03b477d95", "bytes": 17509}
+      ]
+    }
+  ],
   "excluded_patterns": [
     "outputs/**",
     "data/**",
@@ -116,7 +143,7 @@
     "No local Git ref for cloud v5 was found.",
     "The 170 working-tree entries in Amazon Scraping have not yet been classified one by one.",
     "The independent Woot files have not yet received their own clean-branch review.",
-    "tests/test_console_woot_reviews.py changed after the initial manifest and must be delta-reviewed before import.",
+    "The older 8813-byte tests/test_console_woot_reviews.py observation has no surviving source copy; the newer reviewed console slice supersedes it as an indivisible candidate.",
     "Cloud runtime and production database contents were not accessed during this inventory."
   ],
   "next_action": "create_clean_integration_worktree_from_target_repository_then_port_only_manifest_approved_slices"

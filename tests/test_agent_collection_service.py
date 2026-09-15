@@ -454,6 +454,23 @@ def test_campaign_child_receives_custom_dsn_and_minimal_environment(monkeypatch,
     assert command[command.index("--dsn-env")+1]=="CUSTOM_CAMPAIGN_DSN"
 
 
+def test_release_gate_id_is_propagated_only_to_explicitly_gated_workers(tmp_path):
+    service = load("agent_collection_service")
+    base = [
+        "--config", str(tmp_path / "worker.toml"),
+        "--output-dir", str(tmp_path),
+        "--tenant-id", "campaign-test",
+    ]
+    ordinary = service.build_parser().parse_args(base)
+    gated = service.build_parser().parse_args([*base, "--release-gate-id", "gate-fixed-20"])
+
+    ordinary_command = service.worker_process_command(ordinary, tmp_path / "campaign_worker_process.py", tmp_path)
+    gated_command = service.worker_process_command(gated, tmp_path / "campaign_worker_process.py", tmp_path)
+
+    assert "--release-gate-id" not in ordinary_command
+    assert gated_command[gated_command.index("--release-gate-id") + 1] == "gate-fixed-20"
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows file-sharing semantics")
 def test_campaign_worker_process_publishes_status_while_legacy_path_is_locked(monkeypatch, tmp_path):
     import ctypes

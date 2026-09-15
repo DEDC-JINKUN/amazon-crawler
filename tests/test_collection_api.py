@@ -547,6 +547,26 @@ class CollectionApiTests(unittest.TestCase):
         finally:
             server.shutdown(); server.server_close(); thread.join(timeout=2)
 
+    def test_release_gate_worker_is_not_advertised_for_new_campaign_submissions(self):
+        api = load("collection_api")
+        server = api.CollectionServer(
+            ("127.0.0.1", 0),
+            repository=object(),
+            refresh_worker_status=lambda: {
+                "state": "running",
+                "requested_workers": 3,
+                "effective_workers": 3,
+                "alive_workers": 3,
+                "capacity_backpressure": False,
+                "release_gate_id": "gate-fixed-20",
+            },
+        )
+        try:
+            self.assertFalse(server.can_accept_refresh())
+            self.assertFalse(server.refresh_worker_ready(server.refresh_worker_status()))
+        finally:
+            server.server_close()
+
     def test_unready_post_drain_has_a_fixed_wall_clock_deadline(self):
         api = load("collection_api")
 

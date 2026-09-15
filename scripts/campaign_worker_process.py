@@ -32,6 +32,7 @@ def _write_status(path: Path | None, status: dict, launch_token: str, sequence: 
         "last_error": _safe_error(status.get("last_error")),
         "heartbeat_at": datetime.now(timezone.utc).isoformat(),
         "worker_heartbeat_at": status.get("worker_heartbeat_at"),
+        "release_gate_id": status.get("release_gate_id"),
     }
     publish_status_snapshot(path, payload, launch_token=launch_token, sequence=sequence)
 
@@ -49,6 +50,7 @@ def main() -> int:
     parser.add_argument("--launch-token", required=True)
     parser.add_argument("--stop-file", type=Path)
     parser.add_argument("--worker-id")
+    parser.add_argument("--release-gate-id")
     args = parser.parse_args()
     dsn = os.environ.get(args.dsn_env, "").strip()
     if not dsn:
@@ -76,7 +78,12 @@ def main() -> int:
     storage = PostgresWorkerStorage(
         dsn, args.tenant_id, args.subject_type,
         default_lease_seconds=args.lease_seconds,
+        release_gate_id=args.release_gate_id,
     )
+    if args.release_gate_id:
+        gate = storage.load_release_gate()
+        if not gate or gate.get("status") != "active":
+            raise RuntimeError("release gate is not active")
     worker_id = str(args.worker_id or f"agent-refresh-{os.getpid()}")
     if not re.fullmatch(r"agent-refresh-(?:[a-f0-9]{32}|[0-9]+)", worker_id):
         raise RuntimeError("worker owner identity is invalid")
