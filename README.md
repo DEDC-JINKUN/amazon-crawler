@@ -13,6 +13,12 @@
 本机`main`已包含：[美国站采集与简明控制台](docs/develop_us_marketplace_20260904.md)。
 `develop`继续用于日常开发；本次没有更新生产配置或数据库，也尚未远程部署。
 
+## 独立 Woot 评论源码（未部署）
+
+本 integration 分支同时跟踪独立 Woot 评论 Provider、Worker、`amazon_reviews` PostgreSQL 存储与只读 Console。它与PDP保持两套schema、任务、租约、状态和证据：Woot不访问Amazon页面、不占用PDP代理、不写`amazon_us.item_state`或`amazon_us.product_snapshot`。接口与数据合同见[Woot Provider](docs/woot_review_provider.md)、[Woot PostgreSQL](docs/woot_review_postgres.md)和[Collection Console](docs/collection_console.md)。
+
+这一阶段只建立可重建源码和只读结果面；没有Review Campaign或安全stop接口，因此不得把评论Worker直接包装成团队网页的开始/停止功能。提交代码也不表示已迁移生产数据或完成云端部署。
+
 本地测试结果可用 `scripts/evidence_health.py` 检查源 HTML 存在性和哈希；用 `scripts/collection_metrics.py` 按 `run_id` 查看请求数、流量和有效吞吐。
 代理流量和成本实测见 [`docs/traffic_cost_validation.md`](docs/traffic_cost_validation.md)，并用 `scripts/traffic_cost_report.py` 结合代理商后台的用量差值出具报告。
 付费出口批量前探针见 [`docs/egress_probe.md`](docs/egress_probe.md)。

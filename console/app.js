@@ -1,5 +1,5 @@
 const initialTenant = new URL(window.location.href).searchParams.get('tenant') || '';
-const state = { overview: null, batches: [], operations: [], items: [], tenant: initialTenant, selectedRun: '', runRequest: 0, runSelectionCleared: false, timer: null, loading: false, apiKey: '', authCancelled: false };
+const state = { overview: null, batches: [], operations: [], items: [], reviewOverview: null, reviewItems: [], reviewOffset: 0, reviewLimit: 50, reviewTotal: 0, reviewRequest: 0, tenant: initialTenant, selectedRun: '', runRequest: 0, runSelectionCleared: false, timer: null, loading: false, apiKey: '', authCancelled: false };
 const $ = (id) => document.getElementById(id);
 const number = (value) => new Intl.NumberFormat('zh-CN').format(Number(value || 0));
 const dateTime = (value) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
@@ -21,12 +21,13 @@ const text = (tag, value, className = '') => {
 const clear = (node) => { while (node.firstChild) node.removeChild(node.firstChild); };
 
 function statusLabel(value) {
-  return ({running:'Running',starting:'Starting',completed:'Complete',succeeded:'Collected',
+  return ({running:'Running',starting:'Starting',completed:'Complete',success:'Collected',succeeded:'Collected',
     failed:'Failed',blocked:'Needs attention',quality_failed:'Completed with issues',
     interrupted:'Interrupted',pending:'Pending',reviews_pending:'Reviews pending',
     product_done:'Collected',partial:'Partial',full:'Qualified',invalid:'Invalid',unknown:'Unknown',
     legacy_complete:'Complete',legacy_blocked:'Needs attention',queued:'Queued',claimed:'Running',
-    not_started:'Not started',skipped:'Skipped'})[value] || 'Unknown';
+    not_started:'Not started',skipped:'Skipped',source_limited:'Source limited',retryable:'Retryable',
+    cancelled:'Cancelled'})[value] || 'Unknown';
 }
 function issueLabel(value) {
   const code = String(value || '');
@@ -78,6 +79,7 @@ function durationLabel(value) {
 }
 function sourceLabel(value) { return ({http_html:'HTTP',selenium_dom:'Browser',selenium:'Browser'})[value] || 'Unknown'; }
 function priceLabel(value) { return ({available:'Available',unavailable:'Unavailable',missing:'—',unknown:'—'})[value] || '—'; }
+function coverageLabel(value) { return ({complete:'Complete',no_reviews_verified:'No reviews verified',partial:'Partial',source_limited:'Source limited',blocked:'Blocked'})[value] || 'Unknown'; }
 function priceValue(item) { return String(item.price || '').trim() || priceLabel(item.price_status); }
 function resultClass(item) { return ['blocked','failed'].includes(item.outcome || item.status) ? 'result-error' : (item.context_quality === 'partial' ? 'result-warning' : 'result-ok'); }
 function renderIssues(items) {
@@ -123,6 +125,8 @@ async function request(path) {
 
 function selectTenant(tenantId, refreshNow = true) {
   state.tenant = tenantId;
+  state.reviewOffset = 0;
+  state.reviewRequest += 1;
   state.selectedRun = '';
   state.runRequest += 1;
   state.runSelectionCleared = false;
@@ -349,6 +353,128 @@ function renderItems(data) {
   $('taskSummary').textContent = `显示 ${number(state.items.length)} / ${number(data.total)} 条`;
 }
 
+function renderReviewOverview(data) {
+  state.reviewOverview = data;
+  const available = data?.availability === 'available';
+  const summary = data?.summary || {};
+  const derived = data?.derived || {};
+  const sourceDescription = data?.source_type === 'postgres'
+    ? 'PostgreSQL评论库 · 只读查询'
+    : 'Woot只读聚合 · manifest已校验';
+  $('reviewSourceStatus').textContent = available
+    ? `${sourceDescription} · ${number(derived.zero_review_asins)}个ASIN当前为0条`
+    : `评论数据不可用：${data?.error_code || 'not configured'}`;
+  $('reviewObservedAt').textContent = dateTime(data?.observed_at);
+  $('reviewAsinsMetric').textContent = available ? `${number(summary.successful_asins)} / ${number(summary.source_unique_asins)}` : '—';
+  $('reviewAsinsSub').textContent = available ? `${number(summary.pending_asins)}待处理 · ${number(summary.failed_asins)}失败` : '独立于商品进度';
+  $('reviewCountMetric').textContent = available ? number(summary.unique_reviews) : '—';
+  $('reviewMediaMetric').textContent = available ? `${number(derived.with_images)} / ${number(derived.with_videos)}` : '—';
+  $('reviewMediaSub').textContent = available ? `带图片 / 带视频 · ${number(derived.verified_reviews)} Verified` : '图片 / 视频';
+  const coverage = summary.coverage_status_counts || {};
+  $('reviewCoverageMetric').textContent = available ? `${number(coverage.partial)} / ${number(coverage.source_limited)}` : '—';
+  $('reviewCoverageSub').textContent = available ? `Partial / Source limited · ${number(summary.claim_100_percent_asins)}已证明完整` : '不把partial写成完整';
+}
+
+function renderReviewItems(data) {
+  state.reviewItems = data.items || [];
+  state.reviewTotal = Number(data.total || 0);
+  state.reviewOffset = Number(data.offset || 0);
+  const body = $('reviewRows'); clear(body);
+  for (const item of state.reviewItems) {
+    const row = document.createElement('tr'); row.dataset.asin = item.asin;
+    const statusCell = document.createElement('td'); statusCell.append(text('span', statusLabel(item.status), `status-badge ${item.status}`));
+    const coverageCell = document.createElement('td'); coverageCell.append(text('span', coverageLabel(item.coverage_status), `coverage-badge ${item.coverage_status}`));
+    row.append(taskCell(item.asin, 'asin'), statusCell, coverageCell, taskCell(number(item.fetched_unique_count)), taskCell(issueLabel(item.error_code)));
+    row.addEventListener('click', () => openReviewDetail(item.asin)); body.append(row);
+  }
+  if (!state.reviewItems.length) {
+    const row = document.createElement('tr'); const cell = taskCell(data.availability === 'available' ? '没有符合条件的评论ASIN' : '评论数据不可用', 'muted'); cell.colSpan = 5; row.append(cell); body.append(row);
+  }
+  const end = Math.min(state.reviewOffset + state.reviewItems.length, state.reviewTotal);
+  $('reviewTableSummary').textContent = state.reviewTotal ? `${number(state.reviewOffset + 1)}–${number(end)} / ${number(state.reviewTotal)}` : '0条';
+  $('reviewPrevButton').disabled = state.reviewOffset <= 0;
+  $('reviewNextButton').disabled = state.reviewOffset + state.reviewItems.length >= state.reviewTotal;
+}
+
+async function loadReviewItems(reset = false) {
+  if (reset) state.reviewOffset = 0;
+  const requestId = ++state.reviewRequest;
+  const tenantAtStart = state.tenant;
+  const offset = state.reviewOffset;
+  const params = new URLSearchParams({ limit: String(state.reviewLimit), offset: String(offset) });
+  const term = $('reviewQueryInput').value.trim();
+  const coverage = $('reviewCoverageFilter').value;
+  if (term) params.set('q', term);
+  if (coverage) params.set('coverage', coverage);
+  const data = await request(`/api/reviews/items?${params.toString()}`);
+  if (requestId !== state.reviewRequest || tenantAtStart !== state.tenant) return;
+  renderReviewItems(data);
+}
+
+async function loadReviewSurface() {
+  const tenantAtStart = state.tenant;
+  try {
+    const overview = await request('/api/reviews/overview');
+    if (tenantAtStart !== state.tenant) return;
+    renderReviewOverview(overview);
+    await loadReviewItems();
+  } catch (error) {
+    if (tenantAtStart !== state.tenant) return;
+    renderReviewOverview({ availability: 'unavailable', error_code: error.message });
+    renderReviewItems({ availability: 'unavailable', total: 0, limit: state.reviewLimit, offset: 0, items: [] });
+  }
+}
+
+function reviewCard(review) {
+  const item = text('article', '', 'review-card');
+  item.append(text('strong', `${review.rating || '—'}★ · ${review.title || '无标题'}`));
+  item.append(text('p', `${review.author || '匿名'} · ${review.review_date || '日期未知'} · ${review.verified === true ? 'Verified' : '未标记Verified'}${review.vine === true ? ' · Vine' : ''} · Helpful ${number(review.helpful_votes)}`, 'review-meta'));
+  item.append(text('p', review.body || '无正文', 'review-body'));
+  const media = text('div', '', 'review-media-links');
+  for (const url of review.review_images || []) media.append(linkItem(typeof url === 'string' ? url : url?.url || url?.src, '评论图片链接'));
+  for (const value of review.review_videos || []) media.append(linkItem(typeof value === 'string' ? value : value?.url || value?.src, '评论视频链接'));
+  if (media.childNodes.length) item.append(media);
+  return item;
+}
+
+async function loadReviewPage(asin, container, offset = 0) {
+  const requestId = String(Number(container.dataset.requestId || 0) + 1);
+  container.dataset.requestId = requestId;
+  clear(container); container.append(text('p', '正在读取评论…', 'muted'));
+  try {
+    const data = await request(`/api/reviews/${encodeURIComponent(asin)}?limit=20&offset=${Math.max(0, offset)}`);
+    if (container.dataset.requestId !== requestId) return;
+    clear(container);
+    if (data.availability !== 'available') { container.append(text('p', `评论数据不可用：${data.error_code || 'unknown'}`, 'muted')); return; }
+    const status = data.status || {};
+    container.append(fieldGrid({ status: statusLabel(status.status || 'not_started'), coverage_status: coverageLabel(status.coverage_status), reviews: data.total, provider: data.provider, identity: 'fallback_hash' }));
+    const list = text('div', '', 'review-card-list');
+    for (const review of data.items || []) list.append(reviewCard(review));
+    if (!(data.items || []).length) list.append(text('p', '该ASIN当前没有可见文字评论', 'muted'));
+    container.append(list);
+    const controls = text('div', '', 'review-pagination');
+    const label = text('span', data.total ? `${number(data.offset + 1)}–${number(Math.min(data.offset + data.items.length, data.total))} / ${number(data.total)}` : '0条', 'muted');
+    const buttons = text('div');
+    const previous = text('button', '上一页', 'ghost-button'); previous.type = 'button'; previous.disabled = data.offset <= 0; previous.addEventListener('click', () => loadReviewPage(asin, container, Math.max(0, data.offset - data.limit)));
+    const next = text('button', '下一页', 'ghost-button'); next.type = 'button'; next.disabled = data.next_offset === null; next.addEventListener('click', () => loadReviewPage(asin, container, data.next_offset || 0));
+    buttons.append(previous, next); controls.append(label, buttons); container.append(controls);
+  } catch (error) {
+    if (container.dataset.requestId !== requestId) return;
+    clear(container); container.append(text('p', `评论读取失败：${error.message}`, 'error-banner'));
+  }
+}
+
+function reviewDetailSection(asin) {
+  const section = detailSection('Woot独立评论');
+  const container = text('div', '', 'review-detail');
+  section.append(container); loadReviewPage(asin, container, 0); return section;
+}
+
+function openReviewDetail(asin) {
+  const drawer = $('detailDrawer'); drawer.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); $('drawerBackdrop').hidden = false;
+  $('detailTitle').textContent = asin; const root = $('detailBody'); clear(root); root.append(reviewDetailSection(asin));
+}
+
 function detailSection(titleValue, collapsed = false) {
   const section = text(collapsed ? 'details' : 'section', '', 'detail-section');
   section.append(text(collapsed ? 'summary' : 'h3', titleValue)); return section;
@@ -358,7 +484,7 @@ function fieldGrid(values) {
   for (const [key, value] of Object.entries(values)) {
     const label = ({title:'商品名称',brand:'品牌',price:'价格',price_status:'价格状态',availability:'库存状态',
       rating:'评分',reviews:'评论数',status:'状态',stage:'阶段',attempts:'尝试次数',last_error:'具体问题',
-      block_reason:'访问问题',updated_at:'更新时间'})[key] || key;
+      block_reason:'访问问题',updated_at:'更新时间',coverage_status:'覆盖状态',provider:'评论来源',identity:'评论标识'})[key] || key;
     const node = text('div', '', 'detail-field'); node.append(text('span', label), text('strong', value ?? '—')); grid.append(node);
   }
   return grid;
@@ -387,7 +513,8 @@ async function openDetail(asin) {
     const topReviews = detailSection(`商品页 Top Reviews · ${(data.top_reviews || []).length}`); for (const review of data.top_reviews || []) { const item = text('div', '', 'detail-item'); item.append(text('strong', review.title || review.rating || 'Review'), text('p', review.body || review.text || JSON.stringify(review))); topReviews.append(item); } if (!(data.top_reviews || []).length) topReviews.append(text('p', '无商品页评论摘要', 'muted')); root.append(topReviews);
     const evidence = detailSection(`采集记录与技术详情 · ${(data.evidence || []).length}`, true); for (const value of data.evidence || []) { const traffic = value.context_json?.traffic || {}; const bridge = value.context_json?.cookie_bridge || {}; const proxyPool = value.context_json?.proxy_session_pool || {}; const proxySessions = proxyPool.sessions || []; const proxyTotals = proxySessions.reduce((sum, item) => { for (const key of ['request_count', 'completed', 'variant_redirect', 'failed', 'blocked', 'bytes', 'latency_ms']) sum[key] = (sum[key] || 0) + Number(item[key] || 0); return sum; }, {}); evidence.append(fieldGrid({ outcome: value.outcome, source: value.source_type, proxy_session: proxyPool.current_session_id, proxy_mode: proxyPool.mode, proxy_requests: proxyTotals.request_count, proxy_completed: proxyTotals.completed, proxy_variant: proxyTotals.variant_redirect, proxy_failed: proxyTotals.failed, proxy_blocked: proxyTotals.blocked, proxy_bytes: proxyTotals.bytes, proxy_latency_ms: proxyTotals.latency_ms, proxy_quarantines: proxySessions.filter((item) => item.quarantine_reason).map((item) => `${item.session_id}:${item.quarantine_reason}`).join(', '), proxy_circuit: proxyPool.circuit_open_reason, proxy_unrequested: proxyPool.unrequested_count, context_quality: value.context_json?.context_quality, identity_relation: value.context_json?.identity ? `${value.context_json.identity.requested_asin} → ${value.context_json.identity.observed_asin} · parent ${value.context_json.identity.parent_asin}` : null, postal_confirmed: value.context_json?.postal_confirmed, expected_postal: value.context_json?.expected_postal, observed_postal: value.context_json?.observed_postal, location_sensitive_fields_unverified: (value.context_json?.location_sensitive_fields_unverified || []).join(', '), fallback_reason: value.context_json?.fallback_reason, fallback_reasons: (value.context_json?.fallback_reasons || []).join(', '), cookie_bridge: bridge.status, cookie_bridge_error: bridge.error_code, http: value.http_status, error: value.error_code, block: value.block_reason, retrieved: dateTime(value.retrieved_at), raw_html_path: value.raw_html_path, http_compressed_bytes: traffic.http_compressed_response_bytes, firefox_main_bytes: traffic.firefox_main_document_bytes ?? 'unknown', firefox_subresource_bytes: traffic.firefox_subresource_bytes ?? 'unknown' })); } root.append(evidence);
     const content = detailSection(`内容模块 · ${(data.content_modules || []).length}`); content.append(jsonBlock(data.content_modules || [])); root.append(content);
-    const reviews = detailSection('独立评论状态'); reviews.append(jsonBlock({ summary: data.review_summary, records: data.reviews || [] })); root.append(reviews);
+    const reviews = detailSection('Amazon页面评论状态'); reviews.append(jsonBlock({ summary: data.review_summary, records: data.reviews || [] })); root.append(reviews);
+    root.append(reviewDetailSection(asin));
   } catch (error) { clear(root); root.append(text('p', `详情读取失败：${error.message}`, 'error-banner')); }
 }
 
@@ -414,6 +541,7 @@ function renderRecovery(data) {
 async function refresh() {
   if (state.loading) return; state.loading = true;
   try {
+    await loadReviewSurface();
     await loadBatches();
     if (!state.tenant) throw new Error('PostgreSQL中没有可见tenant');
     const [overview, recovery] = await Promise.all([request('/api/overview'), request('/api/recovery'), loadItems(), loadRuns(), loadOperations()]);
@@ -438,6 +566,9 @@ $('refreshButton').addEventListener('click', refresh);
 $('tenantSelector').addEventListener('change', (event) => selectTenant(event.target.value));
 $('runSelector').addEventListener('change', (event) => selectRun(event.target.value));
 $('filterForm').addEventListener('submit', (event) => { event.preventDefault(); loadItems().catch((error) => { $('errorBanner').textContent = error.message; $('errorBanner').hidden = false; }); });
+$('reviewFilterForm').addEventListener('submit', (event) => { event.preventDefault(); loadReviewItems(true).catch((error) => { $('reviewSourceStatus').textContent = `评论状态读取失败：${error.message}`; }); });
+$('reviewPrevButton').addEventListener('click', () => { state.reviewOffset = Math.max(0, state.reviewOffset - state.reviewLimit); loadReviewItems().catch((error) => { $('reviewSourceStatus').textContent = error.message; }); });
+$('reviewNextButton').addEventListener('click', () => { state.reviewOffset += state.reviewLimit; loadReviewItems().catch((error) => { $('reviewSourceStatus').textContent = error.message; }); });
 $('apiKeyButton').addEventListener('click', () => {
   if (promptForApiKey(true)) refresh();
   else {

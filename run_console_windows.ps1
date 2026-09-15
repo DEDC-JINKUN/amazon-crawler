@@ -3,6 +3,9 @@ param(
     [string]$TenantId,
     [Parameter(Mandatory = $true)]
     [string]$RawHtmlDir,
+    [string]$WootReviewDir = '',
+    [ValidateSet('auto', 'postgres', 'files', 'disabled')]
+    [string]$ReviewSource = 'auto',
     [int]$Port = 8770,
     [switch]$RequireApiKey
 )
@@ -30,10 +33,15 @@ try {
         '--tenant-id', $TenantId,
         '--raw-html-dir', $resolvedRawHtml,
         '--host', '127.0.0.1',
-        '--port', $Port
+        '--port', $Port,
+        '--review-source', $ReviewSource
     )
     if ($RequireApiKey) {
         $arguments += '--require-api-key'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($WootReviewDir)) {
+        $resolvedWootReviews = (Resolve-Path (Join-Path $projectRoot $WootReviewDir)).Path
+        $arguments += @('--woot-review-dir', $resolvedWootReviews)
     }
     & $python @arguments
 }

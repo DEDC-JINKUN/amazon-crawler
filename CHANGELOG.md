@@ -10,6 +10,8 @@
 
 ## Unreleased
 
+- 将独立Woot评论链路纳入可重建源码：Provider、批次/Worker、`amazon_reviews` PostgreSQL存储、迁移、导入聚合、状态工具、离线测试和文档全部Git跟踪；它不调用Amazon PDP/评论页、不使用PDP代理或租约、不写`amazon_us.item_state/product_snapshot`，401/403/429与来源受限保持fail closed。
+- Console新增`amazon_reviews`只读总览、ASIN状态和有界评论分页；PostgreSQL评论面故障不阻断PDP，只读文件fallback要求显式tenant。当前仍不提供Review start/stop路由，也未启动Worker或部署生产。
 - Agent 业务命令现在自动确保本机受控服务已启动；Agent refresh Worker 与普通 Worker 统一通过同一 adapter factory，配置时均使用有界 `ProxySessionPool`，同一5-ASIN批量在一个 runner run 内执行。运行时组合指纹覆盖 Worker、代理池、API、存储和配置，受控旧版本可安全替换且未知监听器保持 fail closed；liveness/readiness 分离后，采集熔断不再阻断历史快照和 job 查询。
 - 新增 DataImpulse 有界粘滞会话池：每会话独立 CookieJar/opener，按 ASIN 预算主动换槽，访问控制隔离、单 ASIN 最多一次新会话重试、连续/滑窗/容量熔断，并在 evidence、Console 和 receipt 中保留脱敏会话归因与跨槽流量。
 - 有界会话池的批准端口上限由20提高到40；34槽×3 ASIN 的100商品离线模拟全部完成且保留100条evidence，超过40仍启动前拒绝。

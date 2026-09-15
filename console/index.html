@@ -111,6 +111,44 @@
     </section>
 
 
+    <section class="panel review-panel" id="reviewSummaryPanel">
+      <div class="panel-title responsive-title">
+        <div><h2>独立评论采集</h2><p id="reviewSourceStatus" class="muted">正在读取评论数据…</p></div>
+        <span id="reviewObservedAt" class="muted">—</span>
+      </div>
+      <div class="review-metric-grid" aria-label="独立评论指标">
+        <article class="metric-card success"><span>ASIN已完成</span><strong id="reviewAsinsMetric">—</strong><small id="reviewAsinsSub">独立于商品进度</small></article>
+        <article class="metric-card"><span>文字评论</span><strong id="reviewCountMetric">—</strong><small>Woot当前可见评论</small></article>
+        <article class="metric-card"><span>评论媒体</span><strong id="reviewMediaMetric">—</strong><small id="reviewMediaSub">图片 / 视频</small></article>
+        <article class="metric-card warning"><span>覆盖状态</span><strong id="reviewCoverageMetric">—</strong><small id="reviewCoverageSub">不把partial写成完整</small></article>
+      </div>
+      <div class="panel-title responsive-title review-table-title">
+        <div><h3>ASIN评论状态</h3></div>
+        <form id="reviewFilterForm" class="filters">
+          <input id="reviewQueryInput" type="search" placeholder="搜索评论ASIN">
+          <select id="reviewCoverageFilter" aria-label="按评论覆盖状态筛选">
+            <option value="">全部覆盖状态</option>
+            <option value="partial">Partial</option>
+            <option value="source_limited">Source limited</option>
+            <option value="complete">Complete</option>
+            <option value="no_reviews_verified">No reviews verified</option>
+          </select>
+          <button class="ghost-button" type="submit">筛选</button>
+        </form>
+      </div>
+      <div class="table-wrap review-table-wrap">
+        <table>
+          <thead><tr><th>ASIN</th><th>采集状态</th><th>覆盖状态</th><th>文字评论</th><th>错误</th></tr></thead>
+          <tbody id="reviewRows"><tr><td colspan="5" class="muted">正在读取评论状态…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="review-pagination">
+        <p id="reviewTableSummary" class="muted table-summary">—</p>
+        <div><button id="reviewPrevButton" class="ghost-button" type="button">上一页</button><button id="reviewNextButton" class="ghost-button" type="button">下一页</button></div>
+      </div>
+    </section>
+
+
     <section class="panel tasks-panel">
       <div class="panel-title responsive-title">
         <div><h2>任务与异常</h2></div>
