@@ -46,4 +46,3 @@ ALTER TABLE amazon_us.review_record
 
 CREATE INDEX IF NOT EXISTS review_record_source_idx
 ON amazon_us.review_record(tenant_id, marketplace, asin, subject_type, source_type);
-

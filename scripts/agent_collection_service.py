@@ -75,13 +75,13 @@ def effective_worker_count(requested: int, capacity_fact: dict[str, Any] | None,
         for count in range(upper, 0, -1):
             decision = evaluate_capacity_fact(
                 capacity_fact, config,
-                requested_actions=MAX_AGENT_REFRESH_BATCH * count,
+                requested_actions=count,
             )
             if decision.get("status") == "allowed":
                 return count
         return 1
     unique=(capacity_fact or {}).get('unique_egress_count')
-    try: slots_per_worker=reservation_slots_for(config or {},MAX_AGENT_REFRESH_BATCH) if config else 2
+    try: slots_per_worker=reservation_slots_for(config or {},1) if config else 2
     except (TypeError,ValueError): slots_per_worker=2
     capacity_limit=max(1,int(unique)//max(1,slots_per_worker)) if type(unique) is int and unique>0 else 1
     return min(requested,process_limit,capacity_limit)
@@ -91,7 +91,7 @@ def pool_capacity_decision(fact: dict[str, Any] | None, config: dict[str, Any], 
     return evaluate_capacity_fact(
         fact,
         config,
-        requested_actions=MAX_AGENT_REFRESH_BATCH * max(1, int(effective_workers)),
+        requested_actions=max(1, int(effective_workers)),
     )
 
 

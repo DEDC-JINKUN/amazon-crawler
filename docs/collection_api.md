@@ -213,7 +213,7 @@ Content-Type: application/json
 {"requested_by":"agent-name","reason":"price_is_stale"}
 ```
 
-HTTP线程只负责登记队列并返回 `202 Accepted`；真实采集由后台受控 Worker 执行。API仍可原子提交最多5条，但每个后台Worker的容量批次最多领取3条，容量按1–3条实际待领取数预约，减小坏会话的连带损失。每个Worker在独立子进程中创建自己的adapter/代理子池，数据库reservation保证slot不重叠；一个子Worker全局熔断不会终止其他健康子进程，但服务整体readiness仍fail closed并拒绝新campaign。PostgreSQL claim携带`priority/refresh_policy`：只有`own_core`或`competitor_core`可使用一次有界Firefox补全；普通/候选任务的transport、访问阻断、字段缺口或上下文不一致直接记录并进入既有恢复/终态，不启动Firefox。商品广度每ASIN新会话，同ASIN评论分页粘滞。
+HTTP线程只负责登记队列并返回 `202 Accepted`；真实采集由后台受控 Worker 执行。API仍可原子提交最多5条，但每个后台Worker的容量批次最多领取3条，容量按1–3条实际待领取数预约，减小坏会话的连带损失。启动/readiness只要求每个Worker至少有1条action的授权容量；满批容量不足时实际runner继续按pending数和原子reservation缩小，不因“凑不满3条”让小队列503闲置。每个Worker在独立子进程中创建自己的adapter/代理子池，数据库reservation保证slot不重叠；一个子Worker全局熔断不会终止其他健康子进程，但服务整体readiness仍fail closed并拒绝新campaign。PostgreSQL claim携带`priority/refresh_policy`：只有`own_core`或`competitor_core`可使用一次有界Firefox补全；普通/候选任务的transport、访问阻断、字段缺口或上下文不一致直接记录并进入既有恢复/终态，不启动Firefox。商品广度每ASIN新会话，同ASIN评论分页粘滞。
 
 若Worker在领取后发生未预期异常，服务按固定脱敏原因将该Worker仍持有的refresh job置为`failed`，释放对应item lease并写状态历史；异常正文不进入API响应或健康状态。Agent客户端只允许HTTP loopback基址，拒绝外部主机、URL内嵌凭据、路径、query、fragment和HTTP重定向，避免scoped key外发。
 

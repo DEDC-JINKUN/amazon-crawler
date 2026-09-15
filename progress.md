@@ -121,3 +121,4 @@
 - 两项扩大回归失败已分别关闭：HTTP repository协议夹具补成员视图关键字后1 passed；PowerShell夹具确认无监听/进程残留后独立重跑1 passed，未修改无关产品路径。Phase 2代码/文档可冻结，完整全套留到最终门禁。
 - Phase 3/4完成：每Worker批次5→3红绿；单child blocked不终止其他健康child回归通过；普通claim SQL和真实recovery claim均携带核心policy。非核心transport/access/context三类不启Firefox、核心context仍一次回退的4项策略测试通过；Agent/低流量/代理池/存储/恢复相关227 passed，独立recovery PG claim 1 passed并fast shutdown。
 - Phase 5完成：非核心own/competitor cadence红绿改为168小时；新增外部销量批次/指标/竞品映射迁移和CLI，纯解析1 passed、隔离PG导入幂等/冲突/分层2 passed并fast shutdown。Phase 6离线适配器5项红绿通过，Woot仍未接生产、未发真实请求。
+- Phase 7第一轮门禁：完整非PG 774 passed/58 skipped；Operator专用PG 29 passed。Recovery/Campaign/External metrics/Postgres Worker组合43项中42 passed，Agent E2E在Worker startup race得到预期503；测试显式等待running，并把readiness从静态满3条改为每Worker至少1条、实际批次动态缩放后，Agent单元53 passed、E2E定点1 passed。待组合PG复跑和独立review。

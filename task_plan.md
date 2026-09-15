@@ -136,6 +136,8 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 | 批次上限5→3后Agent服务8项统一报`AssertionError` | 1 | 根因是共享测试Storage仍硬编码limit=5；同步协议夹具为3后Agent服务52 passed，产品代码无额外修复。 |
 | 核心context正向测试初版复用了必然抛错的`PostalPartialAdapter.fetch_browser` | 1 | 在核心测试子类显式返回US/USD HTML；策略实现未改，核心/非核心对照2 passed。 |
 | external metrics隔离PG首次重导把默认tuple row直接`dict()` | 1 | 默认连接改用psycopg `dict_row`；测试事务已finally清理且55444关闭，随后重跑完整导入/分层场景。 |
+| 隔离PG Agent E2E在Worker仍`starting`时立即POST得到503 | 2 | 同时修正静态满批容量门禁为每Worker至少1条；测试在业务请求前显式等待并断言Worker running，保留API启动期fail-closed语义后定点重跑。 |
+| Agent E2E新增显式ready等待后缺少`time`导入 | 1 | 仅补测试模块import，未改产品路径；55444已fast shutdown后重新定点运行。 |
 
 ## 2026-09-15 全量运行阻断修复
 

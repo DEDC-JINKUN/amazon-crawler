@@ -10,6 +10,7 @@
 
 ## Unreleased
 
+- Worker pool启动/readiness容量由“每Worker必须能跑满3条”改为“每Worker至少授权1条”，实际1–3条批次继续由pending数、capacity fact与原子reservation动态缩放；小队列不再因缺少满批slot而503闲置。
 - 新增source-separated外部销量CSV通道和`$2000`销量×自采USD价格分层：批次SHA256幂等、冲突拒绝、缺值跳过、竞品显式继承核心层级，非核心PDP统一168小时。新增未接生产的Woot评论实验适配器；透明UA、403/HTML/坏JSON fail closed、稳定复合键和`woot_ajax`来源列均有离线测试。
 - 每个Agent Worker容量批次由5条收紧为最多3条，三Worker所需并发slot随实际批次计算；单个子Worker全局熔断不终止其他健康子进程。PostgreSQL claim现在携带`asin_master.priority/refresh_policy`，`own_normal/competitor_normal/candidate`的transport、访问阻断、字段或上下文缺口不启动Firefox，只有显式`own_core/competitor_core`保留一次有界浏览器补全。
 - Campaign读取默认返回数据库聚合汇总，不再JOIN并序列化全部1093个成员；显式`members=page&offset=&limit=`提供最多100条分页，内部Operator客户端使用`members=all`保持现有完整投影。隔离PostgreSQL 1093成员、20次汇总p95门禁≤2秒通过。

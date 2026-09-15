@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 import urllib.request
 import uuid
 
@@ -517,6 +518,10 @@ def test_agent_api_refresh_is_consumed_and_returned_from_real_postgres():
     background.start()
     thread.start()
     try:
+        ready_deadline = time.monotonic() + 2
+        while background.status()["state"] == "starting" and time.monotonic() < ready_deadline:
+            time.sleep(0.01)
+        assert background.status()["state"] == "running", background.status()
         client = client_module.AmazonCollectionClient(
             f"http://127.0.0.1:{server.server_port}", "refresh-agent",
             api.derive_agent_key("agent-e2e-master", "refresh-agent"),
