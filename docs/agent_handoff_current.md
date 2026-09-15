@@ -1,14 +1,14 @@
 # Amazon Collection 当前 Agent 交接
 
-**观察时间：** 2026-09-15 11:33（Asia/Shanghai）
+**观察时间：** 2026-09-15 11:38（Asia/Shanghai）
 
 **用途：** 新 Agent 的五分钟事实入口。本文是当前快照，不是部署凭证；变化事实必须回到下列权威来源复核。
 
 ## 先说结论
 
-系统级 PowerShell 7.6.6、两项生产计划任务迁移、不可变状态协议和 Worker 生命周期修复均已上线。当前 Collection/Operator pointer 都是 release `28d62ce`；两项任务由系统pwsh托管为Running。激活回执记录旧 claimed/lease/reservation 全为0、非Amazon canary 33/34、30个有效三Worker样本；上线后再次观察 requested/effective/alive/healthy=3/3/3/3、restart=0、无孤儿geckodriver。旧`4021a56`不得再激活。
+系统级 PowerShell 7.6.6、两项生产计划任务迁移、不可变状态协议和 Worker 生命周期修复均已上线。当前 Collection/Operator pointer 都是 release `28d62ce`；两项任务由系统pwsh托管为Running。激活回执记录旧 claimed/lease/reservation 全为0、非Amazon canary 33/34、30个有效三Worker样本。随后Worker 3在真实Amazon访问中达到全局`access_blocked`熔断并按设计停止；Worker 1/2仍运行，healthz 200、readyz因1/3 blocked为503、restart=0、孤儿geckodriver=0。旧`4021a56`不得再激活。
 
-3-ASIN门禁`campaign-bd26b05e4b8055a691adc80d42c22561`没有通过：1 succeeded、2 failed，已取消并全部终态。失败均为代理会话到Amazon的transport/fetch_error。全量唯一campaign仍是`campaign-b14bef6a4b39509a9c92e1ff2629386b`，没有重建、拆分或取消；11:33快照为49/1093终态（33 succeeded、9 variant、7 failed），3 running、21 deferred、1020 pending。该计数是时间快照，后续必须用同一campaign的只读probe更新。
+3-ASIN门禁`campaign-bd26b05e4b8055a691adc80d42c22561`没有通过：1 succeeded、2 failed，已取消并全部终态。失败均为代理会话到Amazon的transport/fetch_error。全量唯一campaign仍是`campaign-b14bef6a4b39509a9c92e1ff2629386b`，没有重建、拆分或取消；11:38快照为53/1093终态（37 succeeded、9 variant、7 failed），2 running、24 deferred、1014 pending。该计数是时间快照，后续必须用同一campaign的只读probe更新。
 
 ## 事实矩阵
 
@@ -16,17 +16,17 @@
 |---|---|---|
 | 候选代码 | `deployed-reviewed` | release/commit `28d62ce`；三轮delta后最终独立复核P0=0/P1=0、CONTINUE |
 | 旧候选release | `rejected-by-live-gate` | `4021a56`初始ready，但3-ASIN运行后Worker在`os.replace` WinError 5上耗尽重启；禁止复用 |
-| 线上 Collection | `verified-current` | current pointer `28d62ce`；`/readyz` 200，目标tenant，requested/effective/alive/healthy=3/3/3/3，restart=0 |
+| 线上 Collection | `degraded-access-block` | current pointer `28d62ce`；healthz 200，Worker 1/2 running、Worker 3 `access_blocked`，readyz 503，restart=0；无孤儿geckodriver |
 | 线上 Operator | `verified-current` | operator pointer `28d62ce` |
 | 计划任务运行时 | `verified-current` | Collection/Postgres任务均为Running，Action固定`C:/Program Files/PowerShell/7/pwsh.exe` |
 | 失败3-ASIN门禁 | `terminal-failed` | `campaign-bd26b05e4b8055a691adc80d42c22561`已取消且3/3终态：1 succeeded、2 transport failed |
 | 20条campaign | `not-submitted` | 未提交独立20条门禁 |
-| 全量campaign | `active` | `campaign-b14bef6a4b39509a9c92e1ff2629386b`，稳定幂等键`prod-33fd636-full1093-20260914-v1`；11:33快照terminal=49、running=3、deferred=21、pending=1020 |
+| 全量campaign | `active-degraded` | `campaign-b14bef6a4b39509a9c92e1ff2629386b`，稳定幂等键`prod-33fd636-full1093-20260914-v1`；11:38快照terminal=53、running=2、deferred=24、pending=1014 |
 | 目标清单 | `verified` | `Amazon Scraping/data/owned_us_asin_20260902_full_01/manifest_1093.csv`共1,093个唯一合法ASIN |
 | 代理容量 | `capacity-allowed/amazon-risk` | 激活canary为33/34可用且capacity allowed；非Amazon可用仍不证明Amazon稳定，历史Amazon门禁2/3 transport failed |
 | 默认非PG回归 | `verified-current` | 762 passed、56 skipped、0 failed |
 | 隔离PostgreSQL门禁 | `verified-current` | `127.0.0.1:55444/operator_matrix`两文件29 passed；随后fast shutdown确认关闭 |
-| Windows进程生命周期 | `verified-current` | 真实Windows父进程退出后owned `firefox.exe`按PID+exe+creation ticks回收；PID复用/身份缺失fail closed；上线后3个geckodriver均有活Worker父进程、孤儿为0 |
+| Windows进程生命周期 | `verified-current` | 真实Windows父进程退出后owned `firefox.exe`按PID+exe+creation ticks回收；PID复用/身份缺失fail closed；11:38存活geckodriver均有活Worker父进程、孤儿为0 |
 
 ## 当前长期修复
 
@@ -66,7 +66,7 @@
 
 1. 不得重新提交、拆分或更换幂等键；全量唯一权威是campaign`campaign-b14bef6a4b39509a9c92e1ff2629386b`。
 2. 用户只问进度时调用campaign status一次；用户要求等待结果时对同一campaign反复wait直到全部终态。只有用户明确要求停止时才cancel未来排队成员。
-3. 只读监控三Worker readiness、restart、capacity backpressure、孤儿geckodriver及transport/blocked比例。用户已要求不用定时任务；当前没有自动heartbeat监控，除非用户重新明确要求，不得擅自创建。
+3. 只读监控剩余Worker、capacity、孤儿geckodriver及terminal/deferred变化。当前Worker 3已access熔断；不得自动重启它换出口绕拦截。用户已要求不用定时任务；当前没有自动heartbeat监控，除非用户重新明确要求，不得擅自创建。
 4. 后续仍建议解决住宅代理到Amazon的会话质量，或另行设计跨run的Amazon transport失败会话隔离；不得把非Amazon canary改成隐式Amazon探测。
 
 ## 新 Agent 开场检查
@@ -85,4 +85,4 @@ curl.exe --silent --show-error --max-time 5 http://127.0.0.1:8765/readyz
 
 ## 可直接复制给新 Agent 的提示词
 
-> 在`D:\woring\爬虫\.worktrees\amazon-integrated-deploy`接手Amazon Collection。先完整读取`AGENTS.md`和`docs/agent_handoff_current.md`，再只读核对分支、提交、工作区、deploy pointers、计划任务状态与`127.0.0.1:8765/readyz`。当前release为`28d62ce`，全量唯一campaign为`campaign-b14bef6a4b39509a9c92e1ff2629386b`，共1093条；不得重新提交、换幂等键或拆分。11:33历史快照为49 terminal/3 running，必须重新只读查询而不能沿用。3-ASIN门禁曾2个transport失败，因此Amazon访问质量仍是主要风险。用户要求不用定时任务，不得自行创建heartbeat。请用四项回复：线上状态、campaign计数、Worker健康、代理风险。不要输出凭据；只有用户明确要求停止时才取消排队成员。
+> 在`D:\woring\爬虫\.worktrees\amazon-integrated-deploy`接手Amazon Collection。先完整读取`AGENTS.md`和`docs/agent_handoff_current.md`，再只读核对分支、提交、工作区、deploy pointers、计划任务状态与`127.0.0.1:8765/healthz`、`readyz`。当前release为`28d62ce`，全量唯一campaign为`campaign-b14bef6a4b39509a9c92e1ff2629386b`，共1093条；不得重新提交、换幂等键或拆分。11:38历史快照为53 terminal/2 running/1 Worker access_blocked，必须重新只读查询而不能沿用。生命周期修复后无孤儿geckodriver，但Amazon访问质量仍是主要风险；不得自动重启blocked Worker换出口。用户要求不用定时任务，不得自行创建heartbeat。请用四项回复：线上状态、campaign计数、Worker健康、代理风险。不要输出凭据；只有用户明确要求停止时才取消排队成员。

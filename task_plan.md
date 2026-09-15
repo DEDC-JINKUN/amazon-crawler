@@ -144,7 +144,7 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 - [x] 核对阻断边界：单个ASIN blocked本来会继续，只有连续/滑窗阈值触发全局熔断；保持fail closed，不自动换出口绕验证码。恢复授权或租约无法证明仍为全局拒绝。
 - [x] TDD：服务重启前释放受管Worker reservation与claimed lease，避免第三Worker启动竞态。
 - [x] 聚焦回归、完整非PG、隔离55444、Windows真实进程验收、独立P0/P1 review：210 focused、762/56 non-PG、29 PG，最终P0=0/P1=0 CONTINUE。
-- [x] 制作不可变release`28d62ce`并恢复同一campaign；页面/API可用、3 Worker 3/3 restart0、终态20→49持续推进，未重提/拆分/取消。
+- [x] 制作不可变release`28d62ce`并恢复同一campaign；初始3 Worker 3/3、终态20→53持续推进，未重提/拆分/取消。11:38一个Worker按`access_blocked`全局熔断停止，剩余2个继续；生命周期无孤儿/脏owner，Amazon访问质量为剩余外部风险。
 
 ## 本轮自测
 
