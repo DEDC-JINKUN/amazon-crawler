@@ -393,6 +393,41 @@ def test_firefox_close_reclaims_owned_descendants_even_when_quit_and_service_sto
     assert events == ["driver.quit", "service.stop", ("reclaim", 4321)]
 
 
+def test_firefox_reclaim_rejects_a_reused_pid_with_different_creation_identity():
+    worker = load_worker()
+    terminated = []
+
+    with patch.object(
+        worker,
+        "_windows_process_snapshot",
+        return_value=[(101, 999, "firefox.exe", 222)],
+    ), patch.object(
+        worker,
+        "_terminate_windows_process",
+        side_effect=lambda pid, created: terminated.append((pid, created)) or True,
+    ):
+        reclaimed = worker._reclaim_owned_firefox_descendants(
+            999,
+            known_descendant_identities=[(101, "firefox.exe", 111)],
+        )
+
+    assert reclaimed == 0
+    assert terminated == []
+
+
+def test_firefox_reclaim_fails_closed_when_creation_identity_could_not_be_captured():
+    worker = load_worker()
+    with patch.object(
+        worker,
+        "_windows_process_snapshot",
+        return_value=[(101, 999, "firefox.exe", 222)],
+    ), patch.object(worker, "_terminate_windows_process") as terminate:
+        assert worker._reclaim_owned_firefox_descendants(
+            999, known_descendant_identities=[],
+        ) == 0
+    terminate.assert_not_called()
+
+
 def test_firefox_close_does_not_wait_forever_for_a_dead_webdriver_endpoint():
     worker = load_worker()
     release = threading.Event()
@@ -497,20 +532,22 @@ def test_windows_firefox_process_tree_fallback_reclaims_only_owned_browser(tmp_p
         while not child_pid_path.is_file() and time.monotonic() < deadline:
             time.sleep(0.05)
         child_pid = int(child_pid_path.read_text(encoding="ascii"))
-        descendants = worker._owned_firefox_descendants(worker._windows_process_snapshot(), parent.pid)
+        process_snapshot = worker._windows_process_snapshot()
+        descendants = worker._owned_firefox_descendants(process_snapshot, parent.pid)
+        identities = worker._firefox_process_identities(process_snapshot, descendants)
         assert child_pid in descendants
         parent.terminate()
         assert parent.wait(timeout=10) is not None
 
         reclaimed = worker._reclaim_owned_firefox_descendants(
-            parent.pid, known_descendant_pids=descendants,
+            parent.pid, known_descendant_identities=identities,
         )
         deadline = time.monotonic() + 5
-        while child_pid in {pid for pid, _parent, _name in worker._windows_process_snapshot()} and time.monotonic() < deadline:
+        while child_pid in {entry[0] for entry in worker._windows_process_snapshot()} and time.monotonic() < deadline:
             time.sleep(0.05)
 
         assert reclaimed >= 1
-        assert child_pid not in {pid for pid, _parent, _name in worker._windows_process_snapshot()}
+        assert child_pid not in {entry[0] for entry in worker._windows_process_snapshot()}
     finally:
         if parent.poll() is None:
             parent.kill()

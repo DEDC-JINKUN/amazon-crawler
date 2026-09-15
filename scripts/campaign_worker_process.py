@@ -10,7 +10,7 @@ import re
 import signal
 import threading
 
-from agent_collection_service import AgentRefreshWorker, cleanup_worker_ownership
+from agent_collection_service import AgentRefreshWorker, stop_and_cleanup_worker
 from amazon_us_worker import _build_http_adapter, load_config
 from campaign_worker_status import publish_status_snapshot
 from postgres_worker_storage import PostgresWorkerStorage
@@ -48,6 +48,7 @@ def main() -> int:
     parser.add_argument("--status-file", type=Path)
     parser.add_argument("--launch-token", required=True)
     parser.add_argument("--stop-file", type=Path)
+    parser.add_argument("--worker-id")
     args = parser.parse_args()
     dsn = os.environ.get(args.dsn_env, "").strip()
     if not dsn:
@@ -76,7 +77,9 @@ def main() -> int:
         dsn, args.tenant_id, args.subject_type,
         default_lease_seconds=args.lease_seconds,
     )
-    worker_id = f"agent-refresh-{os.getpid()}"
+    worker_id = str(args.worker_id or f"agent-refresh-{os.getpid()}")
+    if not re.fullmatch(r"agent-refresh-(?:[a-f0-9]{32}|[0-9]+)", worker_id):
+        raise RuntimeError("worker owner identity is invalid")
     worker = AgentRefreshWorker(
         storage=storage,
         adapter_factory=lambda: _build_http_adapter(config),
@@ -116,12 +119,9 @@ def main() -> int:
                 exit_code = 3
                 break
     finally:
-        stopped_cleanly = worker.stop()
         try:
-            cleanup_worker_ownership(storage, worker_id)
+            stop_and_cleanup_worker(worker, storage, worker_id)
         except Exception:
-            exit_code = 2
-        if not stopped_cleanly:
             exit_code = 2
         if stop_requested and last_state not in {"failed", "blocked"}:
             status_sequence += 1

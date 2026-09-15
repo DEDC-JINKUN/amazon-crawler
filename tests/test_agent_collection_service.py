@@ -1304,12 +1304,7 @@ def test_agent_stops_only_when_runner_reports_global_access_circuit():
 
 
 def test_campaign_worker_exit_cleanup_requeues_claims_then_releases_leases_and_capacity():
-    scripts_path = str(ROOT / "scripts")
-    sys.path.insert(0, scripts_path)
-    try:
-        campaign = load("campaign_worker_process")
-    finally:
-        sys.path.remove(scripts_path)
+    service = load("agent_collection_service")
     events = []
 
     class Storage:
@@ -1325,7 +1320,7 @@ def test_campaign_worker_exit_cleanup_requeues_claims_then_releases_leases_and_c
             events.append(("capacity", owner))
             return 1
 
-    result = campaign.cleanup_worker_ownership(Storage(), "agent-refresh-4321")
+    result = service.cleanup_worker_ownership(Storage(), "agent-refresh-4321")
 
     assert result == {"requeued": 1, "released_leases": 2, "released_reservations": 1}
     assert events == [
@@ -1421,14 +1416,71 @@ def test_supervisor_runs_idempotent_owner_cleanup_after_forced_child_stop(tmp_pa
         ["python", "campaign_worker_process.py"], count=1, cwd=tmp_path,
         environment={}, status_dir=tmp_path / "status", spawn=lambda *_args, **_kwargs: Process(),
         monitor_interval=0.01, graceful_stop_timeout=0,
-        exit_cleanup=lambda index, document: cleaned.append((index, dict(document))),
+        exit_cleanup=lambda index, owner, document: cleaned.append((index, owner, dict(document))),
     )
     supervisor.start()
     with supervisor._lock:
         supervisor._documents[1] = {"pid": 9876, "launch_token": supervisor._launch_tokens[1]}
     supervisor.stop()
 
-    assert cleaned == [(1, {"pid": 9876, "launch_token": supervisor._launch_tokens[1]})]
+    assert cleaned == [(
+        1,
+        "agent-refresh-" + supervisor._launch_tokens[1],
+        {"pid": 9876, "launch_token": supervisor._launch_tokens[1]},
+    )]
+
+
+def test_supervisor_cleanup_owner_does_not_depend_on_first_heartbeat(tmp_path):
+    service = load("agent_collection_service")
+    cleaned = []
+
+    class Process:
+        pid = 7003
+        returncode = 2
+        def poll(self): return self.returncode
+        def wait(self, timeout=None): return self.returncode
+        def terminate(self): pass
+        def kill(self): pass
+
+    supervisor = service.CampaignWorkerSupervisor(
+        ["python", "campaign_worker_process.py"], count=1, cwd=tmp_path,
+        environment={}, status_dir=tmp_path / "status", spawn=lambda *_args, **_kwargs: Process(),
+        monitor_interval=0.01, restart_limit=0,
+        exit_cleanup=lambda index, owner, document: cleaned.append((index, owner, document)),
+    )
+    supervisor.start()
+    deadline = time.monotonic() + 2
+    while not cleaned and time.monotonic() < deadline:
+        time.sleep(0.01)
+    supervisor.stop()
+
+    assert len(cleaned) == 1
+    assert cleaned[0][0] == 1
+    assert cleaned[0][1] == "agent-refresh-" + supervisor._launch_tokens[1]
+    assert cleaned[0][2] == {}
+
+
+def test_stop_and_cleanup_worker_reports_timeout_after_releasing_exact_owner():
+    service = load("agent_collection_service")
+    events = []
+
+    class Worker:
+        def stop(self):
+            events.append("stop")
+            return False
+
+    class Storage:
+        def requeue_claimed_refreshes(self, owner, reason): events.append(("requeue", owner)); return 0
+        def release_claimed_capacity_leases(self, owner, reason): events.append(("leases", owner)); return 1
+        def release_proxy_capacity_by_owner(self, owner): events.append(("capacity", owner)); return 1
+
+    with pytest.raises(RuntimeError, match="worker_stop_timeout"):
+        service.stop_and_cleanup_worker(Worker(), Storage(), "agent-refresh-owned")
+
+    assert events == [
+        "stop", ("requeue", "agent-refresh-owned"),
+        ("leases", "agent-refresh-owned"), ("capacity", "agent-refresh-owned"),
+    ]
 
 
 def test_agent_capacity_denial_claims_nothing_and_recovers_after_fresh_canary():
@@ -1542,7 +1594,7 @@ def test_service_cli_builds_the_same_proxy_session_adapter_as_batch_workers(tmp_
             return None
 
         def stop(self):
-            return None
+            return True
 
         def notify(self):
             return None
@@ -1566,10 +1618,14 @@ def test_service_cli_builds_the_same_proxy_session_adapter_as_batch_workers(tmp_
         "AMAZON_US_POSTGRES_DSN": "postgresql://fixture",
         "AMAZON_COLLECTION_API_KEY": "fixture-key",
     }
+    class Storage:
+        def requeue_claimed_refreshes(self, *_args): return 0
+        def release_claimed_capacity_leases(self, *_args): return 0
+        def release_proxy_capacity_by_owner(self, *_args): return 0
     with (
         patch.dict(os.environ, environment, clear=False),
         patch.object(service, "load_config", return_value=config),
-        patch.object(service, "PostgresWorkerStorage", return_value=object()),
+        patch.object(service, "PostgresWorkerStorage", return_value=Storage()),
         patch.object(service, "PostgresCollectionRepository", return_value=object()),
         patch.object(service, "AgentRefreshWorker", FakeWorker),
         patch.object(service, "CollectionServer", FakeServer),
@@ -1592,7 +1648,7 @@ def test_service_owns_primary_console_lifecycle_and_operator_adapter(tmp_path):
     class Worker:
         def __init__(self,**_kwargs): pass
         def start(self): events.append('worker-start')
-        def stop(self): events.append('worker-stop')
+        def stop(self): events.append('worker-stop'); return True
         def notify(self): pass
         def status(self): return {'state':'running'}
 
@@ -1609,7 +1665,11 @@ def test_service_owns_primary_console_lifecycle_and_operator_adapter(tmp_path):
         def shutdown(self): events.append('console-shutdown')
         def server_close(self): events.append('console-close')
 
-    console_repository=object();reporting=object();storage=object()
+    class Storage:
+        def requeue_claimed_refreshes(self, *_args): return 0
+        def release_claimed_capacity_leases(self, *_args): return 0
+        def release_proxy_capacity_by_owner(self, *_args): return 0
+    console_repository=object();reporting=object();storage=Storage()
     environment={'AMAZON_US_POSTGRES_DSN':'postgresql://fixture','AMAZON_COLLECTION_API_KEY':'fixture-key'}
     with (
         patch.dict(os.environ,environment,clear=False),

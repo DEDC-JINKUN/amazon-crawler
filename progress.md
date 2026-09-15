@@ -107,3 +107,4 @@
 - 完成Worker退出TDD切片：服务/子Worker使用shutdown/stop marker协作退出；子进程和Supervisor按不可变状态中的真实PID形成精确`agent-refresh-<pid>` owner，幂等回队claimed refresh、释放running lease及active reservation，清理失败禁止重启。相关Firefox/Agent/存储/Windows入口聚焦回归204 passed。
 - 保留既有合规熔断：单ASIN blocked继续、代理池连续/滑窗阈值才使Worker global blocked；未实现自动换出口或验证码绕过。待完整非PG、隔离PG、静态检查、diff复核、release和同campaign恢复。
 - 发布门禁进展：Python compileall、PowerShell AST与`git diff --check`通过；完整非PG为756 passed/56 skipped；专用55444首次误用SQL_ASCII测试库产生13个字符绑定假失败并正常关闭，改用UTF-8全新隔离库后两文件29 passed并fast shutdown。真实Windows owned Firefox进程测试通过。
+- 独立生产delta复核对`c590763`给出STOP：确认PID复用可能误杀个人Firefox、首个心跳前崩溃缺owner；另报Operator取消失败误标stopped为既有非delta问题，本次不触发取消且不混入生命周期发布。前两项已新增红测并修复：Firefox终止前复核创建时间，Supervisor在spawn前以launch token分配owner，多/单Worker统一stop+cleanup；5项定向复核测试通过，待全套重跑与同reviewer delta。

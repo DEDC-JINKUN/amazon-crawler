@@ -1778,11 +1778,12 @@ def _run_bounded_cleanup(action: Callable[[], Any], timeout_seconds: float) -> b
 
 
 def _owned_firefox_descendants(
-    processes: Iterable[tuple[int, int, str]], geckodriver_pid: int,
+    processes: Iterable[tuple[Any, ...]], geckodriver_pid: int,
 ) -> list[int]:
     """Return only Firefox-family descendants of one owned geckodriver, deepest first."""
     children: dict[int, list[tuple[int, str]]] = defaultdict(list)
-    for pid, parent_pid, executable in processes:
+    for process in processes:
+        pid, parent_pid, executable = process[:3]
         children[int(parent_pid)].append((int(pid), str(executable or "").lower()))
     selected: list[tuple[int, int]] = []
     pending = [(int(geckodriver_pid), 0)]
@@ -1800,7 +1801,7 @@ def _owned_firefox_descendants(
     return [pid for _, pid in selected]
 
 
-def _windows_process_snapshot() -> list[tuple[int, int, str]]:
+def _windows_process_snapshot() -> list[tuple[int, int, str, int | None]]:
     if os.name != "nt":
         return []
 
@@ -1826,17 +1827,48 @@ def _windows_process_snapshot() -> list[tuple[int, int, str]]:
     kernel32.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.POINTER(PROCESSENTRY32W)]
     kernel32.Process32NextW.restype = ctypes.c_int
     kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+
+    class FILETIME(ctypes.Structure):
+        _fields_ = [("dwLowDateTime", ctypes.c_uint32), ("dwHighDateTime", ctypes.c_uint32)]
+
+    kernel32.GetProcessTimes.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(FILETIME), ctypes.POINTER(FILETIME),
+        ctypes.POINTER(FILETIME), ctypes.POINTER(FILETIME),
+    ]
+    kernel32.GetProcessTimes.restype = ctypes.c_int
+
+    def creation_ticks(pid: int, executable: str) -> int | None:
+        if executable.lower() not in _OWNED_FIREFOX_EXECUTABLES:
+            return None
+        handle = kernel32.OpenProcess(0x00001000, False, pid)
+        if not handle:
+            return None
+        try:
+            created, exited, kernel, user = FILETIME(), FILETIME(), FILETIME(), FILETIME()
+            if not kernel32.GetProcessTimes(
+                handle, ctypes.byref(created), ctypes.byref(exited),
+                ctypes.byref(kernel), ctypes.byref(user),
+            ):
+                return None
+            return (int(created.dwHighDateTime) << 32) | int(created.dwLowDateTime)
+        finally:
+            kernel32.CloseHandle(handle)
     snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
     if snapshot == ctypes.c_void_p(-1).value:
         return []
-    entries: list[tuple[int, int, str]] = []
+    entries: list[tuple[int, int, str, int | None]] = []
     try:
         entry = PROCESSENTRY32W()
         entry.dwSize = ctypes.sizeof(entry)
         if not kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
             return []
         while True:
-            entries.append((int(entry.th32ProcessID), int(entry.th32ParentProcessID), str(entry.szExeFile)))
+            pid = int(entry.th32ProcessID)
+            executable = str(entry.szExeFile)
+            entries.append((pid, int(entry.th32ParentProcessID), executable, creation_ticks(pid, executable)))
             if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
                 break
     finally:
@@ -1844,17 +1876,34 @@ def _windows_process_snapshot() -> list[tuple[int, int, str]]:
     return entries
 
 
-def _terminate_windows_process(pid: int) -> bool:
+def _terminate_windows_process(pid: int, expected_creation_ticks: int) -> bool:
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
     kernel32.OpenProcess.restype = ctypes.c_void_p
     kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
     kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
     kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-    handle = kernel32.OpenProcess(0x0001 | 0x00100000, False, int(pid))
+    class FILETIME(ctypes.Structure):
+        _fields_ = [("dwLowDateTime", ctypes.c_uint32), ("dwHighDateTime", ctypes.c_uint32)]
+    kernel32.GetProcessTimes.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(FILETIME), ctypes.POINTER(FILETIME),
+        ctypes.POINTER(FILETIME), ctypes.POINTER(FILETIME),
+    ]
+    kernel32.GetProcessTimes.restype = ctypes.c_int
+    handle = kernel32.OpenProcess(0x0001 | 0x00100000 | 0x00001000, False, int(pid))
     if not handle:
         return False
     try:
+        created, exited, kernel, user = FILETIME(), FILETIME(), FILETIME(), FILETIME()
+        if not kernel32.GetProcessTimes(
+            handle, ctypes.byref(created), ctypes.byref(exited),
+            ctypes.byref(kernel), ctypes.byref(user),
+        ):
+            return False
+        observed_creation_ticks = (int(created.dwHighDateTime) << 32) | int(created.dwLowDateTime)
+        if observed_creation_ticks != int(expected_creation_ticks):
+            return False
         if not kernel32.TerminateProcess(handle, 1):
             return False
         kernel32.WaitForSingleObject(handle, 2000)
@@ -1866,26 +1915,54 @@ def _terminate_windows_process(pid: int) -> bool:
 def _reclaim_owned_firefox_descendants(
     geckodriver_pid: int | None,
     *,
-    known_descendant_pids: Iterable[int] = (),
+    known_descendant_identities: Iterable[tuple[int, str, int]] | None = None,
 ) -> int:
     """Bounded Windows fallback for Firefox children left behind by a dead driver."""
     if os.name != "nt" or not geckodriver_pid:
         return 0
-    known = [int(pid) for pid in known_descendant_pids if int(pid) > 0]
+    known_supplied = known_descendant_identities is not None
+    known = {
+        int(pid): (str(executable).lower(), int(created))
+        for pid, executable, created in (known_descendant_identities or ())
+        if int(pid) > 0 and int(created) > 0
+    }
     deadline = time.monotonic() + 1.0
-    targets: list[int] = []
+    targets: list[tuple[int, int]] = []
     while time.monotonic() < deadline:
         snapshot = _windows_process_snapshot()
-        executables = {pid: executable.lower() for pid, _parent, executable in snapshot}
+        identities = {
+            pid: (executable.lower(), created)
+            for pid, _parent, executable, created in snapshot
+        }
         discovered = _owned_firefox_descendants(snapshot, geckodriver_pid)
-        targets = list(dict.fromkeys([
-            *discovered,
-            *(pid for pid in known if executables.get(pid) in _OWNED_FIREFOX_EXECUTABLES),
-        ]))
+        selected: dict[int, int] = {}
+        if known_supplied:
+            for pid, expected in known.items():
+                if identities.get(pid) == expected:
+                    selected[pid] = expected[1]
+        else:
+            for pid in discovered:
+                executable, created = identities.get(pid, ("", None))
+                if executable in _OWNED_FIREFOX_EXECUTABLES and created:
+                    selected[pid] = int(created)
+        targets = list(selected.items())
         if not targets:
             return 0
+        if known_supplied:
+            break
         time.sleep(0.05)
-    return sum(_terminate_windows_process(pid) for pid in targets)
+    return sum(_terminate_windows_process(pid, created) for pid, created in targets)
+
+
+def _firefox_process_identities(
+    snapshot: Iterable[tuple[int, int, str, int | None]], pids: Iterable[int],
+) -> list[tuple[int, str, int]]:
+    selected = {int(pid) for pid in pids}
+    return [
+        (pid, executable.lower(), int(created))
+        for pid, _parent, executable, created in snapshot
+        if pid in selected and executable.lower() in _OWNED_FIREFOX_EXECUTABLES and created
+    ]
 
 
 class SeleniumFirefoxAdapter:
@@ -1930,14 +2007,14 @@ class SeleniumFirefoxAdapter:
             service_process = getattr(service, "process", None)
             service_pid = getattr(service_process, "pid", None)
             self._geckodriver_pid = int(service_pid) if service_pid else None
-            known_descendants = _owned_firefox_descendants(
-                _windows_process_snapshot(), self._geckodriver_pid,
-            ) if os.name == "nt" and self._geckodriver_pid else []
+            process_snapshot = _windows_process_snapshot() if os.name == "nt" and self._geckodriver_pid else []
+            known_descendants = _owned_firefox_descendants(process_snapshot, self._geckodriver_pid) if process_snapshot else []
+            known_identities = _firefox_process_identities(process_snapshot, known_descendants)
             stop_service = getattr(service, "stop", None)
             if callable(stop_service):
                 _run_bounded_cleanup(stop_service, _FIREFOX_CLOSE_STEP_TIMEOUT_SECONDS)
             _reclaim_owned_firefox_descendants(
-                self._geckodriver_pid, known_descendant_pids=known_descendants,
+                self._geckodriver_pid, known_descendant_identities=known_identities,
             )
             self._temp_profile.cleanup()
             raise
@@ -2159,9 +2236,9 @@ class SeleniumFirefoxAdapter:
             return
         self._closed = True
         geckodriver_pid = getattr(self, "_geckodriver_pid", None)
-        known_descendants = _owned_firefox_descendants(
-            _windows_process_snapshot(), geckodriver_pid,
-        ) if os.name == "nt" and geckodriver_pid else []
+        process_snapshot = _windows_process_snapshot() if os.name == "nt" and geckodriver_pid else []
+        known_descendants = _owned_firefox_descendants(process_snapshot, geckodriver_pid) if process_snapshot else []
+        known_identities = _firefox_process_identities(process_snapshot, known_descendants)
         try:
             try:
                 if getattr(self, "_bidi_available", False):
@@ -2188,7 +2265,7 @@ class SeleniumFirefoxAdapter:
                         _FIREFOX_CLOSE_STEP_TIMEOUT_SECONDS,
                     )
                 _reclaim_owned_firefox_descendants(
-                    geckodriver_pid, known_descendant_pids=known_descendants,
+                    geckodriver_pid, known_descendant_identities=known_identities,
                 )
         finally:
             try:

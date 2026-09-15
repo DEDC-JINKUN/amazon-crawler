@@ -107,3 +107,4 @@
 - 因新3 Worker随后再次在访问阻断中全部blocked，重复重启不是修复；必须同时修复浏览器树生命周期、per-item阻断与Worker级熔断边界、停止时容量/租约释放。
 - 源码核对纠正了“单个ASIN直接杀Worker”的初步表述：单个blocked本来会继续，只有连续2个或20窗口3个blocked让`ProxySessionPool.circuit_open_reason`成立后才返回全局`-1`，这是现有测试与合规文档共同锁定的fail-closed边界，不能改成自动换出口继续。`recovery_budget_or_lease_denied`不是普通重试结果，而是恢复授权/租约无法证明时的全局拒绝，也保持blocked。
 - 确定的代码缺陷有两条：Selenium service原为局部变量，`driver.quit()`异常后无owned进程树兜底；子Worker daemon线程最多等10秒就被主进程放弃，且Supervisor/服务控制器直接terminate/force stop时只依赖Python finally释放reservation。修复因此只加强生命周期和精确owner回收，不弱化访问控制。
+- 独立delta复核补出两个有效所有权缺口：仅保存Firefox PID会在关闭窗口遇到PID复用误杀同名个人进程；用首次心跳中的真实PID构造Worker owner会漏掉首个心跳前崩溃。最终边界改为Firefox `PID+可执行名+创建时间`必须三项一致、身份未知即不强杀；Worker owner由Supervisor在spawn前以launch token生成并传给child，父子清理都不依赖心跳。复核另报Operator取消失败误标stopped，但该文件不在本delta且本次保留campaign、不调用取消，单独留作后续任务。

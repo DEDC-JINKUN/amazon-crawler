@@ -159,7 +159,7 @@ class CampaignWorkerSupervisor:
         worker_heartbeat_timeout: float = 600.0,
         restart_limit: int = 2,
         graceful_stop_timeout: float = 0.25,
-        exit_cleanup: Callable[[int, dict[str, Any]], Any] | None = None,
+        exit_cleanup: Callable[[int, str, dict[str, Any]], Any] | None = None,
     ):
         self.command = list(command)
         self.count = max(1, int(count))
@@ -177,6 +177,7 @@ class CampaignWorkerSupervisor:
         self._states = {index: "created" for index in range(1, self.count + 1)}
         self._restart_counts = {index: 0 for index in range(1, self.count + 1)}
         self._launch_tokens = {index: "" for index in range(1, self.count + 1)}
+        self._owner_ids = {index: "" for index in range(1, self.count + 1)}
         self._documents: dict[int, dict[str, Any]] = {index: {} for index in range(1, self.count + 1)}
         self._cleaned_launch_tokens: set[str] = set()
         self._lock = threading.RLock()
@@ -195,12 +196,14 @@ class CampaignWorkerSupervisor:
         self._stop_path(index).unlink(missing_ok=True)
         launch_token = uuid.uuid4().hex
         self._launch_tokens[index] = launch_token
+        self._owner_ids[index] = f"agent-refresh-{launch_token}"
         self._documents[index] = {}
         command = [
             *self.command,
             "--status-file", str(path),
             "--launch-token", launch_token,
             "--stop-file", str(self._stop_path(index)),
+            "--worker-id", self._owner_ids[index],
         ]
         self._children[index] = self.spawn(
             command,
@@ -214,7 +217,7 @@ class CampaignWorkerSupervisor:
         if not token or token in self._cleaned_launch_tokens or self.exit_cleanup is None:
             return True
         try:
-            self.exit_cleanup(index, dict(self._documents[index]))
+            self.exit_cleanup(index, self._owner_ids[index], dict(self._documents[index]))
         except Exception:
             self._states[index] = "failed"
             return False
@@ -419,6 +422,14 @@ def cleanup_worker_ownership(storage: Any, worker_id: str) -> dict[str, int]:
         "released_leases": int(storage.release_claimed_capacity_leases(worker_id, reason)),
         "released_reservations": int(storage.release_proxy_capacity_by_owner(worker_id)),
     }
+
+
+def stop_and_cleanup_worker(worker: Any, storage: Any, worker_id: str) -> dict[str, int]:
+    stopped = bool(worker.stop())
+    cleanup = cleanup_worker_ownership(storage, worker_id)
+    if not stopped:
+        raise RuntimeError("worker_stop_timeout")
+    return cleanup
 
 
 class RefreshOnlyStorageView:
@@ -758,7 +769,11 @@ def main(argv: list[str] | None = None) -> int:
     fact_loader=getattr(storage,'load_latest_proxy_capacity',None)
     fact=fact_loader(max_age_seconds=int(config.get('proxy_canary_max_age_seconds') or 3600)) if callable(fact_loader) else None
     effective=effective_worker_count(args.worker_count,fact,config,process_limit=args.worker_process_limit)
-    worker = AgentRefreshWorker(storage=storage,adapter_factory=lambda: _build_http_adapter(config),config=config,poll_seconds=args.poll_seconds,lease_seconds=args.lease_seconds) if effective==1 else None
+    embedded_worker_id = f"agent-refresh-{uuid.uuid4().hex}"
+    worker = AgentRefreshWorker(
+        storage=storage, adapter_factory=lambda: _build_http_adapter(config), config=config,
+        poll_seconds=args.poll_seconds, lease_seconds=args.lease_seconds, worker_id=embedded_worker_id,
+    ) if effective==1 else None
     supervisor = None
     def pool_status():
         try:
@@ -783,12 +798,10 @@ def main(argv: list[str] | None = None) -> int:
     console_thread = None
     console_started = False
 
-    def cleanup_exited_child(_index: int, document: dict[str, Any]) -> None:
-        pid = document.get("pid")
-        if type(pid) is not int or pid <= 0:
-            raise RuntimeError("campaign worker cleanup identity is unavailable")
-        cleanup_worker_ownership(storage, f"agent-refresh-{pid}")
+    def cleanup_exited_child(_index: int, owner_id: str, _document: dict[str, Any]) -> None:
+        cleanup_worker_ownership(storage, owner_id)
 
+    service_exit_code = 0
     try:
         server = CollectionServer(
             (args.host, args.port),
@@ -840,9 +853,13 @@ def main(argv: list[str] | None = None) -> int:
             console_server.server_close()
         if console_thread is not None:
             console_thread.join(timeout=5)
-        if worker is not None: worker.stop()
+        if worker is not None:
+            try:
+                stop_and_cleanup_worker(worker, storage, embedded_worker_id)
+            except Exception:
+                service_exit_code = 2
         if supervisor is not None: supervisor.stop()
-    return 0
+    return service_exit_code
 
 
 if __name__ == "__main__":
