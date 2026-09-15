@@ -118,3 +118,5 @@
 - Woot开源项目存在，但2026-06公开issue显示端点403且脚本把失败伪装成0评论；2026-07另有缺review_id问题，主分支最后提交为2026-03-04。只能作为fail-closed实验源，不能直接接生产，也不能改善当前商品页吞吐。
 - Campaign状态慢的直接原因是`PostgresCollectionRepository.load_campaign()`每次读取都对全部成员JOIN后`fetchall`，API/MCP再返回1093项；一次MCP状态响应超过12万tokens。默认汇总现改为PostgreSQL`COUNT(*) FILTER`聚合，成员分页上限100；Operator客户端显式`members=all`保持兼容。
 - 新增独立55444真实数据库门禁：构造1093成员，连续20次summary并读取offset=1000/limit=100的末页；p95断言≤2秒、末页93条，测试通过且实例fast shutdown。
+- 多Worker故障域已由现有架构满足：每个Worker是独立进程并各建adapter，capacity reservation分配不重叠slot；新增测试确认一个child返回全局blocked code3后，其余健康child不被terminate或restart。优化改动只把每Worker容量批次5→3，三Worker名义slot需求从最多30降到18。
+- 生产`ProxySessionPool`的普通transport失败本来就只隔离/换槽后再试一次HTTP，不会启动Firefox；真正缺口是非核心的access验证、缺字段、上下文和空评论仍可浏览器回退。claim现在从`asin_master`携带`priority/refresh_policy`，普通/候选任务全部禁止浏览器，只有`own_core/competitor_core`保留一次有界补全；未知policy仅为旧fixture兼容。

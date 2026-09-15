@@ -219,6 +219,42 @@ def test_campaign_worker_supervisor_fails_after_restart_budget_and_does_not_rest
     assert blocked["state"] == "blocked" and blocked_spawns == 1
 
 
+def test_one_globally_blocked_child_does_not_terminate_healthy_worker_processes(tmp_path):
+    service = load("agent_collection_service")
+    processes = []
+
+    class Process:
+        def __init__(self, pid, returncode):
+            self.pid, self.returncode, self.terminated = pid, returncode, False
+        def poll(self): return self.returncode
+        def terminate(self): self.terminated = True; self.returncode = 0
+        def wait(self, timeout=None): return self.returncode
+        def kill(self): self.terminated = True; self.returncode = -9
+
+    def spawn(_command, **_kwargs):
+        process = Process(2100 + len(processes), 3 if not processes else None)
+        processes.append(process)
+        return process
+
+    supervisor = service.CampaignWorkerSupervisor(
+        ["python", "campaign_worker_process.py"], count=3, cwd=tmp_path,
+        environment={}, status_dir=tmp_path / "isolated-block", spawn=spawn,
+        monitor_interval=0.01, heartbeat_timeout=2, restart_limit=1,
+    )
+    supervisor.start()
+    try:
+        deadline = time.monotonic() + 2
+        while supervisor.status()["state"] != "blocked" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert supervisor.status()["state"] == "blocked"
+        assert processes[0].returncode == 3
+        assert all(process.poll() is None for process in processes[1:])
+        assert all(process.terminated is False for process in processes[1:])
+        assert supervisor.status()["restart_count"] == 0
+    finally:
+        supervisor.stop()
+
+
 def test_campaign_worker_supervisor_restarts_without_unlinking_a_locked_status_file(tmp_path, monkeypatch):
     service = load("agent_collection_service")
     status_path = tmp_path / "status" / "worker-1.json"
@@ -853,7 +889,7 @@ class RefreshStorage:
         return not self.claimed
 
     def count_pending_refresh_tasks(self, limit):
-        assert limit == 5
+        assert limit == 3
         return 0 if self.claimed else 1
 
     def load_latest_proxy_capacity(self, *, max_age_seconds):
@@ -1130,14 +1166,14 @@ def test_background_service_executes_only_refresh_jobs_and_reports_health():
     assert status["last_error"] is None
 
 
-def test_background_service_gives_one_agent_batch_to_one_bounded_pool_run():
+def test_background_service_caps_each_worker_batch_at_three_asins():
     service = load("agent_collection_service")
     worker_module = load("amazon_us_worker")
     calls = []
 
     class FivePendingStorage(RefreshStorage):
         def count_pending_refresh_tasks(self, limit):
-            assert limit == 5
+            assert limit == 3
             return 5
 
     def fake_run(*args, **kwargs):
@@ -1159,7 +1195,7 @@ def test_background_service_gives_one_agent_batch_to_one_bounded_pool_run():
         background.stop()
 
     assert calls
-    assert calls[0]["limit"] == 5
+    assert calls[0]["limit"] == 3
     assert "enforce_capacity_gate" not in calls[0]
 
 

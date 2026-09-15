@@ -522,6 +522,7 @@ def test_claim_refresh_task_leases_requested_asin_in_same_transaction():
     assert "item_state" in sql
     assert "FOR UPDATE" in sql and "SKIP LOCKED" in sql
     assert "lease_token" in sql
+    assert "asin_master" in sql and "refresh_policy" in sql and "priority" in sql
     assert "'pending',status" not in sql.replace(" ", "")
     assert "previous_status" in sql
 

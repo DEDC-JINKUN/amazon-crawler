@@ -1057,15 +1057,16 @@ def test_all_browser_fallback_failures_use_one_sanitized_stage_attempt_seam(fall
 class OneProductStorage:
     tenant_id = "tenant-a"
 
-    def __init__(self):
+    def __init__(self, refresh_policy=None):
         self.claims = 0
         self.saved = []
+        self.refresh_policy = refresh_policy
 
     def claim_task(self, worker_id, lease_seconds=None):
         self.claims += 1
         if self.claims > 1:
             return None
-        return {
+        task = {
             "asin": "B00RCPDCQU",
             "marketplace": "US",
             "url": "https://www.amazon.com/dp/B00RCPDCQU",
@@ -1077,6 +1078,9 @@ class OneProductStorage:
             "fetched_review_count": 0,
             "review_pages_fetched": 0,
         }
+        if self.refresh_policy is not None:
+            task["refresh_policy"] = self.refresh_policy
+        return task
 
     def save_product_result(self, **payload):
         self.saved.append(payload)
@@ -1121,6 +1125,51 @@ def test_postgres_http_and_browser_transport_failures_persist_action_evidence():
     assert payload["evidence"]["source_type"] == "http_html"
     assert payload["evidence"]["context_json"]["fallback_reason"] == "http_transport_error"
     assert payload["evidence"]["context_json"]["traffic"]["firefox_main_document_bytes"] is None
+
+
+def test_noncore_product_transport_failure_never_launches_firefox():
+    worker = load_worker()
+
+    class Adapter:
+        source_type = "http_html"
+        last_transfer_bytes = None
+        last_retry_after_seconds = None
+
+        def fetch(self, _url):
+            raise worker.AdapterFetchError("fixture transport failure")
+
+        def fetch_browser(self, *_args, **_kwargs):
+            raise AssertionError("non-core transport failure must not launch Firefox")
+
+    storage = OneProductStorage("own_normal")
+    config = {**worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None, "context": {}}
+
+    assert worker._run_postgres_actions_impl(
+        storage, Adapter(), config, limit=1, run_id="noncore-transport", worker_id="worker-a",
+    ) == 1
+    assert storage.saved[0]["reason"] == "fetch_error"
+
+
+def test_noncore_access_block_is_recorded_without_firefox_verification():
+    worker = load_worker()
+
+    class Adapter:
+        source_type = "http_html"
+        last_transfer_bytes = 120
+        last_retry_after_seconds = None
+
+        def fetch(self, _url): return "<html><title>Robot Check</title>captcha</html>", 403
+        def fetch_browser(self, *_args, **_kwargs):
+            raise AssertionError("non-core access block must not launch Firefox")
+        def evidence_context(self): return {"proxy_session_pool": {"session_id": "fixture"}}
+
+    storage = OneProductStorage("own_normal")
+    config = {**worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None, "context": {}}
+
+    assert worker._run_postgres_actions_impl(
+        storage, Adapter(), config, limit=1, run_id="noncore-block", worker_id="worker-a",
+    ) == 1
+    assert storage.saved[0]["reason"] in {"captcha", "http_403", "robot"}
 
 
 def test_sqlite_http_and_browser_transport_failures_persist_action_evidence_and_finish_task():
@@ -1622,6 +1671,46 @@ def test_us_marketplace_recovers_foreign_context_without_requiring_postal_confir
     assert adapter.browser_calls == 1
     assert storage.saved[0]['product']['price'] == '$19.99'
     assert storage.saved[0]['evidence']['context_json']['context_quality'] == 'full'
+
+
+def test_noncore_context_mismatch_is_recorded_without_firefox_fallback():
+    worker = load_worker()
+    storage = OneProductStorage("own_normal")
+
+    class Adapter(PostalPartialAdapter):
+        def fetch(self, _url):
+            return _portland_usd_product_html().replace('$19.99', 'HKD155.00').replace('Portland 97230', 'Hong Kong'), 200
+        def fetch_browser(self, *_args, **_kwargs):
+            raise AssertionError("non-core context mismatch must not launch Firefox")
+
+    config = {**worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None,
+              "context": {"expected_country": "US", "expected_currency": "USD"}}
+    assert worker._run_postgres_actions_impl(
+        storage, Adapter(worker), config, limit=1, run_id="noncore-context", worker_id="fixture",
+    ) == 1
+    assert storage.saved[0]["reason"] == "context_mismatch"
+
+
+def test_core_context_mismatch_keeps_one_firefox_fallback():
+    worker = load_worker()
+    storage = OneProductStorage("own_core")
+
+    class Adapter(PostalPartialAdapter):
+        def fetch(self, _url):
+            return _portland_usd_product_html().replace('$19.99', 'HKD155.00').replace('Portland 97230', 'Hong Kong'), 200
+        def fetch_browser(self, *_args, **_kwargs):
+            self.browser_calls += 1
+            return _portland_usd_product_html(), 200
+
+    adapter = Adapter(worker)
+    config = {**worker.DEFAULTS, "max_actions_per_run": 1, "raw_html_dir": None,
+              "context": {"expected_country": "US", "expected_currency": "USD"}}
+    assert worker._run_postgres_actions_impl(
+        storage, adapter, config, limit=1, run_id="core-context", worker_id="fixture",
+    ) == 1
+    assert adapter.browser_calls == 1
+    assert "product" in storage.saved[0], storage.saved[0]
+    assert storage.saved[0]["product"]["price"] == "$19.99"
 
 
 def test_sqlite_postal_only_mismatch_saves_partial_product_without_cookie_bridge():

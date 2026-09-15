@@ -133,6 +133,8 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 | BOM续接管理员脚本未产生终态回执且回到旧pointer/服务未启动 | 1 | 立即显式恢复`592a65a`服务并验证ready；达到多次激活失败停止规则，不再自动重试。 |
 | Phase 2扩大回归中真实HTTP Operator夹具仍使用旧`load_campaign(campaign_id)`签名 | 1 | 更新测试协议实现接受成员视图关键字后，真实loopback seam单跑1 passed。 |
 | Windows Operator真实进程夹具在status和finally stop各10秒超时 | 1 | 检查确认无测试监听/进程残留；独立单跑1 passed，判为并行扩大组的环境抖动，未改产品代码。 |
+| 批次上限5→3后Agent服务8项统一报`AssertionError` | 1 | 根因是共享测试Storage仍硬编码limit=5；同步协议夹具为3后Agent服务52 passed，产品代码无额外修复。 |
+| 核心context正向测试初版复用了必然抛错的`PostalPartialAdapter.fetch_browser` | 1 | 在核心测试子类显式返回US/USD HTML；策略实现未改，核心/非核心对照2 passed。 |
 
 ## 2026-09-15 全量运行阻断修复
 
@@ -159,9 +161,9 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 
 - [complete] Phase 1：冻结当前吞吐/成功率/Worker/blocked/deferred/API响应基线，定位七个优化面的代码与测试路由。
 - [complete] Phase 2：TDD实现campaign默认汇总与成员分页，建立1093规模隔离PostgreSQL p95≤2秒门禁。
-- [in_progress] Phase 3：TDD实现1–3条领取批量、Worker代理子池/熔断故障域隔离；blocked组不自动换出口。
-- [pending] Phase 4：TDD实现非核心HTTP优先、transport延迟不启Firefox、核心字段/身份才允许浏览器补全。
-- [pending] Phase 5：接入销量×价格≥2000美元分层及价格/库存/静态/评论独立TTL，非核心7天。
+- [complete] Phase 3：TDD实现1–3条领取批量，并锁定Worker独立进程/slot reservation/熔断故障域；blocked组不自动换出口。
+- [complete] Phase 4：TDD实现非核心HTTP优先、transport/访问阻断/字段与上下文缺口不启Firefox，核心字段/身份才允许浏览器补全。
+- [in_progress] Phase 5：接入销量×价格≥2000美元分层及价格/库存/静态/评论独立TTL，非核心7天。
 - [pending] Phase 6：Woot仅作`source=woot_ajax`实验适配器；403/非JSON失败、稳定复合键、门禁未过不进生产。
 - [pending] Phase 7：全套非PG、隔离PG、性能基准、独立review与固定20-ASIN显式业务门禁；不可达则生成失败报告并保持fail-closed。
 - [pending] Phase 8：制作可回滚release；只恢复同一campaign，不创建新全量campaign。

@@ -178,8 +178,10 @@ class RecoveryScheduler:
                     (tenant,subject,getattr(self.storage,'_recovery_allowed_asins',None),getattr(self.storage,'_recovery_allowed_asins',None),stage,stage))
                 first_pass = bool(cur.fetchone()['pending'])
             cur.execute('''
-                SELECT s.*,r.job_id,j.attempts AS recovery_attempts
+                SELECT s.*,r.job_id,j.attempts AS recovery_attempts,am.priority,am.refresh_policy
                 FROM amazon_us.item_state s
+                JOIN amazon_us.asin_master am ON am.tenant_id=s.tenant_id AND am.marketplace=s.marketplace
+                  AND am.asin=s.asin AND am.subject_type=s.subject_type
                 LEFT JOIN amazon_us.recovery_job j ON j.tenant_id=s.tenant_id AND j.asin=s.asin
                   AND j.subject_type=s.subject_type AND j.stage=CASE WHEN %s THEN 'product' ELSE s.task_stage END
                 LEFT JOIN LATERAL (
@@ -241,6 +243,8 @@ class RecoveryScheduler:
                            WHERE tenant_id=%s AND asin=%s AND subject_type=%s AND marketplace='US' RETURNING *''',
                         ('pending' if refresh_only or task['status']=='running' else task['status'],job_stage,token,worker_id,lease_seconds,self.authorization_expires_at,tenant,task['asin'],subject))
             claimed = dict(cur.fetchone())
+            claimed['priority'] = task.get('priority')
+            claimed['refresh_policy'] = task.get('refresh_policy')
             if refresh_only:
                 cur.execute("UPDATE amazon_us.refresh_request SET status='claimed',claimed_at=CURRENT_TIMESTAMP WHERE job_id=%s AND tenant_id=%s", (task['job_id'],tenant))
                 claimed['job_id'] = task['job_id']

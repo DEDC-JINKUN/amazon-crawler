@@ -119,3 +119,4 @@
 - Phase 1完成并进入Phase 3。Phase 2先红测确认默认GET仍返回全成员；实现API默认summary、最多100条page、PostgreSQL聚合计数和Operator显式`members=all`兼容后，Campaign API/Client/MCP 19 passed。独立55444构造1093成员、20次summary与末页分页性能门禁1 passed（p95≤2秒），数据库fast shutdown。
 - Phase 2扩大非PG回归116项中114 passed、2 failed：HTTP Operator测试repository夹具缺新分页关键字；另一个真实PowerShell Operator状态/停止超时并可能遗留测试监听。两者已分流诊断，尚未计Phase 2最终回归。
 - 两项扩大回归失败已分别关闭：HTTP repository协议夹具补成员视图关键字后1 passed；PowerShell夹具确认无监听/进程残留后独立重跑1 passed，未修改无关产品路径。Phase 2代码/文档可冻结，完整全套留到最终门禁。
+- Phase 3/4完成：每Worker批次5→3红绿；单child blocked不终止其他健康child回归通过；普通claim SQL和真实recovery claim均携带核心policy。非核心transport/access/context三类不启Firefox、核心context仍一次回退的4项策略测试通过；Agent/低流量/代理池/存储/恢复相关227 passed，独立recovery PG claim 1 passed并fast shutdown。

@@ -34,7 +34,7 @@ from proxy_canary import reservation_slots_for  # noqa: E402
 from proxy_capacity_gate import evaluate_capacity_fact  # noqa: E402
 from product_watch.delivery_repository import WatchDeliveryRepository  # noqa: E402
 
-MAX_AGENT_REFRESH_BATCH = 5
+MAX_AGENT_REFRESH_BATCH = 3
 
 _CHILD_RUNTIME_ENV = ("SystemRoot", "WINDIR", "PATH", "PATHEXT", "TEMP", "TMP", "COMSPEC")
 

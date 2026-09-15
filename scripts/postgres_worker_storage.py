@@ -1032,11 +1032,15 @@ class PostgresWorkerStorage:
                     cursor.execute(
                         """
                         WITH next_request AS (
-                          SELECT r.job_id,r.tenant_id,r.marketplace,r.asin,r.subject_type,s.status AS previous_status
+                          SELECT r.job_id,r.tenant_id,r.marketplace,r.asin,r.subject_type,s.status AS previous_status,
+                                 am.priority,am.refresh_policy
                           FROM amazon_us.refresh_request r
                           JOIN amazon_us.item_state s
                             ON s.tenant_id=r.tenant_id AND s.marketplace=r.marketplace
                            AND s.asin=r.asin AND s.subject_type=r.subject_type
+                          JOIN amazon_us.asin_master am
+                            ON am.tenant_id=s.tenant_id AND am.marketplace=s.marketplace
+                           AND am.asin=s.asin AND am.subject_type=s.subject_type
                           WHERE r.tenant_id=%s AND r.marketplace='US' AND r.subject_type=%s
                             AND r.status='queued'
                             AND (r.reason NOT LIKE 'campaign:%%' OR NOT EXISTS (
@@ -1075,7 +1079,8 @@ class PostgresWorkerStorage:
                           SELECT c.tenant_id,c.marketplace,c.asin,c.subject_type,n.previous_status,c.status,'refresh_lease_claimed'
                           FROM claimed c CROSS JOIN next_request n
                         )
-                        SELECT c.*,m.job_id FROM claimed c CROSS JOIN marked_request m
+                        SELECT c.*,m.job_id,n.priority,n.refresh_policy
+                        FROM claimed c CROSS JOIN marked_request m CROSS JOIN next_request n
                         """,
                         (self.tenant_id, self.subject_type, token, worker_id.strip(), seconds),
                     )

@@ -35,10 +35,11 @@ def test_recovery_survives_restart_and_refresh_cannot_bypass_cooldown():
         conn.execute((ROOT / 'schema/migrations/20260904_recovery.sql').read_text(encoding='utf-8'))
         conn.execute((ROOT / 'schema/migrations/20260906_campaign.sql').read_text(encoding='utf-8'))
     storage = PostgresWorkerStorage(DSN, tenant)
-    storage.initialize_manifest([{'asin': 'B0CC2FRY3J', 'url': 'https://www.amazon.com/dp/B0CC2FRY3J'}])
+    storage.initialize_manifest([{'asin': 'B0CC2FRY3J', 'url': 'https://www.amazon.com/dp/B0CC2FRY3J', 'priority': 100, 'refresh_policy': 'own_core'}])
     storage.configure_recovery({})
     task = storage.claim_task('worker-one')
     assert task['recovery']['attempts'] == 1
+    assert task['priority'] == 100 and task['refresh_policy'] == 'own_core'
     storage.save_failure(task=task, reason='fetch_error', error='fetch_error')
     restarted = PostgresWorkerStorage(DSN, tenant)
     restarted.configure_recovery({})

@@ -2970,6 +2970,12 @@ def _browser_fallback_available(adapter: Any) -> bool:
     return callable(getattr(adapter, "fetch_browser", None))
 
 
+def _task_allows_browser_fallback(task: dict[str, Any]) -> bool:
+    """Keep legacy fixtures compatible while reserving Firefox for explicit core tiers."""
+    refresh_policy = str(task.get("refresh_policy") or "").strip()
+    return not refresh_policy or refresh_policy in {"own_core", "competitor_core"}
+
+
 def _record_proxy_outcome(adapter: Any, outcome: str, asin: str) -> None:
     method = getattr(adapter, "record_outcome", None)
     if callable(method):
@@ -3570,7 +3576,10 @@ def _run_postgres_actions_impl(
                         body, response_status, url, records, next_url, reason = alternate_body, alternate_status, alternate_url, [], None, alternate_reason
                     elif alternate_records or alternate_next_url:
                         body, response_status, url, records, next_url = alternate_body, alternate_status, alternate_url, alternate_records, alternate_next_url
-            if not reason and not records and int(task.get("reported_review_count") or 0) > 0:
+            if (
+                not reason and not records and int(task.get("reported_review_count") or 0) > 0
+                and _task_allows_browser_fallback(task)
+            ):
                 try:
                     browser_result = _fetch_browser_once(
                         adapter, url, fallback_reason=FallbackReason.REVIEW_EMPTY,
@@ -3671,7 +3680,7 @@ def _run_postgres_actions_impl(
                 except AdapterFetchError as retry_exc:
                     exc = retry_exc
                     _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, task["asin"])
-            elif not callable(rotate_transport):
+            elif not callable(rotate_transport) and _task_allows_browser_fallback(task):
                 if callable(getattr(adapter, "fetch_browser", None)):
                     try:
                         browser_result = _fetch_browser_once(
@@ -3736,6 +3745,7 @@ def _run_postgres_actions_impl(
             and bool(config.get("proxy_firefox_verify_on_access_block", True))
             and callable(getattr(adapter, "evidence_context", None))
             and _browser_fallback_available(adapter)
+            and _task_allows_browser_fallback(task)
         ):
             first_browser_failed = False
             try:
@@ -3796,7 +3806,7 @@ def _run_postgres_actions_impl(
                         _capture_proxy_attempt_evidence(adapter, raw_html_dir, run_id, task["asin"])
         data = _parse_product_timed(adapter, body, task["url"]) if not reason else {"asin": "", "canonical_url": ""}
         core_reason = _core_fallback_reason(data, task["asin"]) if not reason else None
-        if core_reason is not None:
+        if core_reason is not None and _task_allows_browser_fallback(task):
             try:
                 browser_result = _fetch_browser_once(
                     adapter, task["url"], fallback_reason=core_reason,
@@ -3873,7 +3883,11 @@ def _run_postgres_actions_impl(
         context_errors, context_quality = (
             _assess_product_context(data, config.get("context"), adapter) if not reason else ([], {})
         )
-        if not reason and (context_errors or (context_quality.get("postal_required") and not context_quality.get("postal_confirmed"))):
+        if (
+            not reason
+            and (context_errors or (context_quality.get("postal_required") and not context_quality.get("postal_confirmed")))
+            and _task_allows_browser_fallback(task)
+        ):
             try:
                 browser_result = _fetch_browser_once(
                     adapter, task["url"], fallback_reason=FallbackReason.CONTEXT_MISMATCH,

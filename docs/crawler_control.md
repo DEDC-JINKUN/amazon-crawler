@@ -58,7 +58,7 @@ console      http://127.0.0.1:8770
 9. Worker结束后写receipt，打印stdout/stderr尾部并清除Worker锁；
 10. Worker与Controller幂等释放reservation；异常终止依赖同一释放路径或TTL回收；控制脚本清除自己创建的密码环境变量。
 
-商品任务使用 `--product-only`、`--once` 和PostgreSQL事实源；评论入口仍单独限定stage。一次run可包含多个最多5-ASIN的容量批次，不能按整个清单一次预约2N槽。每次claim和实际请求仍检查租约与持久化预算。单ASIN最终阻断进入冷却；全局暂停跨run/进程保持，不因新建run清零。HTTP429尊重Retry-After，等待前不启动Firefox。
+商品任务使用 `--product-only`、`--once` 和PostgreSQL事实源；评论入口仍单独限定stage。一次run可包含多个最多3-ASIN的容量批次，不能按整个清单一次预约2N槽。每次claim和实际请求仍检查租约与持久化预算。单ASIN最终阻断进入冷却；全局暂停跨run/进程保持，不因新建run清零。HTTP429尊重Retry-After，等待前不启动Firefox。非核心任务不使用Firefox；只有`own_core/competitor_core`的字段或上下文补全可消耗一次浏览器预算。
 
 商品Controller现在额外传入`--recover-until-terminal`：`--once`表示一个冻结cohort的有界生命周期，
 不是一次poll后退出。consumer保持到所有样本终态或`-RecoveryMaxSeconds`（默认5400秒），冷却时释放代理容量，
