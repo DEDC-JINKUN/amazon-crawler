@@ -425,7 +425,21 @@ class CollectionHandler(BaseHTTPRequestHandler):
         campaign_match = re.fullmatch(r"/v1/campaigns/(campaign-[a-f0-9]{32})", path)
         if campaign_match:
             loader=getattr(self.server.repository,"load_campaign",None)
-            try: payload=loader(campaign_match.group(1)) if callable(loader) else None
+            try:
+                query=parse_qs(urlsplit(self.path).query,keep_blank_values=True)
+                member_mode=str(query.get("members",["summary"])[0])
+                if member_mode not in {"summary","all","page"}: raise ValueError("invalid campaign member view")
+                offset=0;limit=None
+                if member_mode=="page":
+                    raw_offset=str(query.get("offset",["0"])[0]);raw_limit=str(query.get("limit",["100"])[0])
+                    if not raw_offset.isdigit() or not raw_limit.isdigit(): raise ValueError("invalid campaign member page")
+                    offset=int(raw_offset);limit=int(raw_limit)
+                    if offset<0 or not 1<=limit<=100: raise ValueError("invalid campaign member page")
+                payload=loader(
+                    campaign_match.group(1),include_members=member_mode!="summary",
+                    member_offset=offset,member_limit=limit,
+                ) if callable(loader) else None
+            except ValueError as exc: self._send_json(HTTPStatus.BAD_REQUEST,{"error":"invalid_request","detail":str(exc)}); return
             except Exception: self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR,{"error":"database_unavailable"}); return
             if payload is None: self._send_json(HTTPStatus.NOT_FOUND,{"error":"campaign_not_found"}); return
             self._audit(principal,"read_campaign",campaign_match.group(1),"ok")

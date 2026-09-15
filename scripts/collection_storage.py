@@ -500,35 +500,70 @@ class PostgresCollectionRepository:
                 conn.rollback(); raise
         return self.load_campaign(campaign_id)
 
-    def load_campaign(self, campaign_id: str) -> dict[str, Any]:
+    def load_campaign(
+        self, campaign_id: str, *, include_members: bool = True,
+        member_offset: int = 0, member_limit: int | None = None,
+    ) -> dict[str, Any]:
+        member_offset = int(member_offset)
+        if member_offset < 0 or (member_limit is not None and not 1 <= int(member_limit) <= 100):
+            raise ValueError("invalid campaign member page")
+        member_limit = int(member_limit) if member_limit is not None else None
         with self._connect_factory() as conn, conn.cursor() as cursor:
-            cursor.execute("SELECT *,CURRENT_TIMESTAMP AS observed_at FROM amazon_us.collection_campaign WHERE tenant_id=%s AND campaign_id=%s FOR UPDATE", (self.tenant_id,campaign_id))
+            cursor.execute("SELECT *,CURRENT_TIMESTAMP AS observed_at FROM amazon_us.collection_campaign WHERE tenant_id=%s AND campaign_id=%s", (self.tenant_id,campaign_id))
             parent=self._first(cursor)
             if parent is None: return None
             if parent["status"]=='active' and parent["deadline"]<=parent["observed_at"]:
-                cursor.execute("UPDATE amazon_us.collection_campaign SET status='expired',updated_at=CURRENT_TIMESTAMP WHERE tenant_id=%s AND campaign_id=%s",(self.tenant_id,campaign_id)); parent["status"]='expired'
-                self._cancel_unshared_campaign_jobs(cursor,campaign_id)
-            cursor.execute("""SELECT m.asin,m.ordinal,m.refresh_job_id,r.status AS job_status,r.requested_at,r.claimed_at,r.completed_at,s.status AS item_status,s.next_retry_at,j.outcome AS recovery_outcome,j.terminal AS recovery_terminal
-                              FROM amazon_us.collection_campaign_member m
-                              LEFT JOIN amazon_us.refresh_request r ON r.tenant_id=m.tenant_id AND r.job_id=m.refresh_job_id
-                              LEFT JOIN amazon_us.item_state s ON s.tenant_id=m.tenant_id AND s.marketplace='US' AND s.asin=m.asin AND s.subject_type=m.subject_type
-                              LEFT JOIN amazon_us.recovery_job j ON j.tenant_id=m.tenant_id AND j.asin=m.asin AND j.subject_type=m.subject_type AND j.stage='product'
-                              WHERE m.tenant_id=%s AND m.campaign_id=%s ORDER BY m.ordinal""", (self.tenant_id,campaign_id))
-            members=[]; counts={name:0 for name in ("pending","running","deferred","succeeded","variant","failed","cancelled")}
-            for raw in cursor.fetchall():
-                row=dict(raw); status=str(row.get("job_status") or "queued")
-                if status=="claimed": projected="running"
-                elif status=="completed": projected="variant" if row.get("recovery_outcome")=="variant" else "succeeded"
-                elif status in {"failed","cancelled"}: projected=status
-                elif row.get("next_retry_at") is not None: projected="deferred"
-                else: projected="pending"
-                row["status"]=projected; counts[projected]+=1; members.append(row)
-            total=len(members); terminal=counts["succeeded"]+counts["variant"]+counts["failed"]+counts["cancelled"]
+                cursor.execute("UPDATE amazon_us.collection_campaign SET status='expired',updated_at=CURRENT_TIMESTAMP WHERE tenant_id=%s AND campaign_id=%s AND status='active' RETURNING campaign_id",(self.tenant_id,campaign_id))
+                if cursor.fetchone() is not None: self._cancel_unshared_campaign_jobs(cursor,campaign_id)
+                parent["status"]='expired'
+            projection="""FROM amazon_us.collection_campaign_member m
+                LEFT JOIN amazon_us.refresh_request r ON r.tenant_id=m.tenant_id AND r.job_id=m.refresh_job_id
+                LEFT JOIN amazon_us.item_state s ON s.tenant_id=m.tenant_id AND s.marketplace='US' AND s.asin=m.asin AND s.subject_type=m.subject_type
+                LEFT JOIN amazon_us.recovery_job j ON j.tenant_id=m.tenant_id AND j.asin=m.asin AND j.subject_type=m.subject_type AND j.stage='product'
+                WHERE m.tenant_id=%s AND m.campaign_id=%s"""
+            projected_status="""CASE WHEN r.status='claimed' THEN 'running'
+                WHEN r.status='completed' AND j.outcome='variant' THEN 'variant'
+                WHEN r.status='completed' THEN 'succeeded'
+                WHEN r.status IN ('failed','cancelled') THEN r.status
+                WHEN s.next_retry_at IS NOT NULL THEN 'deferred' ELSE 'pending' END"""
+            cursor.execute(
+                f"""WITH projected AS (SELECT {projected_status} AS status {projection})
+                SELECT COUNT(*) AS total,
+                  COUNT(*) FILTER (WHERE status='pending') AS pending,
+                  COUNT(*) FILTER (WHERE status='running') AS running,
+                  COUNT(*) FILTER (WHERE status='deferred') AS deferred,
+                  COUNT(*) FILTER (WHERE status='succeeded') AS succeeded,
+                  COUNT(*) FILTER (WHERE status='variant') AS variant,
+                  COUNT(*) FILTER (WHERE status='failed') AS failed,
+                  COUNT(*) FILTER (WHERE status='cancelled') AS cancelled
+                FROM projected""",
+                (self.tenant_id,campaign_id),
+            )
+            aggregate=dict(cursor.fetchone())
+            total=int(aggregate.pop("total") or 0)
+            counts={name:int(aggregate.get(name) or 0) for name in ("pending","running","deferred","succeeded","variant","failed","cancelled")}
+            terminal=counts["succeeded"]+counts["variant"]+counts["failed"]+counts["cancelled"]
             public={key:(value.isoformat() if hasattr(value,"isoformat") else value) for key,value in parent.items() if key not in {"request_hash","idempotency_key"}}
             if parent["status"]=='active' and total and terminal==total:
-                cursor.execute("UPDATE amazon_us.collection_campaign SET status='completed',updated_at=CURRENT_TIMESTAMP WHERE tenant_id=%s AND campaign_id=%s",(self.tenant_id,campaign_id)); parent["status"]='completed'
-            conn.commit(); public["status"]=parent.get("status")
-            public.update({"total":total,"terminal":terminal,"counts":counts,"members":[{key:(value.isoformat() if hasattr(value,"isoformat") else value) for key,value in row.items() if key not in {"next_retry_at"}} for row in members]})
+                cursor.execute("UPDATE amazon_us.collection_campaign SET status='completed',updated_at=CURRENT_TIMESTAMP WHERE tenant_id=%s AND campaign_id=%s AND status='active'",(self.tenant_id,campaign_id)); parent["status"]='completed'
+            public["status"]=parent.get("status")
+            public.update({"total":total,"terminal":terminal,"counts":counts})
+            if include_members:
+                paging = ""
+                params: tuple[Any,...] = (self.tenant_id,campaign_id)
+                if member_limit is not None:
+                    paging=" LIMIT %s OFFSET %s";params=(*params,member_limit,member_offset)
+                cursor.execute(
+                    f"""SELECT m.asin,m.ordinal,m.refresh_job_id,r.status AS job_status,r.requested_at,r.claimed_at,r.completed_at,
+                        s.status AS item_status,s.next_retry_at,j.outcome AS recovery_outcome,j.terminal AS recovery_terminal,
+                        {projected_status} AS status {projection} ORDER BY m.ordinal{paging}""",
+                    params,
+                )
+                members=[{key:(value.isoformat() if hasattr(value,"isoformat") else value) for key,value in dict(raw).items() if key not in {"next_retry_at"}} for raw in cursor.fetchall()]
+                public["members"]=members
+                if member_limit is not None:
+                    public["member_page"]={"offset":member_offset,"limit":member_limit,"returned":len(members),"total":total}
+            conn.commit()
             return public
 
     def _cancel_unshared_campaign_jobs(self,cursor:Any,campaign_id:str)->None:

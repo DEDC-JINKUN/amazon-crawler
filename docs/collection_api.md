@@ -191,7 +191,7 @@ Idempotency-Key: owned-full-20260913-v1
 | `fields` | 否 | 希望采集的字段标签；不改变 Worker 的合规边界 |
 | `freshness_seconds` | 否 | 可选的新鲜度要求 |
 
-同一个幂等键和同一请求返回同一个 `campaign_id`；同键不同请求返回 409。进度使用 `GET /v1/campaigns/{campaign_id}`。取消使用 `POST /v1/campaigns/{campaign_id}/cancel`：只取消尚未开始的成员，已经持有租约的成员继续报告真实终态。
+同一个幂等键和同一请求返回同一个 `campaign_id`；同键不同请求返回 409。进度使用 `GET /v1/campaigns/{campaign_id}`，默认只返回`total/terminal/counts`等数据库聚合汇总，不携带全部成员。需要成员时使用`?members=page&offset=0&limit=100`，`offset`必须为非负整数、`limit`为1–100，响应增加`member_page`；受控Operator兼容入口显式使用`?members=all`，普通Agent和MCP不得用它轮询大campaign。取消使用 `POST /v1/campaigns/{campaign_id}/cancel`：只取消尚未开始的成员，已经持有租约的成员继续报告真实终态。
 
 Operator 上传 Excel 后也走这组接口。Operator 先读取 `/readyz`，确认 tenant 以及请求的 Worker 数均已生效，再提交 campaign；本地进度和结果文件只投影该 campaign 的成员状态，不读取历史商品状态推断本批完成。
 

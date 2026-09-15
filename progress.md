@@ -114,3 +114,8 @@
 - 生产pointer与operator pointer均为`28d62ce`，Agent/Postgres计划任务Running；激活cleanup为0 active reservation/running/claimed，canary 33/34且allowed，30个有效3/3样本通过，campaign preserved=true。后续只读观察仍3/3、restart0；同campaign从20 terminal推进到11:33的49 terminal（33 succeeded、9 variant、7 failed）、3 running、21 deferred。
 - 第一轮自动回滚遗留两棵部署geckodriver树，说明外部计划任务终止仍可能跳过adapter finally；已按固定PID+创建时间清零旧树，当前geckodriver均有活Worker父进程。生产`bin/service_control.ps1`已补停止前捕获本部署geckodriver树、停止后按PID+name+creation ticks精确回收，AST通过；未重启当前健康服务做额外破坏性验证。
 - 11:38直接观察：同campaign已到53 terminal（37 succeeded、9 variant、7 failed）、2 running、24 deferred、1014 pending。Worker 3在真实Amazon访问中`access_blocked`并按全局熔断边界停止，Worker 1/2持续心跳且2个reservation/lease对应；healthz 200、readyz 503、restart0、孤儿geckodriver0。生命周期修复有效，但住宅出口到Amazon的访问质量仍未解决。
+- 用户拍板采集效率优化并要求设定Goal开始。Codex Goal已创建为active，锁定同一campaign、不绕验证码、20-ASIN业务门禁≥90%可信成功/≤3% access block/≤10% browser fallback/≥100 terminal每小时、1093状态p95≤2秒；供应商质量不达标时必须失败报告而非降阈值。
+- Phase 1基线已记入findings：11:47为61 terminal，总墙钟4.46/h、修复后短窗约54/h，1个Worker access熔断；下一步先做不增加Amazon请求量的campaign汇总/分页性能切片。
+- Phase 1完成并进入Phase 3。Phase 2先红测确认默认GET仍返回全成员；实现API默认summary、最多100条page、PostgreSQL聚合计数和Operator显式`members=all`兼容后，Campaign API/Client/MCP 19 passed。独立55444构造1093成员、20次summary与末页分页性能门禁1 passed（p95≤2秒），数据库fast shutdown。
+- Phase 2扩大非PG回归116项中114 passed、2 failed：HTTP Operator测试repository夹具缺新分页关键字；另一个真实PowerShell Operator状态/停止超时并可能遗留测试监听。两者已分流诊断，尚未计Phase 2最终回归。
+- 两项扩大回归失败已分别关闭：HTTP repository协议夹具补成员视图关键字后1 passed；PowerShell夹具确认无监听/进程残留后独立重跑1 passed，未修改无关产品路径。Phase 2代码/文档可冻结，完整全套留到最终门禁。

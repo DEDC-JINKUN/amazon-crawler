@@ -131,6 +131,8 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 | 新鲜30槽canary仅28个可用 | 1 | Gate以`replacement_capacity_insufficient`拒绝；增加4个批准替换槽后34/34通过，未放宽所需30槽。 |
 | `4021a56`计划任务启动立即退出1 | 1 | 根因为激活脚本将含中文路径的wrapper写成UTF-8无BOM，Windows PowerShell5.1解码乱码；PowerShell7直接运行同wrapper已3/3/3通过。 |
 | BOM续接管理员脚本未产生终态回执且回到旧pointer/服务未启动 | 1 | 立即显式恢复`592a65a`服务并验证ready；达到多次激活失败停止规则，不再自动重试。 |
+| Phase 2扩大回归中真实HTTP Operator夹具仍使用旧`load_campaign(campaign_id)`签名 | 1 | 更新测试协议实现接受成员视图关键字后，真实loopback seam单跑1 passed。 |
+| Windows Operator真实进程夹具在status和finally stop各10秒超时 | 1 | 检查确认无测试监听/进程残留；独立单跑1 passed，判为并行扩大组的环境抖动，未改产品代码。 |
 
 ## 2026-09-15 全量运行阻断修复
 
@@ -150,3 +152,16 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 
 恢复/重复收尾新增检查先得到 4 个失败；CSV finalize 检查再得到 4 个失败，均在候选代码修复。运行全部现有测试时移除生产 DSN/代理/API key 环境变量，只向新增矩阵提供独立 55444 数据库。
 完整矩阵尚缺真实提交→数据库成员→Worker→页面贯通。单元/接口检查及既有 fake runner 测试不计发布轮数，仍为 0/3。
+
+## 2026-09-15 采集效率优化 Goal（active）
+
+目标：保留且不重提/拆分/取消`campaign-b14bef6a4b39509a9c92e1ff2629386b`，在不绕验证码、不降低fail-closed门禁的前提下，将固定20-ASIN受控业务门禁提升到可信成功率≥90%、access-block≤3%、browser fallback≤10%、持续可信终态≥100/小时，并将1093规模campaign状态查询p95降到≤2秒。
+
+- [complete] Phase 1：冻结当前吞吐/成功率/Worker/blocked/deferred/API响应基线，定位七个优化面的代码与测试路由。
+- [complete] Phase 2：TDD实现campaign默认汇总与成员分页，建立1093规模隔离PostgreSQL p95≤2秒门禁。
+- [in_progress] Phase 3：TDD实现1–3条领取批量、Worker代理子池/熔断故障域隔离；blocked组不自动换出口。
+- [pending] Phase 4：TDD实现非核心HTTP优先、transport延迟不启Firefox、核心字段/身份才允许浏览器补全。
+- [pending] Phase 5：接入销量×价格≥2000美元分层及价格/库存/静态/评论独立TTL，非核心7天。
+- [pending] Phase 6：Woot仅作`source=woot_ajax`实验适配器；403/非JSON失败、稳定复合键、门禁未过不进生产。
+- [pending] Phase 7：全套非PG、隔离PG、性能基准、独立review与固定20-ASIN显式业务门禁；不可达则生成失败报告并保持fail-closed。
+- [pending] Phase 8：制作可回滚release；只恢复同一campaign，不创建新全量campaign。

@@ -108,3 +108,13 @@
 - 源码核对纠正了“单个ASIN直接杀Worker”的初步表述：单个blocked本来会继续，只有连续2个或20窗口3个blocked让`ProxySessionPool.circuit_open_reason`成立后才返回全局`-1`，这是现有测试与合规文档共同锁定的fail-closed边界，不能改成自动换出口继续。`recovery_budget_or_lease_denied`不是普通重试结果，而是恢复授权/租约无法证明时的全局拒绝，也保持blocked。
 - 确定的代码缺陷有两条：Selenium service原为局部变量，`driver.quit()`异常后无owned进程树兜底；子Worker daemon线程最多等10秒就被主进程放弃，且Supervisor/服务控制器直接terminate/force stop时只依赖Python finally释放reservation。修复因此只加强生命周期和精确owner回收，不弱化访问控制。
 - 独立delta复核补出两个有效所有权缺口：仅保存Firefox PID会在关闭窗口遇到PID复用误杀同名个人进程；用首次心跳中的真实PID构造Worker owner会漏掉首个心跳前崩溃。最终边界改为Firefox `PID+可执行名+创建时间`必须三项一致、身份未知即不强杀；Worker owner由Supervisor在spawn前以launch token生成并传给child，父子清理都不依赖心跳。复核另报Operator取消失败误标stopped，但该文件不在本delta且本次保留campaign、不调用取消，单独留作后续任务。
+
+## 2026-09-15 效率优化基线
+
+- 11:47 campaign状态：61/1093 terminal（43 succeeded、9 variant、9 failed）、1 running、27 deferred、1004 pending；完成率5.58%，商品成功率按terminal为70.49%，可信记录终态（succeeded+variant）为85.25%。
+- 总墙钟从2026-09-14 22:06到11:47约13.68小时，仅4.46 terminal/小时；该口径包含多次blocked、修复和发布停机。
+- 修复上线后的短窗口从11:32的47 terminal到11:47的61 terminal约14条/15.5分钟，约54 terminal/小时；短时速度仍低于≥100/小时目标且无法抵消Worker陆续熔断风险。
+- Worker 1/2状态仍running、Worker 3为`access_blocked`；campaign快照只有1条running，说明名义2个活Worker没有形成稳定2路有效并发。
+- Woot开源项目存在，但2026-06公开issue显示端点403且脚本把失败伪装成0评论；2026-07另有缺review_id问题，主分支最后提交为2026-03-04。只能作为fail-closed实验源，不能直接接生产，也不能改善当前商品页吞吐。
+- Campaign状态慢的直接原因是`PostgresCollectionRepository.load_campaign()`每次读取都对全部成员JOIN后`fetchall`，API/MCP再返回1093项；一次MCP状态响应超过12万tokens。默认汇总现改为PostgreSQL`COUNT(*) FILTER`聚合，成员分页上限100；Operator客户端显式`members=all`保持兼容。
+- 新增独立55444真实数据库门禁：构造1093成员，连续20次summary并读取offset=1000/limit=100的末页；p95断言≤2秒、末页93条，测试通过且实例fast shutdown。

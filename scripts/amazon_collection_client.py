@@ -113,7 +113,9 @@ class AmazonCollectionClient:
         return self._request("POST","/v1/campaigns",payload)
 
     def get_campaign(self, campaign_id: str) -> dict[str, Any]:
-        return self._request("GET",f"/v1/campaigns/{campaign_id}")
+        # Preserve the Operator's legacy full projection while the public/API
+        # default stays summary-only for large campaign status reads.
+        return self._request("GET",f"/v1/campaigns/{campaign_id}?members=all")
 
     def cancel_campaign(self, campaign_id: str) -> dict[str, Any]:
         return self._request("POST",f"/v1/campaigns/{campaign_id}/cancel",{})

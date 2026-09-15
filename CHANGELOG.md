@@ -10,6 +10,7 @@
 
 ## Unreleased
 
+- Campaign读取默认返回数据库聚合汇总，不再JOIN并序列化全部1093个成员；显式`members=page&offset=&limit=`提供最多100条分页，内部Operator客户端使用`members=all`保持现有完整投影。隔离PostgreSQL 1093成员、20次汇总p95门禁≤2秒通过。
 - 修复三 Worker 停止/重启的资源泄漏链：Firefox adapter 现在保留 geckodriver 所有权，在 WebDriver 关闭超时、初始化失败或 driver 已消失时，按已捕获的父子关系、可执行名与进程创建时间三重身份只回收所属 Firefox 进程；Agent 服务与子 Worker 改为协作停止，Supervisor 以 launch token 预先分配精确 Worker owner，退出时幂等回队 claimed refresh、释放 item lease 与 active capacity reservation，首次心跳前崩溃和强制结束也不依赖子进程PID回传。stop在等待线程前先关闭refresh claim与新capacity reservation入口，超时线程不能在owner清理后重新占用资源。全局访问熔断仍保持 fail closed，不自动换出口绕过验证码。
 - Operator 生产批次改为复用 Collection campaign：Agent 与网页的提交、进度和取消共享 `collection_campaign` 成员事实，不再由 Operator 直接启动旧 ordinary 双 Worker Controller，也不再用历史商品状态推断本轮完成。Agent 服务支持 `-AgentWorkerCount 1..8`，并把 requested/effective/alive Worker 数及容量降级写入 readiness；Operator 请求的并发不可用时在提交前拒绝。Operator runner 只接收 DPAPI 中的 Collection API Key，不再接收 PostgreSQL DSN 或代理凭据；campaign 截止时间独立配置，默认 1 天，不复用旧单 Worker 的 90 分钟恢复时限。
 - Collection readiness 增加 `subject_type`，Operator 与 tenant 一起前置核对。API 在拒绝有请求体的未授权、越权或限流请求前，会有界丢弃已声明的小请求体；loopback 客户端对 Windows 10053/10054 连接重置做一次有限重试，避免短暂本机传输故障覆盖应返回的业务结果。

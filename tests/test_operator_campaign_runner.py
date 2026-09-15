@@ -192,7 +192,7 @@ class HttpCampaignRepository:
     def submit_campaign(self, *, asins, **_options):
         return self._campaign("active", asins, ["pending"] * len(asins))
 
-    def load_campaign(self, campaign_id):
+    def load_campaign(self, campaign_id, **_member_view):
         assert campaign_id == self.campaign_id
         asins = ["B0TEST0001", "B0TEST0002"]
         return self._campaign("completed", asins, ["succeeded", "variant"])

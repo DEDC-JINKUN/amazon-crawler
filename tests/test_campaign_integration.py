@@ -1,4 +1,4 @@
-import os,sys,uuid
+import os,sys,time,uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import pytest
@@ -265,3 +265,46 @@ def test_atomic_refresh_added_after_campaign_survives_campaign_cancel():
         conn.execute("UPDATE amazon_us.refresh_request SET status='completed',completed_at=now() WHERE tenant_id=%s AND job_id=%s",(tenant,direct['job_id']))
     final=repository.load_campaign(campaign['campaign_id'])
     assert final['status']=='cancelled' and final['counts']['succeeded']==1
+
+
+def test_1093_member_campaign_summary_and_page_are_bounded_under_two_seconds():
+    import psycopg
+    from collection_storage import PostgresCollectionRepository
+
+    tenant='campaign-summary-'+uuid.uuid4().hex
+    campaign_id='campaign-'+uuid.uuid4().hex
+    asins=[f'B0P{index:07d}' for index in range(1093)]
+    with psycopg.connect(DSN) as conn:
+        conn.execute((ROOT/'schema/postgres_schema.sql').read_text(encoding='utf-8'))
+        conn.execute((ROOT/'schema/migrations/20260904_recovery.sql').read_text(encoding='utf-8'))
+        conn.execute((ROOT/'schema/migrations/20260906_campaign.sql').read_text(encoding='utf-8'))
+        conn.execute(
+            "INSERT INTO amazon_us.collection_campaign(tenant_id,campaign_id,idempotency_key,request_hash,deadline,created_by) "
+            "VALUES(%s,%s,%s,%s,now()+interval '1 day','performance-test')",
+            (tenant,campaign_id,'summary-'+uuid.uuid4().hex,'fixture-hash'),
+        )
+        with conn.cursor() as cursor:
+            cursor.executemany(
+                "INSERT INTO amazon_us.collection_campaign_member(tenant_id,campaign_id,asin,refresh_job_id,ordinal) "
+                "VALUES(%s,%s,%s,%s,%s)",
+                [(tenant,campaign_id,asin,f'refresh-{index}',index) for index,asin in enumerate(asins)],
+            )
+
+    repository=PostgresCollectionRepository(DSN,tenant_id=tenant)
+    try:
+        durations=[]
+        for _ in range(20):
+            started=time.perf_counter()
+            summary=repository.load_campaign(campaign_id,include_members=False)
+            durations.append(time.perf_counter()-started)
+        page=repository.load_campaign(campaign_id,include_members=True,member_offset=1000,member_limit=100)
+
+        assert summary['total']==1093 and summary['counts']['pending']==1093
+        assert 'members' not in summary
+        assert len(page['members'])==93
+        assert page['member_page']=={'offset':1000,'limit':100,'returned':93,'total':1093}
+        assert sorted(durations)[18] <= 2.0
+    finally:
+        with psycopg.connect(DSN) as conn:
+            conn.execute("DELETE FROM amazon_us.collection_campaign_member WHERE tenant_id=%s",(tenant,))
+            conn.execute("DELETE FROM amazon_us.collection_campaign WHERE tenant_id=%s",(tenant,))

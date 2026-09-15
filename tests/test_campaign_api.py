@@ -1,7 +1,11 @@
 import importlib.util
 from pathlib import Path
 import threading
+import json
+import urllib.request
 import urllib.error
+
+import pytest
 
 ROOT=Path(__file__).parents[1]
 
@@ -11,7 +15,7 @@ def load(name):
 
 class CampaignRepository:
     tenant_id='campaign-test'
-    def __init__(self): self.by_key={}; self.audits=[]; self.conflict_error=ValueError
+    def __init__(self): self.by_key={}; self.audits=[]; self.conflict_error=ValueError; self.load_calls=[]
     def load_schema_contract(self): return {'item_state':['lease_expires_at','lease_owner','lease_token','next_retry_at'],'collection_evidence':['context_json','transfer_bytes']}
     def load_job_status(self): return {'counts':{}}
     def record_api_audit(self,**event): self.audits.append(event)
@@ -23,8 +27,17 @@ class CampaignRepository:
             return self.by_key[idempotency_key]['campaign']
         campaign={'campaign_id':f"campaign-{'1'*32}",'total':len(request),'terminal':0,'counts':{'pending':len(request)},'members':[{'asin':asin,'status':'pending'} for asin in request]}
         self.by_key[idempotency_key]={'request':request,'campaign':campaign}; return campaign
-    def load_campaign(self,campaign_id):
-        return next((value['campaign'] for value in self.by_key.values() if value['campaign']['campaign_id']==campaign_id),None)
+    def load_campaign(self,campaign_id,*,include_members=True,member_offset=0,member_limit=None):
+        self.load_calls.append((include_members,member_offset,member_limit))
+        campaign=next((value['campaign'] for value in self.by_key.values() if value['campaign']['campaign_id']==campaign_id),None)
+        if campaign is None: return None
+        result={**campaign}
+        if not include_members:
+            result.pop('members',None)
+        elif member_limit is not None:
+            result['members']=campaign['members'][member_offset:member_offset+member_limit]
+            result['member_page']={'offset':member_offset,'limit':member_limit,'returned':len(result['members']),'total':campaign['total']}
+        return result
     def cancel_campaign(self,campaign_id):
         campaign=self.load_campaign(campaign_id)
         if campaign is not None: campaign['status']='cancelled'
@@ -66,3 +79,37 @@ def test_read_agent_cannot_submit_campaign_and_capability_reports_configured_quo
         except urllib.error.HTTPError as exc: assert exc.code==403
         else: raise AssertionError('read agent submitted campaign')
     finally: server.shutdown(); server.server_close(); thread.join(2)
+
+
+def test_campaign_get_defaults_to_summary_and_exposes_bounded_member_pages():
+    api=load('collection_api'); repository=CampaignRepository()
+    campaign=repository.submit_campaign(
+        asins=[f'B0PAGE{i:04d}' for i in range(5)], idempotency_key='campaign-page-0001',
+        requested_by='refresh-agent', max_members=1093,
+    )
+    server=api.CollectionServer(('127.0.0.1',0),repository=repository,api_key='master',campaign_max_asins=1093,refresh_worker_status=lambda:{'state':'running'})
+    thread=threading.Thread(target=server.serve_forever,daemon=True); thread.start()
+    headers=api.agent_headers('master','read-agent')
+
+    def get(suffix=''):
+        request=urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}/v1/campaigns/{campaign['campaign_id']}{suffix}",
+            headers=headers,
+        )
+        with urllib.request.urlopen(request,timeout=2) as response:
+            return json.loads(response.read())['campaign']
+
+    try:
+        summary=get()
+        page=get('?members=page&offset=1&limit=2')
+
+        assert 'members' not in summary
+        assert [item['asin'] for item in page['members']]==['B0PAGE0001','B0PAGE0002']
+        assert page['member_page']=={'offset':1,'limit':2,'returned':2,'total':5}
+        assert repository.load_calls[-2:]==[(False,0,None),(True,1,2)]
+
+        with pytest.raises(urllib.error.HTTPError) as invalid:
+            get('?members=page&offset=0&limit=101')
+        assert invalid.value.code==400
+    finally:
+        server.shutdown();server.server_close();thread.join(2)
