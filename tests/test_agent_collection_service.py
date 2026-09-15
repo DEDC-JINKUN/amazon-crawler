@@ -1483,6 +1483,51 @@ def test_stop_and_cleanup_worker_reports_timeout_after_releasing_exact_owner():
     ]
 
 
+def test_refresh_storage_shutdown_fence_prevents_new_claims_and_capacity_reservations():
+    service = load("agent_collection_service")
+    events = []
+
+    class Storage:
+        def claim_refresh_task(self, *_args, **_kwargs): events.append("claim"); return {"job_id": "job-1"}
+        def reserve_proxy_capacity(self, *_args, **_kwargs): events.append("reserve"); return {"status": "active"}
+
+    view = service.RefreshOnlyStorageView(Storage())
+    assert view.claim_refresh_task("worker") == {"job_id": "job-1"}
+    assert view.reserve_proxy_capacity(owner_id="worker") == {"status": "active"}
+
+    view.disable_claims()
+
+    assert view.claim_refresh_task("worker") is None
+    with pytest.raises(service.ProxyCapacityGateDenied, match="worker_stopping"):
+        view.reserve_proxy_capacity(owner_id="worker")
+    assert events == ["claim", "reserve"]
+
+
+def test_agent_stop_installs_shutdown_fence_before_waiting_for_thread():
+    service = load("agent_collection_service")
+    worker_module = load("amazon_us_worker")
+    observed = []
+
+    class Storage:
+        def configure_recovery(self, _config): pass
+        def claim_refresh_task(self, *_args, **_kwargs): return {"job_id": "must-not-claim"}
+
+    background = service.AgentRefreshWorker(
+        storage=Storage(), adapter_factory=lambda: object(),
+        config=dict(worker_module.DEFAULTS),
+    )
+
+    class Thread:
+        def join(self, timeout=None):
+            observed.append(background._refresh_storage.claim_refresh_task("worker"))
+        def is_alive(self): return True
+
+    background._thread = Thread()
+
+    assert background.stop(timeout_seconds=0.01) is False
+    assert observed == [None]
+
+
 def test_agent_capacity_denial_claims_nothing_and_recovers_after_fresh_canary():
     service = load("agent_collection_service")
     worker_module = load("amazon_us_worker")

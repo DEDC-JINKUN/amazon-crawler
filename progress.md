@@ -108,3 +108,5 @@
 - 保留既有合规熔断：单ASIN blocked继续、代理池连续/滑窗阈值才使Worker global blocked；未实现自动换出口或验证码绕过。待完整非PG、隔离PG、静态检查、diff复核、release和同campaign恢复。
 - 发布门禁进展：Python compileall、PowerShell AST与`git diff --check`通过；完整非PG为756 passed/56 skipped；专用55444首次误用SQL_ASCII测试库产生13个字符绑定假失败并正常关闭，改用UTF-8全新隔离库后两文件29 passed并fast shutdown。真实Windows owned Firefox进程测试通过。
 - 独立生产delta复核对`c590763`给出STOP：确认PID复用可能误杀个人Firefox、首个心跳前崩溃缺owner；另报Operator取消失败误标stopped为既有非delta问题，本次不触发取消且不混入生命周期发布。前两项已新增红测并修复：Firefox终止前复核创建时间，Supervisor在spawn前以launch token分配owner，多/单Worker统一stop+cleanup；5项定向复核测试通过，待全套重跑与同reviewer delta。
+- reviewer二次delta确认上述两项关闭，但补出stop超时线程可能在cleanup后再预约容量。新增shutdown fence红测2 failed；`AgentRefreshWorker.stop`在join前禁用refresh claim与reserve入口后3项定向通过。使用短`--basetemp`避免Windows路径长度假失败后的完整非PG为760 passed/56 skipped；待最后delta复核与最终提交。
+- 最终delta复核确认shutdown fence关闭stop竞态，P0=0/P1=0、CONTINUE。最终聚焦210 passed，完整非PG 762 passed/56 skipped，UTF-8专用55444两文件29 passed并fast shutdown；compileall、PowerShell AST、diff check与真实Windows Firefox进程验收均通过。

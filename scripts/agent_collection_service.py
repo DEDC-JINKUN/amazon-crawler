@@ -437,6 +437,7 @@ class RefreshOnlyStorageView:
 
     def __init__(self, storage: Any):
         self._storage = storage
+        self._claims_disabled = threading.Event()
         self._batch_counts = {"processed": 0, "succeeded": 0, "variant_redirect": 0, "failed": 0, "blocked": 0}
         self._pending_outcome: str | None = None
 
@@ -445,6 +446,19 @@ class RefreshOnlyStorageView:
 
     def claim_task(self, *args, **kwargs) -> None:
         return None
+
+    def disable_claims(self) -> None:
+        self._claims_disabled.set()
+
+    def claim_refresh_task(self, *args, **kwargs) -> Any:
+        if self._claims_disabled.is_set():
+            return None
+        return self._storage.claim_refresh_task(*args, **kwargs)
+
+    def reserve_proxy_capacity(self, *args, **kwargs) -> Any:
+        if self._claims_disabled.is_set():
+            raise ProxyCapacityGateDenied("worker_stopping")
+        return self._storage.reserve_proxy_capacity(*args, **kwargs)
 
     def begin_batch_metrics(self) -> None:
         self._batch_counts = {"processed": 0, "succeeded": 0, "variant_redirect": 0, "failed": 0, "blocked": 0}
@@ -539,6 +553,7 @@ class AgentRefreshWorker:
         self._event.set()
 
     def stop(self, timeout_seconds: float = 30.0) -> bool:
+        self._refresh_storage.disable_claims()
         self._stop.set()
         self._event.set()
         if self._thread is not None:
