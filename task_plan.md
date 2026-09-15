@@ -132,6 +132,20 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 | `4021a56`计划任务启动立即退出1 | 1 | 根因为激活脚本将含中文路径的wrapper写成UTF-8无BOM，Windows PowerShell5.1解码乱码；PowerShell7直接运行同wrapper已3/3/3通过。 |
 | BOM续接管理员脚本未产生终态回执且回到旧pointer/服务未启动 | 1 | 立即显式恢复`592a65a`服务并验证ready；达到多次激活失败停止规则，不再自动重试。 |
 
+## 2026-09-15 全量运行阻断修复
+
+目标：不新建或拆分`campaign-b14bef6a4b39509a9c92e1ff2629386b`，修复3 Worker在真实访问阻断后留下Firefox孤儿、永久blocked及重启容量残留的问题；发布前保持campaign原成员与幂等键不变。
+
+- [x] 删除Amazon定时监控，改为当前任务直接修复。
+- [x] 生产证据：全量20/1093终态后3 Worker全部blocked，readyz=503；发现6棵/33个孤儿Firefox，清理后页面立即从超时恢复到75ms。
+- [x] 生产证据：普通restart残留旧Worker 10槽reservation，使新第三Worker`capacity_reserved_elsewhere`；受控停Agent、释放3个死owner reservation/claimed lease后可恢复3/3。
+- [x] 追踪浏览器关闭、访问阻断传播和Worker supervisor退出调用链，形成单一根因假设。
+- [x] TDD：浏览器异常/驱动丢失后完整进程树可回收，不遗留headless Firefox。
+- [x] 核对阻断边界：单个ASIN blocked本来会继续，只有连续/滑窗阈值触发全局熔断；保持fail closed，不自动换出口绕验证码。恢复授权或租约无法证明仍为全局拒绝。
+- [x] TDD：服务重启前释放受管Worker reservation与claimed lease，避免第三Worker启动竞态。
+- [ ] 聚焦回归、完整非PG、隔离55444、Windows真实进程验收、独立P0/P1 review（除独立review外均已通过：204 focused、756/56、29 PG、Windows真实进程1 passed）。
+- [ ] 制作新不可变release并恢复同一campaign；验证页面、API、3 Worker和进度持续推进。
+
 ## 本轮自测
 
 恢复/重复收尾新增检查先得到 4 个失败；CSV finalize 检查再得到 4 个失败，均在候选代码修复。运行全部现有测试时移除生产 DSN/代理/API key 环境变量，只向新增矩阵提供独立 55444 数据库。

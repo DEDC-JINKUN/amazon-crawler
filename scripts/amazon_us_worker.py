@@ -8,6 +8,7 @@ and offline regression tests; production actions use PostgreSQL leases.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import csv
 import email.utils
 import gzip
@@ -1755,6 +1756,138 @@ def _is_stale_bidi_fail_request(error: Exception) -> bool:
     return re.fullmatch(r"no such request:\s*blocked request with id \S+ not found", message) is not None
 
 
+_OWNED_FIREFOX_EXECUTABLES = {"firefox.exe", "plugin-container.exe", "crashreporter.exe"}
+_FIREFOX_CLOSE_STEP_TIMEOUT_SECONDS = 3.0
+
+
+def _run_bounded_cleanup(action: Callable[[], Any], timeout_seconds: float) -> bool:
+    finished = threading.Event()
+
+    def run() -> None:
+        try:
+            action()
+        except Exception:
+            pass
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=run, name="firefox-cleanup", daemon=True)
+    thread.start()
+    thread.join(timeout=max(0.01, float(timeout_seconds)))
+    return finished.is_set()
+
+
+def _owned_firefox_descendants(
+    processes: Iterable[tuple[int, int, str]], geckodriver_pid: int,
+) -> list[int]:
+    """Return only Firefox-family descendants of one owned geckodriver, deepest first."""
+    children: dict[int, list[tuple[int, str]]] = defaultdict(list)
+    for pid, parent_pid, executable in processes:
+        children[int(parent_pid)].append((int(pid), str(executable or "").lower()))
+    selected: list[tuple[int, int]] = []
+    pending = [(int(geckodriver_pid), 0)]
+    seen = {int(geckodriver_pid)}
+    while pending:
+        parent_pid, depth = pending.pop()
+        for pid, executable in children.get(parent_pid, []):
+            if pid in seen:
+                continue
+            seen.add(pid)
+            pending.append((pid, depth + 1))
+            if executable in _OWNED_FIREFOX_EXECUTABLES:
+                selected.append((depth + 1, pid))
+    selected.sort(key=lambda item: (-item[0], item[1]))
+    return [pid for _, pid in selected]
+
+
+def _windows_process_snapshot() -> list[tuple[int, int, str]]:
+    if os.name != "nt":
+        return []
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", ctypes.c_ulong),
+            ("cntUsage", ctypes.c_ulong),
+            ("th32ProcessID", ctypes.c_ulong),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", ctypes.c_ulong),
+            ("cntThreads", ctypes.c_ulong),
+            ("th32ParentProcessID", ctypes.c_ulong),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", ctypes.c_ulong),
+            ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.argtypes = [ctypes.c_ulong, ctypes.c_ulong]
+    kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    kernel32.Process32FirstW.argtypes = [ctypes.c_void_p, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.Process32FirstW.restype = ctypes.c_int
+    kernel32.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.Process32NextW.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+    if snapshot == ctypes.c_void_p(-1).value:
+        return []
+    entries: list[tuple[int, int, str]] = []
+    try:
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(entry)
+        if not kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+            return []
+        while True:
+            entries.append((int(entry.th32ProcessID), int(entry.th32ParentProcessID), str(entry.szExeFile)))
+            if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                break
+    finally:
+        kernel32.CloseHandle(snapshot)
+    return entries
+
+
+def _terminate_windows_process(pid: int) -> bool:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    handle = kernel32.OpenProcess(0x0001 | 0x00100000, False, int(pid))
+    if not handle:
+        return False
+    try:
+        if not kernel32.TerminateProcess(handle, 1):
+            return False
+        kernel32.WaitForSingleObject(handle, 2000)
+        return True
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _reclaim_owned_firefox_descendants(
+    geckodriver_pid: int | None,
+    *,
+    known_descendant_pids: Iterable[int] = (),
+) -> int:
+    """Bounded Windows fallback for Firefox children left behind by a dead driver."""
+    if os.name != "nt" or not geckodriver_pid:
+        return 0
+    known = [int(pid) for pid in known_descendant_pids if int(pid) > 0]
+    deadline = time.monotonic() + 1.0
+    targets: list[int] = []
+    while time.monotonic() < deadline:
+        snapshot = _windows_process_snapshot()
+        executables = {pid: executable.lower() for pid, _parent, executable in snapshot}
+        discovered = _owned_firefox_descendants(snapshot, geckodriver_pid)
+        targets = list(dict.fromkeys([
+            *discovered,
+            *(pid for pid in known if executables.get(pid) in _OWNED_FIREFOX_EXECUTABLES),
+        ]))
+        if not targets:
+            return 0
+        time.sleep(0.05)
+    return sum(_terminate_windows_process(pid) for pid in targets)
+
+
 class SeleniumFirefoxAdapter:
     def __init__(self, config: dict[str, Any] | None = None, headless: bool | None = None, timeout: int | None = None) -> None:
         config = config or DEFAULTS
@@ -1784,12 +1917,33 @@ class SeleniumFirefoxAdapter:
         if geckodriver_path and not Path(geckodriver_path).is_absolute():
             geckodriver_path = str(ROOT / geckodriver_path)
         service = Service(executable_path=geckodriver_path) if geckodriver_path else Service()
+        self._service = service
+        self._geckodriver_pid: int | None = None
         firefox_binary = str(config.get("firefox_binary") or "").strip()
         if firefox_binary and not Path(firefox_binary).is_absolute():
             firefox_binary = str(ROOT / firefox_binary)
         if firefox_binary:
             options.binary_location = firefox_binary
-        self.driver = webdriver.Firefox(options=options, service=service)
+        try:
+            self.driver = webdriver.Firefox(options=options, service=service)
+        except Exception:
+            service_process = getattr(service, "process", None)
+            service_pid = getattr(service_process, "pid", None)
+            self._geckodriver_pid = int(service_pid) if service_pid else None
+            known_descendants = _owned_firefox_descendants(
+                _windows_process_snapshot(), self._geckodriver_pid,
+            ) if os.name == "nt" and self._geckodriver_pid else []
+            stop_service = getattr(service, "stop", None)
+            if callable(stop_service):
+                _run_bounded_cleanup(stop_service, _FIREFOX_CLOSE_STEP_TIMEOUT_SECONDS)
+            _reclaim_owned_firefox_descendants(
+                self._geckodriver_pid, known_descendant_pids=known_descendants,
+            )
+            self._temp_profile.cleanup()
+            raise
+        service_process = getattr(service, "process", None)
+        service_pid = getattr(service_process, "pid", None)
+        self._geckodriver_pid = int(service_pid) if service_pid else None
         self.driver.set_page_load_timeout(timeout or int(config.get("request_timeout_seconds", 30)))
         self._context_initialized = False
         self._network_ledger = BrowserNetworkLedger()
@@ -1815,11 +1969,7 @@ class SeleniumFirefoxAdapter:
             )
             self._bidi_available = True
         except Exception as exc:
-            try:
-                self.driver.quit()
-            finally:
-                self._temp_profile.cleanup()
-                self._closed = True
+            self.close()
             raise RuntimeError("Firefox WebDriver BiDi network controls are unavailable") from exc
 
     def _handle_bidi_request(self, request: Any) -> None:
@@ -2008,6 +2158,10 @@ class SeleniumFirefoxAdapter:
         if getattr(self, "_closed", False):
             return
         self._closed = True
+        geckodriver_pid = getattr(self, "_geckodriver_pid", None)
+        known_descendants = _owned_firefox_descendants(
+            _windows_process_snapshot(), geckodriver_pid,
+        ) if os.name == "nt" and geckodriver_pid else []
         try:
             try:
                 if getattr(self, "_bidi_available", False):
@@ -2022,10 +2176,20 @@ class SeleniumFirefoxAdapter:
                     except Exception:
                         pass
             finally:
-                try:
-                    self.driver.quit()
-                except Exception:
-                    pass
+                _run_bounded_cleanup(
+                    self.driver.quit,
+                    _FIREFOX_CLOSE_STEP_TIMEOUT_SECONDS,
+                )
+                service = getattr(self, "_service", None)
+                stop_service = getattr(service, "stop", None)
+                if callable(stop_service):
+                    _run_bounded_cleanup(
+                        stop_service,
+                        _FIREFOX_CLOSE_STEP_TIMEOUT_SECONDS,
+                    )
+                _reclaim_owned_firefox_descendants(
+                    geckodriver_pid, known_descendant_pids=known_descendants,
+                )
         finally:
             try:
                 temp_profile = getattr(self, "_temp_profile", None)

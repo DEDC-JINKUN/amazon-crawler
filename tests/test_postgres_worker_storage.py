@@ -560,6 +560,24 @@ def test_requeue_claimed_refreshes_releases_only_worker_lease_and_preserves_budg
     assert connection.commits == 1 and connection.rollbacks == 0
 
 
+def test_release_proxy_capacity_by_owner_is_tenant_and_owner_scoped_and_idempotent():
+    storage = load_storage()
+    connection = Connection()
+    connection.cursor_instance.rowcount = 2
+    repository = storage.PostgresWorkerStorage(
+        "postgresql://example", tenant_id="tenant-a", subject_type="own", connect=lambda: connection
+    )
+
+    assert repository.release_proxy_capacity_by_owner("agent-refresh-4321") == 2
+
+    sql, params = connection.cursor_instance.executed[0]
+    assert "tenant_id=%s" in sql
+    assert "owner_id=%s" in sql
+    assert "status='active'" in sql
+    assert params == ("tenant-a", "agent-refresh-4321")
+    assert connection.commits == 1
+
+
 def test_fail_claimed_refreshes_terminalizes_job_and_releases_worker_lease():
     storage = load_storage()
     connection = ScriptedConnection([[{

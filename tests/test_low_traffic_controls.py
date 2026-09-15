@@ -3,8 +3,12 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
+import shutil
+import subprocess
 import sys
 import tempfile
+import threading
+import time
 import types
 from datetime import datetime, timezone
 from pathlib import Path
@@ -336,6 +340,187 @@ def test_closed_firefox_adapter_ignores_late_bidi_request_callback():
     # Selenium can dispatch this callback after driver.quit() clears its
     # WebSocket. The adapter must treat it as a closed-session race.
     adapter._handle_bidi_request(LateRequest())
+
+
+def test_owned_firefox_descendants_are_selected_bottom_up_without_unrelated_processes():
+    worker = load_worker()
+
+    processes = [
+        (100, 1, "geckodriver.exe"),
+        (101, 100, "firefox.exe"),
+        (102, 101, "firefox.exe"),
+        (103, 102, "plugin-container.exe"),
+        (104, 100, "unrelated-helper.exe"),
+        (105, 999, "firefox.exe"),
+    ]
+
+    assert worker._owned_firefox_descendants(processes, 100) == [103, 102, 101]
+
+
+def test_firefox_close_reclaims_owned_descendants_even_when_quit_and_service_stop_fail():
+    worker = load_worker()
+    events = []
+
+    class Driver:
+        def quit(self):
+            events.append("driver.quit")
+            raise RuntimeError("webdriver endpoint disappeared")
+
+    class Service:
+        class Process:
+            pid = 4321
+        process = Process()
+
+        def stop(self):
+            events.append("service.stop")
+            raise RuntimeError("geckodriver already exited")
+
+    adapter = object.__new__(worker.SeleniumFirefoxAdapter)
+    adapter.driver = Driver()
+    adapter._service = Service()
+    adapter._geckodriver_pid = 4321
+    adapter._closed = False
+    adapter._bidi_available = False
+    adapter._temp_profile = None
+
+    with patch.object(
+        worker,
+        "_reclaim_owned_firefox_descendants",
+        side_effect=lambda pid, **_kwargs: events.append(("reclaim", pid)),
+    ):
+        adapter.close()
+
+    assert events == ["driver.quit", "service.stop", ("reclaim", 4321)]
+
+
+def test_firefox_close_does_not_wait_forever_for_a_dead_webdriver_endpoint():
+    worker = load_worker()
+    release = threading.Event()
+    events = []
+
+    class Driver:
+        def quit(self):
+            events.append("driver.quit")
+            release.wait(5)
+
+    adapter = object.__new__(worker.SeleniumFirefoxAdapter)
+    adapter.driver = Driver()
+    adapter._service = None
+    adapter._geckodriver_pid = 7654
+    adapter._closed = False
+    adapter._bidi_available = False
+    adapter._temp_profile = None
+
+    started = time.monotonic()
+    with patch.object(worker, "_FIREFOX_CLOSE_STEP_TIMEOUT_SECONDS", 0.05), patch.object(
+        worker,
+        "_reclaim_owned_firefox_descendants",
+        side_effect=lambda pid, **_kwargs: events.append(("reclaim", pid)),
+    ):
+        adapter.close()
+    elapsed = time.monotonic() - started
+    release.set()
+
+    assert elapsed < 0.5
+    assert events == ["driver.quit", ("reclaim", 7654)]
+
+
+def test_firefox_constructor_reclaims_driver_tree_when_session_creation_fails():
+    worker = load_worker()
+    events = []
+
+    class FakeOptions:
+        def __init__(self): self.profile = None
+        def add_argument(self, _value): pass
+        def set_preference(self, _name, _value): pass
+
+    class FakeService:
+        class Process:
+            pid = 8765
+        process = Process()
+
+        def stop(self): events.append("service.stop")
+
+    webdriver = types.ModuleType("selenium.webdriver")
+    webdriver.Firefox = lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("new session failed"))
+    selenium_module = types.ModuleType("selenium")
+    selenium_module.webdriver = webdriver
+    proxy_module = types.ModuleType("selenium.webdriver.common.proxy")
+    proxy_module.Proxy = lambda value: value
+    options_module = types.ModuleType("selenium.webdriver.firefox.options")
+    options_module.Options = FakeOptions
+    service_module = types.ModuleType("selenium.webdriver.firefox.service")
+    service_module.Service = lambda **_kwargs: FakeService()
+    fake_modules = {
+        "selenium": selenium_module,
+        "selenium.webdriver": webdriver,
+        "selenium.webdriver.common": types.ModuleType("selenium.webdriver.common"),
+        "selenium.webdriver.common.proxy": proxy_module,
+        "selenium.webdriver.firefox": types.ModuleType("selenium.webdriver.firefox"),
+        "selenium.webdriver.firefox.options": options_module,
+        "selenium.webdriver.firefox.service": service_module,
+    }
+
+    with patch.dict(sys.modules, fake_modules), patch.object(
+        worker,
+        "_reclaim_owned_firefox_descendants",
+        side_effect=lambda pid, **_kwargs: events.append(("reclaim", pid)),
+    ), pytest.raises(RuntimeError, match="new session failed"):
+        worker.SeleniumFirefoxAdapter({**worker.DEFAULTS, "geckodriver_path": ""})
+
+    assert events == ["service.stop", ("reclaim", 8765)]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Firefox process-tree lifecycle")
+def test_windows_firefox_process_tree_fallback_reclaims_only_owned_browser(tmp_path):
+    worker = load_worker()
+    base_python = Path(sys._base_executable).resolve()
+    runtime = base_python.parent
+    firefox = tmp_path / "firefox.exe"
+    shutil.copy2(base_python, firefox)
+    runtime_dll = runtime / f"python{sys.version_info.major}{sys.version_info.minor}.dll"
+    if runtime_dll.is_file():
+        shutil.copy2(runtime_dll, tmp_path / runtime_dll.name)
+    child_pid_path = tmp_path / "firefox.pid"
+    parent_code = (
+        "import os,pathlib,subprocess,sys,time;"
+        "env=dict(os.environ,PYTHONHOME=sys.argv[2]);"
+        "p=subprocess.Popen([sys.argv[1],'-c','import time;time.sleep(60)'],env=env);"
+        "pathlib.Path(sys.argv[3]).write_text(str(p.pid));time.sleep(60)"
+    )
+    parent = subprocess.Popen(
+        [sys.executable, "-c", parent_code, str(firefox), str(runtime), str(child_pid_path)]
+    )
+    child_pid = None
+    try:
+        deadline = time.monotonic() + 10
+        while not child_pid_path.is_file() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        child_pid = int(child_pid_path.read_text(encoding="ascii"))
+        descendants = worker._owned_firefox_descendants(worker._windows_process_snapshot(), parent.pid)
+        assert child_pid in descendants
+        parent.terminate()
+        assert parent.wait(timeout=10) is not None
+
+        reclaimed = worker._reclaim_owned_firefox_descendants(
+            parent.pid, known_descendant_pids=descendants,
+        )
+        deadline = time.monotonic() + 5
+        while child_pid in {pid for pid, _parent, _name in worker._windows_process_snapshot()} and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+        assert reclaimed >= 1
+        assert child_pid not in {pid for pid, _parent, _name in worker._windows_process_snapshot()}
+    finally:
+        if parent.poll() is None:
+            parent.kill()
+            parent.wait(timeout=10)
+        if child_pid is not None:
+            subprocess.run(
+                ["taskkill", "/PID", str(child_pid), "/T", "/F"],
+                capture_output=True,
+                check=False,
+            )
 
 
 def test_bidi_charges_global_permit_only_for_main_document_and_never_for_blocked_resource():

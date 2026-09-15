@@ -92,7 +92,7 @@ data/<batch>/control/.console.lock.json
 
 `stop`在终止前同时校验PID与进程StartTime，避免PID复用导致误杀。崩溃留下的失效锁会在下一次命令自动清理。
 
-Worker和Console都运行在 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的Windows Job Object中。`stop`终止宿主后，Windows内核同时清理其Python、Firefox和geckodriver子进程；控制器意外退出时，实际宿主PID仍保留在锁中，可由另一个终端执行 `stop`。
+Worker和Console都运行在 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的Windows Job Object中。`stop`终止宿主后，Windows内核清理受管Python与geckodriver进程；Firefox可能在driver异常退出时脱离原进程树，因此 adapter 还会在关闭前记录所属后代，并在有界 graceful close 失败后按 geckodriver 所有权只回收对应 Firefox allowlist 进程。控制器意外退出时，实际宿主PID仍保留在锁中，可由另一个终端执行 `stop`。
 
 Console复用依据 `/readyz`，必须同时匹配数据库可用、tenant和raw HTML目录；只返回health但身份不匹配的服务不会被复用。由控制脚本管理的错误tenant Console会先安全停止再重启；未知进程占用端口时fail-closed。
 

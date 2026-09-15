@@ -192,6 +192,17 @@ function Wait-AgentOffline([int]$TimeoutSeconds = 10) {
     return $false
 }
 
+function Stop-ControlledHost($Process, [int]$TimeoutSeconds = 70) {
+    [IO.Directory]::CreateDirectory($controlDir) | Out-Null
+    [IO.File]::WriteAllText($cancelPath, 'stop')
+    try { $Process.WaitForExit($TimeoutSeconds * 1000) | Out-Null } catch { }
+    if (-not $Process.HasExited) {
+        Stop-Process -Id $Process.Id -Force
+        try { $Process.WaitForExit(10000) | Out-Null } catch { }
+    }
+    if (-not (Wait-AgentOffline)) { throw 'agent_service_stop_timeout' }
+}
+
 function Remove-ControlFiles {
     foreach ($path in @($lockPath,$requestPath,$gatePath,$cancelPath)) {
         Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
@@ -236,9 +247,7 @@ if ($Mode -eq 'stop') {
         Write-Host 'Agent service: already stopped'
         exit 0
     }
-    Stop-Process -Id $hostProcess.Id -Force
-    try { $hostProcess.WaitForExit(10000) | Out-Null } catch { }
-    if (-not (Wait-AgentOffline)) { throw 'agent_service_stop_timeout' }
+    Stop-ControlledHost $hostProcess
     Remove-ControlFiles
     Write-Host 'Agent service: STOPPED'
     exit 0
@@ -253,9 +262,7 @@ if ($null -ne $hostProcess) {
     if ($live.Ok) { $hasLiveManagedEndpoint = $true } else { $hasLiveManagedEndpoint = $consoleLive }
     if ($hasLiveManagedEndpoint) {
         Write-Host "Agent service: restarting stale controlled runtime pid=$($hostProcess.Id)"
-        Stop-Process -Id $hostProcess.Id -Force
-        try { $hostProcess.WaitForExit(10000) | Out-Null } catch { }
-        if (-not (Wait-AgentOffline)) { throw 'agent_service_stale_runtime_stop_timeout' }
+        Stop-ControlledHost $hostProcess
         Remove-ControlFiles
         $hostProcess = $null
     }
@@ -281,7 +288,8 @@ $request = [ordered]@{
         $serviceScript,'--config',$resolvedConfig,'--output-dir',$resolvedOutput,
         '--tenant-id',$TenantId,'--subject-type','own','--host','127.0.0.1','--port',[string]$Port,
         '--worker-count',[string]$WorkerCount,
-        '--console-port',[string]$ConsolePort,'--console-tenant-id',$ConsoleTenantId,'--operator-base-url',$OperatorBaseUrl
+        '--console-port',[string]$ConsolePort,'--console-tenant-id',$ConsoleTenantId,'--operator-base-url',$OperatorBaseUrl,
+        '--shutdown-file',$cancelPath
     )
     working_directory = $root
     gate_path = $gatePath
@@ -320,6 +328,6 @@ do {
     }
 } while ([DateTime]::UtcNow -lt $deadline)
 
-if (-not $hostProcess.HasExited) { Stop-Process -Id $hostProcess.Id -Force -ErrorAction SilentlyContinue }
+if (-not $hostProcess.HasExited) { Stop-ControlledHost $hostProcess }
 Remove-ControlFiles
 throw "agent_service_start_failed; inspect $stderrPath"

@@ -673,6 +673,26 @@ class PostgresWorkerStorage:
             conn.commit()
         return changed
 
+    def release_proxy_capacity_by_owner(self, owner_id: str) -> int:
+        """Idempotently release this tenant's active reservations for one exact Worker owner."""
+        owner_id = str(owner_id or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", owner_id):
+            raise ValueError("invalid capacity reservation owner")
+        with self._connect_factory() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE amazon_us.proxy_capacity_reservation
+                    SET status='released',reason='worker_process_exit',released_at=CURRENT_TIMESTAMP,
+                        updated_at=CURRENT_TIMESTAMP
+                    WHERE tenant_id=%s AND owner_id=%s AND status='active'
+                    """,
+                    (self.tenant_id, owner_id),
+                )
+                changed = max(0, int(cursor.rowcount))
+            conn.commit()
+        return changed
+
     def release_claimed_capacity_leases(self, owner_id: str, reason: str) -> int:
         """Restore tasks owned by a worker when capacity becomes invalid after a claim."""
         owner_id = str(owner_id or "").strip()

@@ -246,6 +246,10 @@ def test_owned_full_wrapper_exposes_agent_service_lifecycle_and_scoped_calls():
     assert "$lockStart -is [DateTime]" in control
     assert "AMAZON_US_POSTGRES_DSN" not in control
     assert "AMAZON_COLLECTION_API_KEY" not in control
+    assert "--shutdown-file" in control
+    assert "Stop-ControlledHost" in control
+    stop_control = control.split("function Stop-ControlledHost", 1)[1]
+    assert stop_control.index("[IO.File]::WriteAllText($cancelPath") < stop_control.index("Stop-Process -Id $Process.Id -Force")
 
 
 def test_agent_business_commands_ensure_the_local_service_before_calling_client():
@@ -336,8 +340,8 @@ def test_agent_service_start_replaces_only_a_verified_ready_stale_runtime():
 
     assert "$live.Ok -and (Test-CurrentRuntime $lock -MatchRequestedWorkerCount)" in start_block
     assert "if ($live.Ok)" in start_block
-    assert "Stop-Process -Id $hostProcess.Id -Force" in start_block
-    assert "Wait-AgentOffline" in start_block
+    assert "Stop-ControlledHost $hostProcess" in start_block
+    assert "Wait-AgentOffline" in control.split("function Stop-ControlledHost", 1)[1]
     assert "Remove-ControlFiles" in start_block
     assert "agent_service_lock_is_live_but_not_ready" in start_block
 

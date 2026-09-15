@@ -100,3 +100,10 @@
 - 新3-ASIN campaign`campaign-bd26b05e4b8055a691adc80d42c22561`终态1 succeeded、2 failed并取消。失败为4个canary可用会话到Amazon连接/响应头9–12秒无状态/无字节的transport_error；成功会话返回200/426001 bytes。按规则停止，20与1093未提交；release`33fd636`保持上线空闲。
 - 2026-09-14 22:06用户明确要求开始全量。提交前重新核对release/operator`33fd636`、两项任务Running、三Worker3/3且restart0、31槽capacity allowed、目标tenant 1093 active ASIN和0 active campaign/job/lease/reservation；清单1093条全部唯一合法。
 - 使用稳定幂等键`prod-33fd636-full1093-20260914-v1`一次提交单一后台campaign`campaign-b14bef6a4b39509a9c92e1ff2629386b`，API返回202。首个进度快照为total1093、pending1092、running1、terminal0，Worker仍3/3、restart0；未提交独立20条campaign。已知风险仍是此前3条门禁2/3 transport失败，未将其误报为已解决。
+- 2026-09-15用户要求直接修复并取消定时监控；automation`amazon`已删除。
+- 全量运行复现两轮：首轮3 Worker最终0/3 blocked，页面/API超时并遗留88个Firefox；验证全部根进程为失去geckodriver父进程的headless marionette树，清理后页面/health立即恢复。第二轮fresh canary 34/34后普通restart因旧10槽reservation残留只恢复2/3；受控释放3个死owner、3个claimed任务与3个reservation后初始恢复3/3，但随后再次全部blocked并遗留6棵/33个Firefox。
+- 10:03 campaign仍是同一ID且active：20 terminal、1063 pending、10 deferred、13 succeeded、2 variant、5 failed；无自动重提/取消。进入代码根因修复，禁止继续用重启掩盖。
+- 完成生命周期TDD切片：Firefox adapter保留service/geckodriver PID、关闭前快照owned Firefox后代，WebDriver/Service每步有界关闭，初始化失败和driver失联均走allowlist进程树兜底；纯单元红绿与真实Windows伪`firefox.exe`父进程死亡场景均通过。
+- 完成Worker退出TDD切片：服务/子Worker使用shutdown/stop marker协作退出；子进程和Supervisor按不可变状态中的真实PID形成精确`agent-refresh-<pid>` owner，幂等回队claimed refresh、释放running lease及active reservation，清理失败禁止重启。相关Firefox/Agent/存储/Windows入口聚焦回归204 passed。
+- 保留既有合规熔断：单ASIN blocked继续、代理池连续/滑窗阈值才使Worker global blocked；未实现自动换出口或验证码绕过。待完整非PG、隔离PG、静态检查、diff复核、release和同campaign恢复。
+- 发布门禁进展：Python compileall、PowerShell AST与`git diff --check`通过；完整非PG为756 passed/56 skipped；专用55444首次误用SQL_ASCII测试库产生13个字符绑定假失败并正常关闭，改用UTF-8全新隔离库后两文件29 passed并fast shutdown。真实Windows owned Firefox进程测试通过。

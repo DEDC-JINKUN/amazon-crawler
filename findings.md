@@ -97,3 +97,13 @@
 - 两个失败ASIN分别使用session-13/14与session-15/17；这些会话在ipify canary都返回200，但访问Amazon时连接/响应头阶段约9–12秒后无HTTP状态、无传输字节，均记录`transport_error`并隔离。session-23成功返回Amazon 200与426001 bytes。根因面转为“非Amazon可用的住宅出口不保证Amazon稳定”，不是状态文件、Worker重启、PostgreSQL或API。
 - 截至2026-09-14 22:00，门禁规则已阻止20条与1093条提交，`33fd636`当时保持上线空闲；该状态随后被用户22:06的全量启动指令取代。
 - 上述“未提交”是22:00前的历史状态。用户于2026-09-14 22:06再次明确要求开始全量；即时预检确认release`33fd636`、三Worker3/3、restart=0、1093条清单唯一合法、目标active campaign/job/lease/reservation均为0后，使用稳定幂等键一次提交全量campaign`campaign-b14bef6a4b39509a9c92e1ff2629386b`。初始状态1093 total、1092 pending、1 running、0 terminal；未创建独立20条campaign。
+
+## 2026-09-15 全量运行阻断
+
+- 10:03紧凑只读快照：campaign active，20/1093终态（13 succeeded、2 variant、5 failed），1063 pending、10 deferred、0 running；3个Worker均blocked，readyz 503。
+- Worker 1/3终态为`access_blocked`，Worker 2为`recovery_budget_or_lease_denied`；子状态心跳正常写到退出，说明不可变状态协议未复发，故障在业务状态传播与浏览器清理。
+- 首次页面/API整体超时同时存在8棵共88个headless marionette Firefox、父geckodriver均已退出；清理经进程归属验证的孤儿树后，Console health 3ms、首页75ms恢复。第二次运行又出现6棵/33个孤儿且全部geckodriver已退出，证明Firefox泄漏可重复。
+- fresh canary为34/34。普通服务restart期间旧Worker在canary完成后抢到10槽reservation；强杀未释放它，导致新服务只能2/3并以`capacity_reserved_elsewhere`拒绝第三Worker。受控停止Agent并调用仓储requeue/release后，3个claimed任务回队、3个active reservation清零，3 Worker可重新初始ready。
+- 因新3 Worker随后再次在访问阻断中全部blocked，重复重启不是修复；必须同时修复浏览器树生命周期、per-item阻断与Worker级熔断边界、停止时容量/租约释放。
+- 源码核对纠正了“单个ASIN直接杀Worker”的初步表述：单个blocked本来会继续，只有连续2个或20窗口3个blocked让`ProxySessionPool.circuit_open_reason`成立后才返回全局`-1`，这是现有测试与合规文档共同锁定的fail-closed边界，不能改成自动换出口继续。`recovery_budget_or_lease_denied`不是普通重试结果，而是恢复授权/租约无法证明时的全局拒绝，也保持blocked。
+- 确定的代码缺陷有两条：Selenium service原为局部变量，`driver.quit()`异常后无owned进程树兜底；子Worker daemon线程最多等10秒就被主进程放弃，且Supervisor/服务控制器直接terminate/force stop时只依赖Python finally释放reservation。修复因此只加强生命周期和精确owner回收，不弱化访问控制。

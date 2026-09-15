@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -1300,6 +1301,134 @@ def test_agent_stops_only_when_runner_reports_global_access_circuit():
 
     assert status["state"] == "blocked"
     assert status["last_error"] == "access_blocked"
+
+
+def test_campaign_worker_exit_cleanup_requeues_claims_then_releases_leases_and_capacity():
+    scripts_path = str(ROOT / "scripts")
+    sys.path.insert(0, scripts_path)
+    try:
+        campaign = load("campaign_worker_process")
+    finally:
+        sys.path.remove(scripts_path)
+    events = []
+
+    class Storage:
+        def requeue_claimed_refreshes(self, owner, reason):
+            events.append(("requeue", owner, reason))
+            return 1
+
+        def release_claimed_capacity_leases(self, owner, reason):
+            events.append(("leases", owner, reason))
+            return 2
+
+        def release_proxy_capacity_by_owner(self, owner):
+            events.append(("capacity", owner))
+            return 1
+
+    result = campaign.cleanup_worker_ownership(Storage(), "agent-refresh-4321")
+
+    assert result == {"requeued": 1, "released_leases": 2, "released_reservations": 1}
+    assert events == [
+        ("requeue", "agent-refresh-4321", "agent_refresh_process_exit"),
+        ("leases", "agent-refresh-4321", "agent_refresh_process_exit"),
+        ("capacity", "agent-refresh-4321"),
+    ]
+
+
+def test_supervisor_requests_cooperative_child_stop_before_terminate(tmp_path):
+    service = load("agent_collection_service")
+    processes = []
+
+    class Process:
+        pid = 7001
+        returncode = None
+        terminated = False
+
+        def __init__(self, stop_file):
+            self.stop_file = stop_file
+
+        def poll(self):
+            if self.returncode is None and self.stop_file.exists():
+                self.returncode = 0
+            return self.returncode
+
+        def wait(self, timeout=None):
+            assert self.poll() == 0
+            return 0
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = 0
+
+        def kill(self):
+            self.terminated = True
+            self.returncode = -9
+
+    def spawn(command, **_kwargs):
+        stop_file = Path(command[command.index("--stop-file") + 1])
+        process = Process(stop_file)
+        processes.append(process)
+        return process
+
+    supervisor = service.CampaignWorkerSupervisor(
+        ["python", "campaign_worker_process.py"], count=1, cwd=tmp_path,
+        environment={}, status_dir=tmp_path / "status", spawn=spawn,
+        monitor_interval=0.01, graceful_stop_timeout=0.5,
+    )
+    supervisor.start()
+    supervisor.stop()
+
+    assert (tmp_path / "status" / "worker-1.stop").is_file()
+    assert processes[0].terminated is False
+
+
+def test_shutdown_file_stops_server_from_watcher_thread(tmp_path):
+    service = load("agent_collection_service")
+    shutdown_file = tmp_path / "shutdown"
+    shutdown_file.touch()
+    events = []
+
+    class Server:
+        stopped = threading.Event()
+
+        def serve_forever(self):
+            events.append("serve")
+            assert self.stopped.wait(2)
+
+        def shutdown(self):
+            events.append("shutdown")
+            self.stopped.set()
+
+    service.serve_until_shutdown(Server(), shutdown_file, poll_seconds=0.01)
+
+    assert events == ["serve", "shutdown"]
+
+
+def test_supervisor_runs_idempotent_owner_cleanup_after_forced_child_stop(tmp_path):
+    service = load("agent_collection_service")
+    cleaned = []
+
+    class Process:
+        pid = 7002
+        returncode = None
+
+        def poll(self): return self.returncode
+        def wait(self, timeout=None): return self.returncode
+        def terminate(self): self.returncode = 1
+        def kill(self): self.returncode = -9
+
+    supervisor = service.CampaignWorkerSupervisor(
+        ["python", "campaign_worker_process.py"], count=1, cwd=tmp_path,
+        environment={}, status_dir=tmp_path / "status", spawn=lambda *_args, **_kwargs: Process(),
+        monitor_interval=0.01, graceful_stop_timeout=0,
+        exit_cleanup=lambda index, document: cleaned.append((index, dict(document))),
+    )
+    supervisor.start()
+    with supervisor._lock:
+        supervisor._documents[1] = {"pid": 9876, "launch_token": supervisor._launch_tokens[1]}
+    supervisor.stop()
+
+    assert cleaned == [(1, {"pid": 9876, "launch_token": supervisor._launch_tokens[1]})]
 
 
 def test_agent_capacity_denial_claims_nothing_and_recovers_after_fresh_canary():

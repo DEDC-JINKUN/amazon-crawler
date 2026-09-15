@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import threading
+import time
 import subprocess
 import uuid
 from datetime import datetime, timezone
@@ -157,6 +158,8 @@ class CampaignWorkerSupervisor:
         heartbeat_timeout: float = 5.0,
         worker_heartbeat_timeout: float = 600.0,
         restart_limit: int = 2,
+        graceful_stop_timeout: float = 0.25,
+        exit_cleanup: Callable[[int, dict[str, Any]], Any] | None = None,
     ):
         self.command = list(command)
         self.count = max(1, int(count))
@@ -168,11 +171,14 @@ class CampaignWorkerSupervisor:
         self.heartbeat_timeout = max(0.1, float(heartbeat_timeout))
         self.worker_heartbeat_timeout = max(0.1, float(worker_heartbeat_timeout))
         self.restart_limit = max(0, int(restart_limit))
+        self.graceful_stop_timeout = max(0.0, float(graceful_stop_timeout))
+        self.exit_cleanup = exit_cleanup
         self._children: dict[int, Any] = {}
         self._states = {index: "created" for index in range(1, self.count + 1)}
         self._restart_counts = {index: 0 for index in range(1, self.count + 1)}
         self._launch_tokens = {index: "" for index in range(1, self.count + 1)}
         self._documents: dict[int, dict[str, Any]] = {index: {} for index in range(1, self.count + 1)}
+        self._cleaned_launch_tokens: set[str] = set()
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -180,9 +186,13 @@ class CampaignWorkerSupervisor:
     def _status_path(self, index: int) -> Path:
         return self.status_dir / f"worker-{index}.json"
 
+    def _stop_path(self, index: int) -> Path:
+        return self.status_dir / f"worker-{index}.stop"
+
     def _spawn_locked(self, index: int) -> None:
         path = self._status_path(index)
         prepare_status_snapshot_launch(path)
+        self._stop_path(index).unlink(missing_ok=True)
         launch_token = uuid.uuid4().hex
         self._launch_tokens[index] = launch_token
         self._documents[index] = {}
@@ -190,6 +200,7 @@ class CampaignWorkerSupervisor:
             *self.command,
             "--status-file", str(path),
             "--launch-token", launch_token,
+            "--stop-file", str(self._stop_path(index)),
         ]
         self._children[index] = self.spawn(
             command,
@@ -197,6 +208,18 @@ class CampaignWorkerSupervisor:
             env=self.environment,
         )
         self._states[index] = "starting"
+
+    def _cleanup_child_locked(self, index: int) -> bool:
+        token = self._launch_tokens[index]
+        if not token or token in self._cleaned_launch_tokens or self.exit_cleanup is None:
+            return True
+        try:
+            self.exit_cleanup(index, dict(self._documents[index]))
+        except Exception:
+            self._states[index] = "failed"
+            return False
+        self._cleaned_launch_tokens.add(token)
+        return True
 
     def start(self) -> None:
         self.status_dir.mkdir(parents=True, exist_ok=True)
@@ -257,6 +280,8 @@ class CampaignWorkerSupervisor:
                                 process.terminate()
                             except OSError:
                                 pass
+                        continue
+                    if not self._cleanup_child_locked(index):
                         continue
                     if self._states[index] in {"blocked", "failed"}:
                         continue
@@ -364,6 +389,14 @@ class CampaignWorkerSupervisor:
             self._thread.join(timeout=max(1.0, self.monitor_interval * 2))
         with self._lock:
             processes = list(self._children.values())
+            indexed_processes = list(self._children.items())
+        self.status_dir.mkdir(parents=True, exist_ok=True)
+        for index, process in indexed_processes:
+            if process.poll() is None:
+                self._stop_path(index).write_text("stop", encoding="ascii")
+        deadline = time.monotonic() + self.graceful_stop_timeout
+        while any(process.poll() is None for process in processes) and time.monotonic() < deadline:
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
         for process in processes:
             if process.poll() is None:
                 process.terminate()
@@ -373,6 +406,19 @@ class CampaignWorkerSupervisor:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
+        with self._lock:
+            for index in self._children:
+                self._cleanup_child_locked(index)
+
+
+def cleanup_worker_ownership(storage: Any, worker_id: str) -> dict[str, int]:
+    """Release only database state owned by one exact exiting Worker."""
+    reason = "agent_refresh_process_exit"
+    return {
+        "requeued": int(storage.requeue_claimed_refreshes(worker_id, reason)),
+        "released_leases": int(storage.release_claimed_capacity_leases(worker_id, reason)),
+        "released_reservations": int(storage.release_proxy_capacity_by_owner(worker_id)),
+    }
 
 
 class RefreshOnlyStorageView:
@@ -438,6 +484,7 @@ class AgentRefreshWorker:
         config: dict[str, Any],
         poll_seconds: float = 1.0,
         lease_seconds: int = 600,
+        worker_id: str | None = None,
     ):
         self.storage = storage
         self._refresh_storage = RefreshOnlyStorageView(storage)
@@ -448,6 +495,7 @@ class AgentRefreshWorker:
             configure(self.config)
         self.poll_seconds = max(0.05, float(poll_seconds))
         self.lease_seconds = max(1, int(lease_seconds))
+        self.worker_id = str(worker_id or f"agent-refresh-{os.getpid()}")
         self._event = threading.Event()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -479,13 +527,17 @@ class AgentRefreshWorker:
     def notify(self) -> None:
         self._event.set()
 
-    def stop(self, timeout_seconds: float = 10.0) -> None:
+    def stop(self, timeout_seconds: float = 30.0) -> bool:
         self._stop.set()
         self._event.set()
         if self._thread is not None:
             self._thread.join(timeout=max(0.1, timeout_seconds))
+        stopped = self._thread is None or not self._thread.is_alive()
         with self._lock:
-            self._state = "stopped"
+            self._state = "stopped" if stopped else "failed"
+            if not stopped:
+                self._last_error = "worker_stop_timeout"
+        return stopped
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -505,7 +557,7 @@ class AgentRefreshWorker:
             }
 
     def _run(self) -> None:
-        worker_id = f"agent-refresh-{os.getpid()}"
+        worker_id = self.worker_id
         database_failures = 0
         while not self._stop.is_set():
             self._heartbeat()
@@ -651,7 +703,29 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--console-port", type=int, default=0)
     parser.add_argument("--console-tenant-id", default="amazon_us_main")
     parser.add_argument("--operator-base-url")
+    parser.add_argument("--shutdown-file", type=Path)
     return parser
+
+
+def serve_until_shutdown(server: Any, shutdown_file: Path | None, *, poll_seconds: float = 0.2) -> None:
+    if shutdown_file is None:
+        server.serve_forever()
+        return
+    finished = threading.Event()
+
+    def watch() -> None:
+        while not finished.wait(max(0.01, poll_seconds)):
+            if shutdown_file.exists():
+                server.shutdown()
+                return
+
+    watcher = threading.Thread(target=watch, name="agent-service-shutdown", daemon=True)
+    watcher.start()
+    try:
+        server.serve_forever()
+    finally:
+        finished.set()
+        watcher.join(timeout=1)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -708,6 +782,13 @@ def main(argv: list[str] | None = None) -> int:
     console_server = None
     console_thread = None
     console_started = False
+
+    def cleanup_exited_child(_index: int, document: dict[str, Any]) -> None:
+        pid = document.get("pid")
+        if type(pid) is not int or pid <= 0:
+            raise RuntimeError("campaign worker cleanup identity is unavailable")
+        cleanup_worker_ownership(storage, f"agent-refresh-{pid}")
+
     try:
         server = CollectionServer(
             (args.host, args.port),
@@ -741,11 +822,13 @@ def main(argv: list[str] | None = None) -> int:
                 environment=worker_environment,
                 status_dir=output_dir / 'control' / 'agent-workers',
                 worker_heartbeat_timeout=args.lease_seconds,
+                graceful_stop_timeout=35.0,
+                exit_cleanup=cleanup_exited_child,
             )
             supervisor.start()
         if worker is not None: worker.start()
         print(f"Agent Collection Service listening on http://{args.host}:{server.server_port}", flush=True)
-        server.serve_forever()
+        serve_until_shutdown(server, args.shutdown_file.resolve() if args.shutdown_file else None)
     except KeyboardInterrupt:
         pass
     finally:

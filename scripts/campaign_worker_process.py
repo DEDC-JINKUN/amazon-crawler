@@ -10,7 +10,7 @@ import re
 import signal
 import threading
 
-from agent_collection_service import AgentRefreshWorker
+from agent_collection_service import AgentRefreshWorker, cleanup_worker_ownership
 from amazon_us_worker import _build_http_adapter, load_config
 from campaign_worker_status import publish_status_snapshot
 from postgres_worker_storage import PostgresWorkerStorage
@@ -47,6 +47,7 @@ def main() -> int:
     parser.add_argument("--lease-seconds", type=int, default=600)
     parser.add_argument("--status-file", type=Path)
     parser.add_argument("--launch-token", required=True)
+    parser.add_argument("--stop-file", type=Path)
     args = parser.parse_args()
     dsn = os.environ.get(args.dsn_env, "").strip()
     if not dsn:
@@ -59,6 +60,15 @@ def main() -> int:
         expected_parent = output_dir / "control" / "agent-workers"
         if status_file.parent != expected_parent or status_file.suffix != ".json":
             raise RuntimeError("worker status path is outside the controlled output directory")
+    stop_file = (args.stop_file or (status_file.with_suffix(".stop") if status_file else None))
+    if stop_file is None:
+        raise RuntimeError("worker stop path is required")
+    stop_file = stop_file.resolve()
+    if (
+        stop_file.parent != output_dir / "control" / "agent-workers"
+        or not re.fullmatch(r"worker-[1-8]\.stop", stop_file.name)
+    ):
+        raise RuntimeError("worker stop path is outside the controlled output directory")
     config = load_config(args.config.resolve())
     config["output_dir"] = output_dir
     config["raw_html_dir"] = output_dir / "raw_html"
@@ -66,12 +76,14 @@ def main() -> int:
         dsn, args.tenant_id, args.subject_type,
         default_lease_seconds=args.lease_seconds,
     )
+    worker_id = f"agent-refresh-{os.getpid()}"
     worker = AgentRefreshWorker(
         storage=storage,
         adapter_factory=lambda: _build_http_adapter(config),
         config=config,
         poll_seconds=args.poll_seconds,
         lease_seconds=args.lease_seconds,
+        worker_id=worker_id,
     )
     stopped = threading.Event()
     stop_requested = False
@@ -90,6 +102,9 @@ def main() -> int:
     status_sequence = 0
     try:
         while not stopped.wait(1.0):
+            if stop_file.exists():
+                stop_requested = True
+                break
             status = worker.status()
             last_state = str(status.get("state") or "unknown")
             status_sequence += 1
@@ -101,7 +116,13 @@ def main() -> int:
                 exit_code = 3
                 break
     finally:
-        worker.stop()
+        stopped_cleanly = worker.stop()
+        try:
+            cleanup_worker_ownership(storage, worker_id)
+        except Exception:
+            exit_code = 2
+        if not stopped_cleanly:
+            exit_code = 2
         if stop_requested and last_state not in {"failed", "blocked"}:
             status_sequence += 1
             _write_status(
