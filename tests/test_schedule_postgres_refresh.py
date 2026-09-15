@@ -66,9 +66,9 @@ def test_scheduler_all_profiles_uses_fixed_business_cadence(capsys):
     assert "subject_type" not in payload and "min_age_hours" not in payload
     assert calls == [
         ("own", 4, 10, ("own_core",)),
-        ("own", 12, 9, ("own_normal", "standard")),
+        ("own", 168, 9, ("own_normal", "standard")),
         ("competitor", 6, 8, ("competitor_core",)),
-        ("competitor", 24, 7, ("competitor_normal", "standard")),
+        ("competitor", 168, 7, ("competitor_normal", "standard")),
         ("candidate", 72, 6, ("candidate", "standard")),
     ]
 

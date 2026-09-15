@@ -228,6 +228,8 @@ Content-Type: application/json
 
 每次最多查询 100 个去重后的 ASIN，只读取已有快照，不会因为批量查询而触发采集；不存在的 ASIN 会以 `found=false` 返回。
 
+外部销量导入、`销量×价格 >= $2000`分层、168小时非核心cadence及Woot评论实验的字段和门禁见[`collection_efficiency.md`](collection_efficiency.md)。这些通道不把外部销量写入`product_snapshot`，Woot在固定样本门禁通过前也不接入生产Worker。
+
 ## 当前不支持
 
 - 直接在 API 请求线程中运行爬虫；

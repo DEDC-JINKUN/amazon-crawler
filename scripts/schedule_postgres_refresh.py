@@ -18,9 +18,9 @@ except ModuleNotFoundError:
 
 CADENCE_PROFILES = {
     "own_core": ("own", 4, ("own_core",)),
-    "own_normal": ("own", 12, ("own_normal", "standard")),
+    "own_normal": ("own", 168, ("own_normal", "standard")),
     "competitor_core": ("competitor", 6, ("competitor_core",)),
-    "competitor_normal": ("competitor", 24, ("competitor_normal", "standard")),
+    "competitor_normal": ("competitor", 168, ("competitor_normal", "standard")),
     "candidate": ("candidate", 72, ("candidate", "standard")),
 }
 

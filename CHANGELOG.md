@@ -10,6 +10,7 @@
 
 ## Unreleased
 
+- 新增source-separated外部销量CSV通道和`$2000`销量×自采USD价格分层：批次SHA256幂等、冲突拒绝、缺值跳过、竞品显式继承核心层级，非核心PDP统一168小时。新增未接生产的Woot评论实验适配器；透明UA、403/HTML/坏JSON fail closed、稳定复合键和`woot_ajax`来源列均有离线测试。
 - 每个Agent Worker容量批次由5条收紧为最多3条，三Worker所需并发slot随实际批次计算；单个子Worker全局熔断不终止其他健康子进程。PostgreSQL claim现在携带`asin_master.priority/refresh_policy`，`own_normal/competitor_normal/candidate`的transport、访问阻断、字段或上下文缺口不启动Firefox，只有显式`own_core/competitor_core`保留一次有界浏览器补全。
 - Campaign读取默认返回数据库聚合汇总，不再JOIN并序列化全部1093个成员；显式`members=page&offset=&limit=`提供最多100条分页，内部Operator客户端使用`members=all`保持现有完整投影。隔离PostgreSQL 1093成员、20次汇总p95门禁≤2秒通过。
 - 修复三 Worker 停止/重启的资源泄漏链：Firefox adapter 现在保留 geckodriver 所有权，在 WebDriver 关闭超时、初始化失败或 driver 已消失时，按已捕获的父子关系、可执行名与进程创建时间三重身份只回收所属 Firefox 进程；Agent 服务与子 Worker 改为协作停止，Supervisor 以 launch token 预先分配精确 Worker owner，退出时幂等回队 claimed refresh、释放 item lease 与 active capacity reservation，首次心跳前崩溃和强制结束也不依赖子进程PID回传。stop在等待线程前先关闭refresh claim与新capacity reservation入口，超时线程不能在owner清理后重新占用资源。全局访问熔断仍保持 fail closed，不自动换出口绕过验证码。
