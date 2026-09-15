@@ -26,6 +26,8 @@ ASIN_RE = re.compile(r"^[A-Z0-9]{10}$")
 TENANT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,120}$")
 ITEM_PATH = re.compile(r"^/api/items/([A-Za-z0-9]{10})$")
 RUN_PATH = re.compile(r"^/api/runs/([A-Za-z0-9_-]+)$")
+REVIEW_ITEM_PATH = re.compile(r"^/api/reviews/([A-Za-z0-9]{10})$")
+MAX_REVIEW_OFFSET = 100_000
 STATIC_FILES = {
     "/": "index.html",
     "/index.html": "index.html",
@@ -692,6 +694,8 @@ class PostgresConsoleRepository:
             "last_evidence_at": evidence.get("last_evidence_at"),
         }
 
+
+
     def load_recovery_status(self) -> dict[str, Any]:
         from recovery_scheduler import read_projection
         return read_projection(self._connect, self._require_tenant())
@@ -1199,6 +1203,562 @@ class PostgresConsoleRepository:
         }
 
 
+class PostgresReviewConsoleRepository:
+    """Bounded read-only views over the independent amazon_reviews schema."""
+
+    COVERAGE_STATUSES = {"complete", "no_reviews_verified", "partial", "source_limited", "blocked"}
+
+    def __init__(self, dsn: str, tenant_id: str | None = None, provider: str = "woot_reviews"):
+        if not str(dsn or "").strip():
+            raise ValueError("PostgreSQL DSN must not be empty")
+        self.dsn = str(dsn)
+        self.tenant_id = str(tenant_id or "").strip()
+        self.provider = str(provider or "").strip()
+        if self.tenant_id and not TENANT_RE.fullmatch(self.tenant_id):
+            raise ValueError("invalid review tenant_id")
+        if not TENANT_RE.fullmatch(self.provider):
+            raise ValueError("invalid review provider")
+
+    def for_tenant(self, tenant_id: str):
+        tenant_id = str(tenant_id or "").strip()
+        if not TENANT_RE.fullmatch(tenant_id):
+            return None
+        return type(self)(self.dsn, tenant_id, self.provider)
+
+    def _require_tenant(self) -> str:
+        if not self.tenant_id:
+            raise ValueError("review tenant selection is required")
+        return self.tenant_id
+
+    def _connect(self):
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:
+            raise RuntimeError("PostgreSQL review console requires optional dependency psycopg") from exc
+        return psycopg.connect(
+            self.dsn,
+            row_factory=dict_row,
+            options="-c default_transaction_read_only=on -c statement_timeout=5000",
+        )
+
+    @staticmethod
+    def _page(limit: int, offset: int) -> tuple[int, int]:
+        if limit < 1 or limit > 100:
+            raise ValueError("limit must be between 1 and 100")
+        if offset < 0 or offset > MAX_REVIEW_OFFSET:
+            raise ValueError(f"offset must be between 0 and {MAX_REVIEW_OFFSET}")
+        return limit, offset
+
+    def _unavailable(self, error_code: str = "review_database_unavailable") -> dict[str, Any]:
+        return {
+            "schema_version": "amazon-us-console-woot-reviews-v1",
+            "availability": "unavailable",
+            "error_code": error_code,
+            "source_type": "postgres",
+            "provider": self.provider,
+            "tenant_id": self.tenant_id or None,
+            "observed_at": None,
+            "manifest_verified": None,
+            "summary": {},
+            "derived": {},
+        }
+
+    def _require_schema(self, cursor) -> bool:
+        cursor.execute(
+            "SELECT to_regclass('amazon_reviews.review_job_state') AS job_relation,"
+            "to_regclass('amazon_reviews.review_record') AS record_relation"
+        )
+        row = cursor.fetchone() or {}
+        return row.get("job_relation") is not None and row.get("record_relation") is not None
+
+    def load_overview(self) -> dict[str, Any]:
+        try:
+            tenant_id = self._require_tenant()
+            with self._connect() as conn, conn.cursor() as cursor:
+                if not self._require_schema(cursor):
+                    return self._unavailable("review_schema_unavailable")
+                cursor.execute(
+                    """
+                    SELECT COUNT(*) AS source_unique_asins,
+                           COUNT(*) FILTER (WHERE status IN ('succeeded','source_limited')) AS successful_asins,
+                           COUNT(*) FILTER (WHERE status IN ('pending','running','retryable')) AS pending_asins,
+                           COUNT(*) FILTER (WHERE status IN ('blocked','failed')) AS failed_asins,
+                           COUNT(*) FILTER (WHERE fetched_review_count=0) AS zero_review_asins,
+                           MAX(updated_at) AS job_observed_at
+                    FROM amazon_reviews.review_job_state
+                    WHERE tenant_id=%s AND marketplace='US' AND provider=%s
+                    """,
+                    (tenant_id, self.provider),
+                )
+                jobs = dict(cursor.fetchone() or {})
+                cursor.execute(
+                    """
+                    SELECT coverage_status,COUNT(*) AS count
+                    FROM amazon_reviews.review_job_state
+                    WHERE tenant_id=%s AND marketplace='US' AND provider=%s
+                      AND coverage_status IS NOT NULL
+                    GROUP BY coverage_status ORDER BY coverage_status
+                    """,
+                    (tenant_id, self.provider),
+                )
+                coverage = {str(row["coverage_status"]): int(row["count"]) for row in cursor.fetchall()}
+                cursor.execute(
+                    """
+                    SELECT COUNT(*) AS unique_reviews,
+                           COUNT(*) FILTER (WHERE jsonb_array_length(review_images)>0) AS with_images,
+                           COUNT(*) FILTER (WHERE jsonb_array_length(review_videos)>0) AS with_videos,
+                           COUNT(*) FILTER (WHERE verified IS TRUE) AS verified_reviews,
+                           COUNT(*) FILTER (WHERE vine IS TRUE) AS vine_reviews,
+                           MAX(last_seen_at) AS record_observed_at
+                    FROM amazon_reviews.review_record
+                    WHERE tenant_id=%s AND marketplace='US' AND provider=%s
+                    """,
+                    (tenant_id, self.provider),
+                )
+                records = dict(cursor.fetchone() or {})
+            observed_values = [
+                value for value in (jobs.get("job_observed_at"), records.get("record_observed_at"))
+                if value is not None
+            ]
+            observed_at = max(observed_values) if observed_values else None
+            claim_complete = int(coverage.get("complete", 0)) + int(coverage.get("no_reviews_verified", 0))
+            return {
+                "schema_version": "amazon-us-console-woot-reviews-v1",
+                "availability": "available",
+                "error_code": None,
+                "source_type": "postgres",
+                "provider": self.provider,
+                "tenant_id": tenant_id,
+                "observed_at": observed_at,
+                "manifest_verified": None,
+                "summary": {
+                    "source_unique_asins": int(jobs.get("source_unique_asins") or 0),
+                    "successful_asins": int(jobs.get("successful_asins") or 0),
+                    "pending_asins": int(jobs.get("pending_asins") or 0),
+                    "failed_asins": int(jobs.get("failed_asins") or 0),
+                    "unique_reviews": int(records.get("unique_reviews") or 0),
+                    "coverage_status_counts": coverage,
+                    "claim_100_percent_asins": claim_complete,
+                },
+                "derived": {
+                    "zero_review_asins": int(jobs.get("zero_review_asins") or 0),
+                    "with_images": int(records.get("with_images") or 0),
+                    "with_videos": int(records.get("with_videos") or 0),
+                    "verified_reviews": int(records.get("verified_reviews") or 0),
+                    "vine_reviews": int(records.get("vine_reviews") or 0),
+                },
+            }
+        except (OSError, RuntimeError, ValueError):
+            return self._unavailable()
+        except Exception:
+            return self._unavailable()
+
+    def list_asins(
+        self,
+        *,
+        query: str | None = None,
+        coverage: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        limit, offset = self._page(limit, offset)
+        if coverage and coverage not in self.COVERAGE_STATUSES:
+            raise ValueError("invalid coverage status")
+        try:
+            tenant_id = self._require_tenant()
+            conditions = ["tenant_id=%s", "marketplace='US'", "provider=%s"]
+            params: list[Any] = [tenant_id, self.provider]
+            term = str(query or "").strip().upper()
+            if term:
+                conditions.append("asin LIKE %s")
+                params.append(f"%{term}%")
+            if coverage:
+                conditions.append("coverage_status=%s")
+                params.append(coverage)
+            where = " AND ".join(conditions)
+            with self._connect() as conn, conn.cursor() as cursor:
+                if not self._require_schema(cursor):
+                    unavailable = self._unavailable("review_schema_unavailable")
+                    return {**unavailable, "total": 0, "limit": limit, "offset": offset, "items": []}
+                cursor.execute(
+                    f"SELECT COUNT(*) AS count FROM amazon_reviews.review_job_state WHERE {where}",
+                    tuple(params),
+                )
+                total = int((cursor.fetchone() or {}).get("count") or 0)
+                cursor.execute(
+                    f"""
+                    SELECT asin,status,coverage_status,
+                           fetched_review_count AS fetched_unique_count,
+                           last_run_id,last_error AS error_code,updated_at
+                    FROM amazon_reviews.review_job_state
+                    WHERE {where}
+                    ORDER BY asin LIMIT %s OFFSET %s
+                    """,
+                    tuple(params + [limit, offset]),
+                )
+                items = [dict(row) for row in cursor.fetchall()]
+            return {
+                "schema_version": "amazon-us-console-woot-reviews-v1",
+                "availability": "available",
+                "source_type": "postgres",
+                "provider": self.provider,
+                "tenant_id": tenant_id,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "items": items,
+            }
+        except (OSError, RuntimeError, ValueError):
+            unavailable = self._unavailable()
+            return {**unavailable, "total": 0, "limit": limit, "offset": offset, "items": []}
+        except Exception:
+            unavailable = self._unavailable()
+            return {**unavailable, "total": 0, "limit": limit, "offset": offset, "items": []}
+
+    def load_asin(
+        self,
+        asin: str,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        rating: int | None = None,
+        verified: bool | None = None,
+    ) -> dict[str, Any]:
+        limit, offset = self._page(limit, offset)
+        asin = str(asin or "").strip().upper()
+        if not ASIN_RE.fullmatch(asin):
+            raise ValueError("invalid ASIN")
+        if rating is not None and rating not in {1, 2, 3, 4, 5}:
+            raise ValueError("rating must be between 1 and 5")
+        try:
+            tenant_id = self._require_tenant()
+            conditions = ["tenant_id=%s", "marketplace='US'", "asin=%s", "provider=%s"]
+            params: list[Any] = [tenant_id, asin, self.provider]
+            if rating is not None:
+                conditions.append("rating=%s")
+                params.append(rating)
+            if verified is not None:
+                conditions.append("verified=%s")
+                params.append(verified)
+            where = " AND ".join(conditions)
+            with self._connect() as conn, conn.cursor() as cursor:
+                if not self._require_schema(cursor):
+                    unavailable = self._unavailable("review_schema_unavailable")
+                    return {**unavailable, "asin": asin, "status": None, "total": 0, "limit": limit, "offset": offset, "next_offset": None, "items": []}
+                cursor.execute(
+                    """
+                    SELECT asin,status,coverage_status,
+                           fetched_review_count AS fetched_unique_count,
+                           last_run_id,last_error AS error_code,updated_at
+                    FROM amazon_reviews.review_job_state
+                    WHERE tenant_id=%s AND marketplace='US' AND asin=%s AND provider=%s
+                    """,
+                    (tenant_id, asin, self.provider),
+                )
+                status = cursor.fetchone()
+                cursor.execute(
+                    f"SELECT COUNT(*) AS count FROM amazon_reviews.review_record WHERE {where}",
+                    tuple(params),
+                )
+                total = int((cursor.fetchone() or {}).get("count") or 0)
+                cursor.execute(
+                    f"""
+                    SELECT review_id,provider_review_id,id_kind,author,rating,title,body,
+                           review_url,review_date_text AS review_date,locale,verified,vine,
+                           helpful_votes,review_images,review_videos,first_seen_at,last_seen_at
+                    FROM amazon_reviews.review_record
+                    WHERE {where}
+                    ORDER BY last_seen_at DESC,review_id
+                    LIMIT %s OFFSET %s
+                    """,
+                    tuple(params + [limit, offset]),
+                )
+                items = [dict(row) for row in cursor.fetchall()]
+            next_offset = offset + len(items) if offset + len(items) < total else None
+            return {
+                "schema_version": "amazon-us-console-woot-reviews-v1",
+                "availability": "available",
+                "source_type": "postgres",
+                "provider": self.provider,
+                "tenant_id": tenant_id,
+                "asin": asin,
+                "status": dict(status) if status else None,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "next_offset": next_offset,
+                "items": items,
+            }
+        except (OSError, RuntimeError, ValueError):
+            unavailable = self._unavailable()
+            return {**unavailable, "asin": asin, "status": None, "total": 0, "limit": limit, "offset": offset, "next_offset": None, "items": []}
+        except Exception:
+            unavailable = self._unavailable()
+            return {**unavailable, "asin": asin, "status": None, "total": 0, "limit": limit, "offset": offset, "next_offset": None, "items": []}
+
+
+class WootReviewConsoleRepository:
+    """Verified, read-only views over one Woot aggregate directory."""
+
+    REQUIRED_FILES = {
+        "asin_status.jsonl", "collection_summary.json", "pending_asins.json", "reviews.jsonl"
+    }
+    COVERAGE_STATUSES = {"complete", "no_reviews_verified", "partial", "source_limited", "blocked"}
+
+    def __init__(self, root: Path | None, tenant_id: str | None = None):
+        self.root = Path(root).resolve() if root is not None else None
+        self.tenant_id = str(tenant_id or "").strip()
+        if self.tenant_id and not TENANT_RE.fullmatch(self.tenant_id):
+            raise ValueError("invalid review tenant_id")
+        self.availability = "unavailable"
+        self.error_code = "not_configured" if root is None else "review_data_unavailable"
+        self.summary: dict[str, Any] = {}
+        self.statuses: list[dict[str, Any]] = []
+        self.status_by_asin: dict[str, dict[str, Any]] = {}
+        self.review_offsets: dict[str, list[int]] = {}
+        self.derived = {
+            "zero_review_asins": 0,
+            "with_images": 0,
+            "with_videos": 0,
+            "verified_reviews": 0,
+            "vine_reviews": 0,
+        }
+        self.observed_at: str | None = None
+        if root is None:
+            return
+        try:
+            self._load()
+        except (OSError, ValueError, json.JSONDecodeError):
+            self.availability = "unavailable"
+            self.error_code = "review_data_invalid"
+
+    def for_tenant(self, tenant_id: str):
+        tenant_id = str(tenant_id or "").strip()
+        if not TENANT_RE.fullmatch(tenant_id):
+            return None
+        if not self.tenant_id or tenant_id != self.tenant_id:
+            return WootReviewConsoleRepository(None, tenant_id)
+        return self
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _load(self) -> None:
+        if self.root is None or not self.root.is_dir():
+            raise ValueError("aggregate directory is missing")
+        manifest_path = self.root / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        entries = manifest.get("files")
+        if not isinstance(entries, list):
+            raise ValueError("manifest files must be a list")
+        indexed: dict[str, dict[str, Any]] = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError("manifest entry must be an object")
+            name = str(entry.get("path") or "")
+            if name not in self.REQUIRED_FILES or name in indexed:
+                raise ValueError("manifest contains an unexpected or duplicate path")
+            indexed[name] = entry
+        if set(indexed) != self.REQUIRED_FILES:
+            raise ValueError("manifest is missing required review files")
+        for name, entry in indexed.items():
+            path = (self.root / name).resolve()
+            if path.parent != self.root or not path.is_file():
+                raise ValueError("review file is outside aggregate directory or missing")
+            if path.stat().st_size != int(entry.get("bytes") or -1):
+                raise ValueError("review file size mismatch")
+            if self._sha256(path) != str(entry.get("sha256") or "").lower():
+                raise ValueError("review file hash mismatch")
+
+        summary = json.loads((self.root / "collection_summary.json").read_text(encoding="utf-8"))
+        if not isinstance(summary, dict):
+            raise ValueError("review summary must be an object")
+        statuses: list[dict[str, Any]] = []
+        status_by_asin: dict[str, dict[str, Any]] = {}
+        with (self.root / "asin_status.jsonl").open(encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                item = json.loads(line)
+                if not isinstance(item, dict):
+                    raise ValueError("review status row must be an object")
+                asin = str(item.get("asin") or "").strip().upper()
+                coverage = str(item.get("coverage_status") or "")
+                if not ASIN_RE.fullmatch(asin) or asin in status_by_asin:
+                    raise ValueError("review status ASIN is invalid or duplicated")
+                if coverage not in self.COVERAGE_STATUSES:
+                    raise ValueError("review coverage status is invalid")
+                normalized = dict(item)
+                normalized["asin"] = asin
+                normalized["coverage_status"] = coverage
+                normalized["fetched_unique_count"] = int(item.get("fetched_unique_count") or 0)
+                if normalized["fetched_unique_count"] < 0:
+                    raise ValueError("review count must be non-negative")
+                statuses.append(normalized)
+                status_by_asin[asin] = normalized
+
+        review_offsets: dict[str, list[int]] = {}
+        derived = {
+            "zero_review_asins": sum(item["fetched_unique_count"] == 0 for item in statuses),
+            "with_images": 0,
+            "with_videos": 0,
+            "verified_reviews": 0,
+            "vine_reviews": 0,
+        }
+        review_count = 0
+        review_ids: dict[str, set[str]] = {}
+        reviews_path = self.root / "reviews.jsonl"
+        with reviews_path.open("rb") as handle:
+            while True:
+                offset = handle.tell()
+                line = handle.readline()
+                if not line:
+                    break
+                if not line.strip():
+                    continue
+                item = json.loads(line)
+                if not isinstance(item, dict):
+                    raise ValueError("review row must be an object")
+                asin = str(item.get("asin") or "").strip().upper()
+                if asin not in status_by_asin:
+                    raise ValueError("review ASIN is missing from status index")
+                review_id = str(item.get("review_id") or "")
+                ids = review_ids.setdefault(asin, set())
+                if not review_id or review_id in ids:
+                    raise ValueError("review row has blank or duplicate review_id")
+                ids.add(review_id)
+                review_offsets.setdefault(asin, []).append(offset)
+                review_count += 1
+                derived["with_images"] += bool(item.get("review_images"))
+                derived["with_videos"] += bool(item.get("review_videos"))
+                derived["verified_reviews"] += item.get("verified") is True
+                derived["vine_reviews"] += item.get("vine") is True
+        if len(statuses) != int(summary.get("source_unique_asins") or -1):
+            raise ValueError("review status count does not match summary")
+        if review_count != int(summary.get("unique_reviews") or -1):
+            raise ValueError("review row count does not match summary")
+        for asin, status in status_by_asin.items():
+            if len(review_offsets.get(asin, [])) != status["fetched_unique_count"]:
+                raise ValueError("per-ASIN review count does not match status")
+
+        self.summary = summary
+        self.statuses = statuses
+        self.status_by_asin = status_by_asin
+        self.review_offsets = review_offsets
+        self.derived = derived
+        self.observed_at = datetime.fromtimestamp(
+            max((self.root / name).stat().st_mtime for name in self.REQUIRED_FILES), timezone.utc
+        ).isoformat()
+        self.availability = "available"
+        self.error_code = None
+
+    def load_overview(self) -> dict[str, Any]:
+        return {
+            "schema_version": "amazon-us-console-woot-reviews-v1",
+            "availability": self.availability,
+            "error_code": self.error_code,
+            "provider": "woot_reviews",
+            "source_type": "aggregate_files",
+            "tenant_id": self.tenant_id or None,
+            "observed_at": self.observed_at,
+            "manifest_verified": self.availability == "available",
+            "summary": dict(self.summary),
+            "derived": dict(self.derived),
+        }
+
+    @staticmethod
+    def _page(limit: int, offset: int) -> tuple[int, int]:
+        if limit < 1 or limit > 100:
+            raise ValueError("limit must be between 1 and 100")
+        if offset < 0 or offset > MAX_REVIEW_OFFSET:
+            raise ValueError(f"offset must be between 0 and {MAX_REVIEW_OFFSET}")
+        return limit, offset
+
+    def list_asins(
+        self,
+        *,
+        query: str | None = None,
+        coverage: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        limit, offset = self._page(limit, offset)
+        if self.availability != "available":
+            return {**self.load_overview(), "total": 0, "limit": limit, "offset": offset, "items": []}
+        if coverage and coverage not in self.COVERAGE_STATUSES:
+            raise ValueError("invalid coverage status")
+        term = str(query or "").strip().upper()
+        values = [
+            item for item in self.statuses
+            if (not term or term in item["asin"])
+            and (not coverage or item["coverage_status"] == coverage)
+        ]
+        return {
+            "schema_version": "amazon-us-console-woot-reviews-v1",
+            "availability": "available",
+            "total": len(values),
+            "limit": limit,
+            "offset": offset,
+            "items": values[offset:offset + limit],
+        }
+
+    def _read_asin(self, asin: str) -> list[dict[str, Any]]:
+        if self.root is None:
+            return []
+        rows = []
+        with (self.root / "reviews.jsonl").open("rb") as handle:
+            for offset in self.review_offsets.get(asin, []):
+                handle.seek(offset)
+                item = json.loads(handle.readline())
+                if str(item.get("asin") or "").upper() != asin:
+                    raise ValueError("review index ASIN mismatch")
+                rows.append(item)
+        return rows
+
+    def load_asin(
+        self,
+        asin: str,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        rating: int | None = None,
+        verified: bool | None = None,
+    ) -> dict[str, Any]:
+        limit, offset = self._page(limit, offset)
+        asin = str(asin or "").strip().upper()
+        if not ASIN_RE.fullmatch(asin):
+            raise ValueError("invalid ASIN")
+        if rating is not None and rating not in {1, 2, 3, 4, 5}:
+            raise ValueError("rating must be between 1 and 5")
+        if self.availability != "available":
+            return {**self.load_overview(), "asin": asin, "status": None, "total": 0, "limit": limit, "offset": offset, "next_offset": None, "items": []}
+        rows = self._read_asin(asin)
+        if rating is not None:
+            rows = [item for item in rows if item.get("rating") == rating]
+        if verified is not None:
+            rows = [item for item in rows if item.get("verified") is verified]
+        items = rows[offset:offset + limit]
+        next_offset = offset + len(items) if offset + len(items) < len(rows) else None
+        return {
+            "schema_version": "amazon-us-console-woot-reviews-v1",
+            "availability": "available",
+            "provider": "woot_reviews",
+            "asin": asin,
+            "status": self.status_by_asin.get(asin),
+            "total": len(rows),
+            "limit": limit,
+            "offset": offset,
+            "next_offset": next_offset,
+            "items": items,
+        }
+
+
 class ConsoleHandler(BaseHTTPRequestHandler):
     server: "ConsoleServer"
 
@@ -1233,6 +1793,20 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         scoped = repository.for_tenant(tenant_id)
         if scoped is None:
             raise ValueError("invalid tenant")
+        return scoped
+
+    def _scoped_review_repository(self, parsed):
+        repository = self.server.review_repository
+        if not hasattr(repository, "for_tenant"):
+            return repository
+        query = parse_qs(parsed.query)
+        tenant_id = str(query.get("tenant", [""])[0]).strip()
+        if not tenant_id:
+            identity = self.server.repository.load_identity()
+            tenant_id = str(identity.get("default_tenant_id") or identity.get("tenant_id") or "").strip()
+        scoped = repository.for_tenant(tenant_id)
+        if scoped is None:
+            raise ValueError("invalid review tenant")
         return scoped
 
     def _authorized(self) -> bool:
@@ -1293,6 +1867,44 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if not self._authorized():
             return
         try:
+            if path == "/api/reviews/overview":
+                review_repository = self._scoped_review_repository(parsed)
+                self._send_json(HTTPStatus.OK, review_repository.load_overview())
+                return
+            if path == "/api/reviews/items":
+                review_repository = self._scoped_review_repository(parsed)
+                query = parse_qs(parsed.query)
+                term = query.get("q", [""])[0].strip()[:100] or None
+                coverage = query.get("coverage", [""])[0].strip() or None
+                limit = int(query.get("limit", ["50"])[0])
+                offset = int(query.get("offset", ["0"])[0])
+                self._send_json(
+                    HTTPStatus.OK,
+                    review_repository.list_asins(
+                        query=term, coverage=coverage, limit=limit, offset=offset,
+                    ),
+                )
+                return
+            review_match = REVIEW_ITEM_PATH.fullmatch(path)
+            if review_match:
+                review_repository = self._scoped_review_repository(parsed)
+                asin = review_match.group(1).upper()
+                query = parse_qs(parsed.query)
+                limit = int(query.get("limit", ["20"])[0])
+                offset = int(query.get("offset", ["0"])[0])
+                rating_text = query.get("rating", [""])[0].strip()
+                rating = int(rating_text) if rating_text else None
+                verified_text = query.get("verified", [""])[0].strip().lower()
+                if verified_text not in {"", "true", "false"}:
+                    raise ValueError("verified must be true or false")
+                verified = None if not verified_text else verified_text == "true"
+                self._send_json(
+                    HTTPStatus.OK,
+                    review_repository.load_asin(
+                        asin, limit=limit, offset=offset, rating=rating, verified=verified,
+                    ),
+                )
+                return
             if path == "/api/tenants":
                 if hasattr(self.server.repository, "list_tenants"):
                     items = self.server.repository.list_tenants()
@@ -1418,6 +2030,7 @@ class ConsoleServer(ThreadingHTTPServer):
         *,
         raw_html_dir: Path | None = None,
         raw_tenant_id: str | None = None,
+        review_repository: Any | None = None,
         api_key: str = "",
         access_log: bool = False,
     ):
@@ -1425,6 +2038,7 @@ class ConsoleServer(ThreadingHTTPServer):
             raise ValueError("console only allows loopback host")
         super().__init__(address, ConsoleHandler)
         self.repository = repository
+        self.review_repository = review_repository or WootReviewConsoleRepository(None)
         self.raw_html_dir = raw_html_dir
         self.raw_tenant_id = str(raw_tenant_id or "").strip() or None
         if self.raw_tenant_id and not TENANT_RE.fullmatch(self.raw_tenant_id):
@@ -1442,6 +2056,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dsn-env", default="AMAZON_US_POSTGRES_DSN")
     parser.add_argument("--tenant-id", help="optional initial tenant; the UI can switch among PostgreSQL tenants")
     parser.add_argument("--raw-html-dir", type=Path)
+    parser.add_argument(
+        "--woot-review-dir",
+        type=Path,
+        default=Path(os.environ["WOOT_REVIEW_AGGREGATE_DIR"])
+        if os.environ.get("WOOT_REVIEW_AGGREGATE_DIR") else None,
+        help="verified Woot aggregate directory for read-only console views",
+    )
+    parser.add_argument(
+        "--review-source",
+        choices=("auto", "postgres", "files", "disabled"),
+        default="auto",
+        help="review data source; auto prefers amazon_reviews PostgreSQL and falls back to files",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8770)
     parser.add_argument("--api-key-env", default="AMAZON_COLLECTION_API_KEY")
@@ -1456,11 +2083,32 @@ def main(argv: list[str] | None = None) -> int:
         if args.require_api_key and not api_key:
             raise ValueError(f"required API key environment variable is missing: {args.api_key_env}")
         repository = PostgresConsoleRepository(dsn, args.tenant_id)
+        postgres_reviews = PostgresReviewConsoleRepository(dsn, args.tenant_id)
+        file_reviews = WootReviewConsoleRepository(args.woot_review_dir, args.tenant_id)
+        if args.review_source == "disabled":
+            review_repository = WootReviewConsoleRepository(None, args.tenant_id)
+        elif args.review_source == "files":
+            if args.woot_review_dir is None:
+                raise ValueError("--review-source files requires --woot-review-dir")
+            if not args.tenant_id:
+                raise ValueError("--review-source files requires --tenant-id to bind aggregate ownership")
+            review_repository = file_reviews
+        elif args.review_source == "postgres":
+            review_repository = postgres_reviews
+        else:
+            review_repository = (
+                postgres_reviews
+                if postgres_reviews.load_overview().get("availability") == "available"
+                else file_reviews
+                if args.woot_review_dir is not None and args.tenant_id
+                else postgres_reviews
+            )
         server = ConsoleServer(
             (args.host, args.port),
             repository,
             raw_html_dir=args.raw_html_dir,
             raw_tenant_id=args.tenant_id,
+            review_repository=review_repository,
             api_key=api_key,
             access_log=args.access_log,
         )

@@ -21,8 +21,9 @@ def load():
 class PreflightTests(unittest.TestCase):
     def test_configured_geckodriver_path_is_resolved_from_project_root(self):
         preflight = load()
-        relative_driver = Path("tools/geckodriver-v0.37.1/geckodriver.exe")
-        self.assertTrue((ROOT / relative_driver).exists(), "repository geckodriver fixture is required")
+        # This test verifies project-root resolution, not a local binary install.
+        # A clean checkout must not require the ignored geckodriver directory.
+        relative_driver = Path("scripts/preflight.py")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             manifest = root / "manifest.csv"
