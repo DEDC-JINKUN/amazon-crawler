@@ -36,7 +36,7 @@ def load_console():
 
 
 def test_console_startup_never_calls_historical_evidence_writer():
-    powershell = shutil.which('powershell') or shutil.which('powershell.exe')
+    powershell = shutil.which('pwsh') or shutil.which('pwsh.exe') or shutil.which('powershell') or shutil.which('powershell.exe')
     assert powershell
     script_path = str(SCRIPT).replace("'","''")
     command = rf'''
@@ -66,10 +66,11 @@ Write-Output $script:legacyWrites
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction fingerprint contract")
 def test_windows_junction_raw_fingerprint_matches_controller_lexical_path():
-    powershell = shutil.which("powershell") or shutil.which("powershell.exe")
+    powershell = shutil.which("pwsh") or shutil.which("pwsh.exe") or shutil.which("powershell") or shutil.which("powershell.exe")
     assert powershell is not None
     raw_link = ROOT / "data" / "owned_us_asin_20260902_full_01" / "raw_html"
-    assert raw_link.exists()
+    if not raw_link.exists():
+        pytest.skip("workspace raw junction fixture is not part of a clean checkout")
     lexical = Path(os.path.abspath(raw_link))
     physical = raw_link.resolve()
     if os.path.normcase(str(lexical)) == os.path.normcase(str(physical)):
@@ -253,7 +254,7 @@ def test_console_reuse_requires_verified_lock_and_matching_runtime_fingerprint()
 
 
 def test_controller_status_progress_and_final_projection_authenticate_to_loopback_console():
-    powershell = shutil.which("powershell") or shutil.which("powershell.exe")
+    powershell = shutil.which("pwsh") or shutil.which("pwsh.exe") or shutil.which("powershell") or shutil.which("powershell.exe")
     assert powershell is not None
     run = {
         "run_id": "run-control-observability", "requested_actions": 20, "recorded_actions": 10,
@@ -322,7 +323,7 @@ $final=Get-FinalRunSnapshot 'run-control-observability' 20 1
 
 
 def test_controller_projection_preserves_real_partial_blocked_counts_and_unknown_is_not_zero():
-    powershell = shutil.which("powershell") or shutil.which("powershell.exe")
+    powershell = shutil.which("pwsh") or shutil.which("pwsh.exe") or shutil.which("powershell") or shutil.which("powershell.exe")
     assert powershell is not None
     script_path = str(SCRIPT).replace("'", "''")
     command = rf"""
@@ -368,7 +369,7 @@ $observability=if(Get-Command Get-RunObservability -ErrorAction SilentlyContinue
 
 
 def test_probe_quality_function_requires_complete_successful_evidence():
-    powershell = shutil.which("powershell") or shutil.which("powershell.exe")
+    powershell = shutil.which("pwsh") or shutil.which("pwsh.exe") or shutil.which("powershell") or shutil.which("powershell.exe")
     assert powershell is not None
     script_path = str(SCRIPT).replace("'", "''")
     command = rf"""
@@ -424,7 +425,7 @@ $variantUnrequested = Test-ProbeRunQuality ([pscustomobject]@{{recorded_actions=
 
 
 def test_normal_run_completeness_requires_requested_evidence_but_allows_terminal_variants():
-    powershell = shutil.which("powershell") or shutil.which("powershell.exe")
+    powershell = shutil.which("pwsh") or shutil.which("pwsh.exe") or shutil.which("powershell") or shutil.which("powershell.exe")
     assert powershell is not None
     script_path = str(SCRIPT).replace("'", "''")
     command = rf"""
