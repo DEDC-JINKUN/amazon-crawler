@@ -1,0 +1,111 @@
+{
+  "schema_version": "amazon-integrated-source-manifest-v1",
+  "observed_at": "2026-09-15T14:31:00+08:00",
+  "status": "partial_read_only_inventory",
+  "target_repository": {
+    "path": "D:/woring/爬虫/Amazon Scraping",
+    "branch": "main",
+    "head": "2bef2598d4c9c25828e6f5469390ae5405b5d79a",
+    "company_remote": "https://github.com/DEDC-JINKUN/amazon-crawler.git",
+    "company_main": "08468db05ac0d49e89c650896bed582b2284821f",
+    "origin_remote": "git@github.com:T3L000/amazon-crawler.git",
+    "origin_main": "088bb24a9c1ca8704b3ec958983acd489dd2067b",
+    "ahead_of_origin_main": 42,
+    "working_tree_entry_count": 170,
+    "decision": "integration_branch_required_before_import"
+  },
+  "sources": [
+    {
+      "source_id": "pdp-reviewed-candidate",
+      "path": "D:/woring/爬虫/.worktrees/amazon-integrated-deploy",
+      "branch": "codex/multiworker-fix-20260913",
+      "head": "fc1a45ffdb81889449c8d2e13634bc282efcdf6f",
+      "remote": null,
+      "status": "reviewed_not_deployed_no_remote",
+      "decision": "port_reviewed_slices_only_do_not_merge_directory",
+      "files": [
+        {
+          "path": "scripts/woot_review_adapter.py",
+          "sha256": "20db91c0e3468d002e8559c3954600cdf2745218efaaf0d75c807ee5f8fe38c1",
+          "tracked": true,
+          "role": "experimental_single_page_adapter"
+        },
+        {
+          "path": "tests/test_woot_review_adapter.py",
+          "sha256": "0224a5e88a1e00be5a4ed5aad2ec54f21738fa703bfbe438bab35fb8b89ec46e",
+          "tracked": true,
+          "role": "offline_fail_closed_tests"
+        },
+        {
+          "path": "schema/migrations/20260915_external_metrics.sql",
+          "sha256": "1e4fdbce8063681f3c61f6d2cd86bc93f78467598b45a99e592b94dbf53789df",
+          "tracked": true,
+          "role": "external_metrics_and_review_source_columns"
+        }
+      ]
+    },
+    {
+      "source_id": "independent-woot-working-tree",
+      "path": "D:/woring/爬虫/Amazon Scraping",
+      "branch": "main",
+      "head": "2bef2598d4c9c25828e6f5469390ae5405b5d79a",
+      "status": "core_files_untracked_not_reproducible",
+      "decision": "audit_and_commit_as_bounded_slice",
+      "files": [
+        {"path": "scripts/woot_review_provider.py", "sha256": "49c88b1eac83fa4b834916e38aa1b9f6c16947444e02a53e458e2c33b956a2d1", "bytes": 26449, "tracked": false},
+        {"path": "scripts/woot_review_worker.py", "sha256": "6b5d512d35d6c920420704c1c37598a9044862b25f1cd5ed34c03ced107ab747", "bytes": 7166, "tracked": false},
+        {"path": "scripts/postgres_review_storage.py", "sha256": "713fe7e57e4bfac92f07a2669069e24402c362d594b8c12aedb38da85ae321fa", "bytes": 32151, "tracked": false},
+        {"path": "scripts/woot_review_batch.py", "sha256": "e462b885faeab10788bdbaf95ee5c4bd9e797cb1f8db60d314cb581f72c35b6e", "bytes": 16393, "tracked": false},
+        {"path": "scripts/woot_review_aggregate.py", "sha256": "080b2f326ab9e3df514b79b95e70eaea5de1ac9b1dddfca93532d0ac0fdace53", "bytes": 9446, "tracked": false},
+        {"path": "scripts/import_woot_reviews.py", "sha256": "e0cbb3b87e84b16f8faacf6ad148b76b42f03bd607ddf41ce7ad0f9fcda851fc", "bytes": 17927, "tracked": false},
+        {"path": "scripts/review_worker_status.py", "sha256": "2b9840096e8ccfbcd406388a25ced2d2d11855c0f74a1fcd3bc529d558f1dfdb", "bytes": 4303, "tracked": false},
+        {"path": "scripts/review_database_identity.py", "sha256": "d30db6bf4ad289b4d7af0f20eb53e2aaae7adf542e6a3286448f1f2248b67c68", "bytes": 808, "tracked": false},
+        {"path": "schema/migrations/20260914_woot_reviews.sql", "sha256": "531637a94c77a6b105a39a380b1d3d2308e04463ef8031434deec19925217bb4", "bytes": 10200, "tracked": false},
+        {"path": "tests/test_woot_review_provider.py", "sha256": "2d73f3c19712bdb6587bfafa373b54683994ce804c703d755c37ce82a5835655", "bytes": 16006, "tracked": false},
+        {"path": "tests/test_woot_review_worker.py", "sha256": "3db749d9653a55fecec5269462b03898bba15294d72316148bb80a6bbf94ef23", "bytes": 16793, "tracked": false},
+        {"path": "tests/test_woot_review_postgres.py", "sha256": "ee521a4a7c3dc0d7e541365854adcee345f2dcb8ed14b5c3580f1c7b011c607b", "bytes": 6641, "tracked": false},
+        {"path": "tests/test_console_woot_reviews.py", "sha256": "d1eabdcf5d065185673baf8faa42e2c9450723c9ec4bd575a9cc7dec97239286", "bytes": 8813, "tracked": false},
+        {"path": "docs/woot_review_provider.md", "sha256": "692acfe1c3911bca281be4555b8fa54788c51b37d6b398d54a62ece3d82d0b25", "bytes": 5045, "tracked": false},
+        {"path": "docs/woot_review_postgres.md", "sha256": "4126a03f92494326e143240f73c30ffaf9e774ed13e33a20b9d9329bf09d7441", "bytes": 5185, "tracked": false}
+      ]
+    },
+    {
+      "source_id": "cloud-v5-audit-copy",
+      "path": "D:/woring/爬虫/outputs/cloud-deployment-20260909/candidate",
+      "release": "1.0.0-cloud.20260909.5",
+      "reported_source_commit": "3ed283d",
+      "release_manifest_sha256": "0aebf6ef9e91828dd8951731f4a2b96fb57ba8bfd40137b41ba8b5399ee02e22",
+      "status": "audit_artifact_not_git_source",
+      "contains_woot_core": false,
+      "decision": "reconcile_hashes_only_do_not_copy_without_git_provenance"
+    },
+    {
+      "source_id": "windows-production-release",
+      "path": "D:/woring/爬虫/deploy/amazon-collection/releases/28d62ce",
+      "collection_pointer": "28d62ce",
+      "operator_pointer": "28d62ce",
+      "status": "deployed_runtime_http_unresponsive_at_observation",
+      "contains_woot_core": false,
+      "decision": "read_only_reference_not_source_branch"
+    }
+  ],
+  "excluded_patterns": [
+    "outputs/**",
+    "data/**",
+    "state/**",
+    ".test-tmp/**",
+    "**/__pycache__/**",
+    "**/.pytest_cache/**",
+    "*.env",
+    "*.dump",
+    "credentials",
+    "real_asin_manifests"
+  ],
+  "unknowns": [
+    "No local Git ref for cloud v5 was found.",
+    "The 170 working-tree entries in Amazon Scraping have not yet been classified one by one.",
+    "The independent Woot files have not yet received their own clean-branch review.",
+    "Cloud runtime and production database contents were not accessed during this inventory."
+  ],
+  "next_action": "create_clean_integration_worktree_from_target_repository_then_port_only_manifest_approved_slices"
+}

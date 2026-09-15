@@ -142,6 +142,10 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 | PG套件默认临时目录ACL/长路径失败 | 2 | 改用仓库内短`--basetemp`重跑，排除Windows夹具目录假失败。 |
 | 浏览器预算旧测试与核心分层/局部终态语义不一致 | 1 | 显式标记`own_core`；局部240次预算耗尽只终结该商品并返回批次处理数2；租约失效场景补`half_open=true`，三分支通过。 |
 | 完整非PG套件连续两轮在Console 405处WinError 10053 | 2 | 根因是不支持的PUT/DELETE未读取小请求体；增加固定0.25秒/1MiB有界drain，同一loopback测试连续20/20及最终全套777项通过。 |
+| neat-freak自带`audit-inventory.sh`无法运行 | 1 | 本机没有WSL/bash；改用PowerShell与`rg --files`等价盘点Markdown、规则链、Git状态和关键文件体量。 |
+| 组合运行态探针命令被策略拒绝 | 1 | 移除动态临时文件函数与清理，拆成pointer、任务和三个简单`curl --max-time 5`只读探针。 |
+| 递归hash盘点遇到pytest/data ACL拒绝 | 1 | 不遍历运行目录；改用source manifest明确allowlist逐文件计算SHA256，并排除`data/outputs/.test-tmp/__pycache__`。 |
+| PowerShell `foreach`结果直接接管道出现empty pipe parser error | 1 | 先收集到任务专用`$rows`数组，再单独序列化；未产生文件写入。 |
 
 ## 2026-09-15 全量运行阻断修复
 
@@ -174,3 +178,13 @@ R3 顺序：隔离 PG 门禁 → 独立 diff review → 不可变 release/回滚
 - [complete] Phase 6：Woot仅作`source=woot_ajax`实验适配器；403/非JSON失败、稳定复合键、门禁未过不进生产。
 - [in_progress] Phase 7：全套非PG、隔离PG、性能基准、独立review与固定20-ASIN显式业务门禁；首轮独立review的4个P1已修复并通过777项非PG、29项Operator PG、57项恢复/Worker/指标PG组合证据，待同一reviewer delta复核后才允许live门禁。
 - [pending] Phase 8：制作可回滚release；只恢复同一campaign，不创建新全量campaign。
+
+## 2026-09-15 综合采集平台 Goal 重置
+
+用户将《PDP与独立评论融合上线及操作手册》并入目标。独立source map证明PDP恢复仓、公司Git、独立Woot和云端v5工件不在同一可发布分支，故原单体目标拆为四个顺序 Goal，权威文本见[`docs/integrated_collection_program_goal_20260915.md`](docs/integrated_collection_program_goal_20260915.md)。
+
+- [in_progress] Goal 1：只做源码归一与可重建基线；当前建立source manifest、tracked核心文件审计和clean rebuild边界，不开发新API、不访问生产、不启动Worker。
+- [pending] Goal 2：评论只读API、历史数据隔离导入演练与统一ASIN只读投影。
+- [pending] Goal 3：Review Campaign、graceful stop、统一analysis_run编排与权限矩阵。
+- [pending] Goal 4：分阶段生产发布、原1093 campaign固定20 pending成员cohort门禁、达标后恢复剩余成员。
+- [blocked-control-plane] Codex旧PDP效率Goal仍为active且未完成，工具不允许代理覆盖；用户需在Goal控制界面停止旧Goal后，才能将Goal 1登记为新的active Goal。该控制面限制不阻塞共同的只读盘点。

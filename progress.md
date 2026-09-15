@@ -123,3 +123,5 @@
 - Phase 5完成：非核心own/competitor cadence红绿改为168小时；新增外部销量批次/指标/竞品映射迁移和CLI，纯解析1 passed、隔离PG导入幂等/冲突/分层2 passed并fast shutdown。Phase 6离线适配器5项红绿通过，Woot仍未接生产、未发真实请求。
 - Phase 7第一轮门禁：完整非PG 774 passed/58 skipped；Operator专用PG 29 passed。Recovery/Campaign/External metrics/Postgres Worker组合43项中42 passed，Agent E2E在Worker startup race得到预期503；测试显式等待running，并把readiness从静态满3条改为每Worker至少1条、实际批次动态缩放后，Agent单元53 passed、E2E定点1 passed。待组合PG复跑和独立review。
 - Phase 7独立review的4个P1已完成修复：Worker readiness重新覆盖每进程真实3条预约；external metric batch并发串行与多owner确定性继承；Operator active只轮询summary、终态分页并对分页失败留安全回执。定向74 passed；Console 405 loopback连续20/20；完整非PG 777 passed/59 skipped；外部指标PG 3 passed，Operator PG 29 passed，恢复/Worker/Campaign/指标等PG组合57 passed；compileall与diff check通过，所有测试PostgreSQL已关闭。待冻结delta并交同一reviewer复核。
+- `fc1a45f`已由原reviewer delta复核，4个P1全部关闭、无新P0/P1、CONTINUE。用户随后用融合手册扩大目标；初稿经source map进一步编译为四个顺序Goal并从Goal 1只读source manifest重新开始。14:28生产pointer仍`28d62ce`、计划任务显示Running，但8765/8770与Collection MCP超时；未重启或修改生产。
+- 综合Goal经独立source map由三段优化为四段，Goal 1只做源码归一。新增可验证Goal合同、初始JSON source manifest并同步交接；确认15个Woot核心文件在`Amazon Scraping`均untracked、PDP恢复仓无remote、云端v5只有审计工件。旧Goal控制面仍active，未越权创建integration分支或启动服务。

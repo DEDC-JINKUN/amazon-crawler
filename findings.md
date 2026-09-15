@@ -129,3 +129,8 @@
 - 外部指标在读取批次前按`tenant+batch_id`取得事务级advisory lock；并发相同文件一写一重放，并发不同文件同批次一写一`ExternalMetricBatchConflict`。竞品继承先按竞品聚合`bool_or(owner core)`，任一owner核心即确定性核心。
 - Operator客户端默认summary；实际HTTP Runner连续active轮询只请求无成员汇总，终态才以100条分页读取成员。分页数量不完整或持续失败会写脱敏`campaign_members_fetch_failed`回执，避免无回执崩溃。
 - 复审修复后证据：74项Agent/Client/Operator定向通过；外部指标并发3项真实PG通过；Console 405真实loopback连续20/20；完整非PG 777 passed/59 skipped；全新UTF-8本地集群Operator 29 passed；恢复/Worker/Campaign/External Metrics等组合57 passed。所有55444实例均fast shutdown。
+- 用户将PDP、独立评论、统一编排和分阶段上线手册并入目标。独立source map后按不同回滚边界拆成四个顺序Goal：源码统一、评论只读、Review Campaign+analysis_run编排、生产发布+原campaign固定20成员门禁。20条门禁新增明确cohort seam，避免“从原campaign选20条”却让Worker任意领取其余成员的歧义。
+- 14:28新鲜只读运行态：Collection/Operator pointer均为`28d62ce`，两项计划任务显示Running；8765 health/ready、8770 health均5秒0字节超时，Collection MCP capability/status均`backend_unavailable`。没有重启、生产DB访问、campaign submit/cancel或Worker启动。
+- Codex旧PDP效率Goal仍active且未完成，控制面不允许代理覆盖。新的Goal 1已写入`docs/integrated_collection_program_goal_20260915.md`，在用户界面停止旧Goal前只推进两者共同的只读source manifest工作。
+- 独立source map确认四个事实源分离：PDP恢复仓`fc1a45f`无remote；目标公司仓`Amazon Scraping`为`main@2bef259`、比`origin/main`超前42提交且有170项工作区变化；15个独立Woot核心文件全部untracked；云端v5仅有`release.json`/部署回执审计副本而无本地Git ref。不能整体目录合并。
+- 初始机器清单已写入`docs/source_manifest_20260915.json`，记录两个Git基线、15个Woot核心文件SHA256/字节数、PDP实验adapter、云端v5 manifest和生产pointer，并明确排除运行数据、缓存、凭据与真实清单。状态仍为`partial_read_only_inventory`，下一步需在新Goal控制面下创建clean integration worktree。
